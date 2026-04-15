@@ -1,0 +1,36 @@
+# 보안 시크릿 (최우선 차단)
+.env*
+*.secret*
+*credential*
+*token*
+*.pem
+*.key
+*.p12
+*.pfx
+session_*
+client_secret_*.json
+credentials.json
+token.json
+
+# Kubernetes 관련 민감 정보
+kubeconfig
+kubeconfig.*
+*.kubeconfig
+secrets.yaml
+*-secret.yaml
+
+# macOS
+.DS_Store
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# 빌드/테스트 산출물
+node_modules/
+__pycache__/
+*.pyc
+dist/
+build/
