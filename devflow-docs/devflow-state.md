@@ -4,7 +4,7 @@
 INCEPTION
 
 ## Current Stage
-pre-planning (requirements-analysis complete)
+workflow-planning
 
 ## Complexity
 Comprehensive
@@ -16,6 +16,9 @@ Comprehensive
 - [x] workspace-detection (Greenfield, scaffolding only)
 - [x] brainstorming (side-skill, v0.1.0 scope locked — JVM stack only)
 - [x] requirements-analysis (Comprehensive; 60 F-*, 17 NFR-*, 13 assumptions, 0 open questions)
+- [x] user-stories (22 stories: Must 17, Should 4, Could 1; 4 actors; 8 tech requirements)
+- [x] nfr-requirements (GENERATE, 개발자 도구/CLI + MVP, 17 NFR항목, 2건 조정)
+- [x] workflow-planning (3 approaches 생성, 사용자 선택 대기 중)
 
 ## Key Decisions
 - Greenfield workspace confirmed. Existing artifacts: README, plugin.json, LICENSE, .gitignore only.

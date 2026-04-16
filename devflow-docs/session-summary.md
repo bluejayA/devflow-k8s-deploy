@@ -2,10 +2,10 @@
 
 ## Current State
 - **Phase**: INCEPTION
-- **Stage**: pre-planning (requirements-analysis 완료, user-stories 대기)
+- **Stage**: workflow-planning (접근법 선택 대기)
 - **Complexity**: Comprehensive
-- **Commit**: 12df7c2
-- **Session paused**: 2026-04-16
+- **Commit**: f963b7b
+- **Session paused**: 2026-04-17
 
 ## Completed Work
 
@@ -13,6 +13,9 @@
 - [x] workspace-detection — Greenfield, scaffolding only (README / plugin.json / LICENSE / .gitignore)
 - [x] brainstorming (side-skill) — v0.1.0 scope locked: JVM-only backend, 13 design axes decided
 - [x] requirements-analysis — Comprehensive. 60 F-*, 17 NFR-*, 13 assumptions, 0 open questions, 8 risks. Jinja2 + container engine auto-detect (docker/podman/nerdctl) 결정
+- [x] user-stories — 22개 스토리 (Must 17, Should 4, Could 1), 4 액터 (JVM 개발자, 조직 관리자, CI/CD 파이프라인, 시스템), 기술 요구사항 8건 별도
+- [x] nfr-requirements — GENERATE 모드, 도메인: 개발자 도구/CLI, 프로파일: MVP. 17 NFR, 2건 조정 (테스트 커버리지 완화)
+- [x] workflow-planning — 3 접근법 생성 (A: 설계 우선(권장), B: 유닛 직행, C: 빠른 구현). 사용자 A/B/C 선택 대기
 
 ## Key Decisions
 
@@ -32,14 +35,14 @@
 
 ## Next Steps
 
-- **user-stories** 스테이지 (Comprehensive → 자동 포함)
-- **nfr-requirements** 스테이지
-- **workflow-planning** → **application-design**
+- **workflow-planning 접근법 선택** (A/B/C 중 선택)
+- 선택 후 개발 환경 설정 (worktree 또는 현재 브랜치)
+- **application-design** 스테이지 (A안 선택 시)
 - 이후 CONSTRUCTION phase 전환
 
 ## For Next Session
 
 - "devflow 재개해줘"로 시작하면 `devflow-state.md`에서 자동 복원
-- INCEPTION 남은 스테이지: user-stories → nfr-requirements → workflow-planning → application-design
-- Codex adversarial review 15건 반영 완료, v0.2 연기 6건은 backlog.md에 추가 필요 (향후)
+- workflow-planning 접근법 선택 대기 중: A) 설계 우선(권장) / B) 유닛 직행 / C) 빠른 구현
 - 확장성 5가지 제약(F-90~F-94)은 application-design에서 구체 인터페이스 설계 필요
+- Codex adversarial review v0.2 연기 6건은 backlog.md에 추가 필요 (향후)
