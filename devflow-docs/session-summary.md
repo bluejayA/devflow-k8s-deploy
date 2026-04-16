@@ -2,9 +2,10 @@
 
 ## Current State
 - **Phase**: INCEPTION
-- **Stage**: requirements-analysis (about to start)
+- **Stage**: pre-planning (requirements-analysis 완료, user-stories 대기)
 - **Complexity**: Comprehensive
-- **Commit**: 84f112c
+- **Commit**: 12df7c2
+- **Session paused**: 2026-04-16
 
 ## Completed Work
 
@@ -31,6 +32,14 @@
 
 ## Next Steps
 
-- requirements-analysis: convert brainstorming decisions into structured user requirements + Acceptance Criteria
-- Pre-Planning (auto-included for Comprehensive): user-stories + nfr-requirements
-- workflow-planning → application-design
+- **user-stories** 스테이지 (Comprehensive → 자동 포함)
+- **nfr-requirements** 스테이지
+- **workflow-planning** → **application-design**
+- 이후 CONSTRUCTION phase 전환
+
+## For Next Session
+
+- "devflow 재개해줘"로 시작하면 `devflow-state.md`에서 자동 복원
+- INCEPTION 남은 스테이지: user-stories → nfr-requirements → workflow-planning → application-design
+- Codex adversarial review 15건 반영 완료, v0.2 연기 6건은 backlog.md에 추가 필요 (향후)
+- 확장성 5가지 제약(F-90~F-94)은 application-design에서 구체 인터페이스 설계 필요
