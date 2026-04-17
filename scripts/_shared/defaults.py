@@ -2,12 +2,13 @@
 ConfigLoader가 프로젝트/조직 설정 위에 이 값을 fallback으로 사용한다."""
 
 import copy
+from typing import Any
 
 # ─── 내장 기본값 ───
 # 주석: namespace=None — 'default' 자동 배정 금지 (F-70/F-71).
 #       ConfigLoader.resolve_namespace()에서 프로젝트명 제안.
 
-BUILTIN_DEFAULTS: dict = {
+BUILTIN_DEFAULTS: dict[str, Any] = {
     "stack": "auto",
     "namespace": None,  # resolve_namespace에서 프로젝트명 제안. 'default' 자동 배정 금지
     "output": {
@@ -30,7 +31,7 @@ BUILTIN_DEFAULTS: dict = {
 }
 
 
-def load_builtin_defaults() -> dict:
+def load_builtin_defaults() -> dict[str, Any]:
     """BUILTIN_DEFAULTS의 깊은 복사본을 반환.
     호출 측이 반환값을 수정해도 원본에 영향 없음."""
     return copy.deepcopy(BUILTIN_DEFAULTS)

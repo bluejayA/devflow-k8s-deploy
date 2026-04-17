@@ -4,7 +4,7 @@
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Generic, Literal, TypeVar
+from typing import Any, Generic, Literal, TypeVar
 
 T = TypeVar("T")
 
@@ -15,7 +15,7 @@ T = TypeVar("T")
 class ResolvedConfig:
     """ConfigLoader.load() 결과."""
 
-    raw: dict  # 병합된 dict
+    raw: dict[str, Any]  # 병합된 dict
     source_map: dict[str, str]  # 키 경로 → 출처 레이어
     warnings: list[str] = field(default_factory=list)
 
@@ -248,6 +248,16 @@ class RetryAttempt(Generic[T]):
     fix_outcome: FixOutcome | None  # 이 attempt 직후 fix_attempt 결과 (마지막 attempt면 None)
 
 
+@dataclass
+class RetryResult(Generic[T]):
+    """retry_with_fix() 반환 구조체."""
+
+    success: bool  # 마지막 attempt가 success_predicate True
+    final_result: T | None  # 마지막 성공 결과 (실패 시 마지막 attempt의 result)
+    attempts: list[RetryAttempt[T]]  # 전체 시도 로그 (troubleshoot.md 입력)
+    bailout: bool  # True면 max_attempts 초과 또는 fix_outcome.applied=False
+
+
 # ─── 패키징 ───
 
 
@@ -262,14 +272,20 @@ class PackagingResult:
 
 @dataclass(frozen=True)
 class BailOutContext:
-    """OutputPackager.write_troubleshoot() 입력."""
+    """OutputPackager.write_troubleshoot() 입력.
+
+    주의: `en_detail`과 `attempts_log[*].error`는 subprocess stderr 원문을 담을 수 있어
+    민감정보(kubeconfig 경로, 토큰)가 흘러갈 위험이 있다.
+    troubleshoot.md로 직렬화하는 책임은 OutputPackager unit에 있으며,
+    그 시점에 redact를 반드시 적용한다.
+    """
 
     step_number: int  # 4 (검증 게이트에서 bail)
     step_name_ko: str  # 'STEP 4 정적 검증'
     component_ko: str  # 'K8s 검증기'
     ko_summary: str  # 한국어 1-2줄
     en_detail: str
-    attempts_log: list  # _shared/retry.RetryAttempt 리스트
+    attempts_log: list[RetryAttempt[Any]]  # _shared/types.RetryAttempt 리스트
 
 
 # ─── 프롬프트 콜백 (UI 추상화) ───

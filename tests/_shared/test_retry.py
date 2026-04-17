@@ -141,7 +141,7 @@ def test_operation_exception_passed_to_fix_attempt() -> None:
     def operation() -> int:
         raise error_raised
 
-    def fix_attempt(arg: int | Exception) -> FixOutcome:
+    def fix_attempt(arg: int | Exception | None) -> FixOutcome:
         if isinstance(arg, Exception):
             received_by_fix.append(arg)
         return FixOutcome(applied=False, summary_ko="예외 수신 확인")
@@ -158,3 +158,71 @@ def test_operation_exception_passed_to_fix_attempt() -> None:
     # attempt의 error 필드에 예외 기록
     assert result.attempts[0].error is error_raised
     assert result.attempts[0].result is None
+
+
+def test_user_abort_propagates_immediately() -> None:
+    """케이스 7: UserAbort를 raise하는 operation은 fix_attempt 호출 없이 즉시 예외 전파."""
+    from scripts._shared.errors import UserAbort
+    from scripts._shared.retry import retry_with_fix
+    from scripts._shared.types import FixOutcome
+
+    fix_mock = MagicMock(return_value=FixOutcome(applied=True, summary_ko="호출 안 돼야 함"))
+    abort_error = UserAbort("사용자가 취소했습니다")
+
+    def operation() -> int:
+        raise abort_error
+
+    with pytest.raises(UserAbort) as exc_info:
+        retry_with_fix(
+            operation,
+            fix_mock,
+            success_predicate=lambda r: True,
+        )
+
+    assert exc_info.value is abort_error
+    fix_mock.assert_not_called()
+
+
+def test_keyboard_interrupt_propagates_immediately() -> None:
+    """케이스 8: KeyboardInterrupt는 fix_attempt 호출 없이 즉시 전파."""
+    from scripts._shared.retry import retry_with_fix
+    from scripts._shared.types import FixOutcome
+
+    fix_mock = MagicMock(return_value=FixOutcome(applied=True, summary_ko="호출 안 돼야 함"))
+
+    def operation() -> int:
+        raise KeyboardInterrupt
+
+    with pytest.raises(KeyboardInterrupt):
+        retry_with_fix(
+            operation,
+            fix_mock,
+            success_predicate=lambda r: True,
+        )
+
+    fix_mock.assert_not_called()
+
+
+def test_fix_attempt_receives_none_when_operation_returns_none_and_fails() -> None:
+    """케이스 9: operation None 반환 + success_predicate(None)=False 시 fix_attempt에 None 전달."""
+    from scripts._shared.retry import retry_with_fix
+    from scripts._shared.types import FixOutcome
+
+    received_by_fix: list[object] = []
+
+    def operation() -> None:
+        return None
+
+    def fix_attempt(arg: None | Exception | None) -> FixOutcome:
+        received_by_fix.append(arg)
+        return FixOutcome(applied=False, summary_ko="None 수신 확인")
+
+    result = retry_with_fix(
+        operation,
+        fix_attempt,
+        success_predicate=lambda r: r is not None,
+    )
+
+    assert result.success is False
+    assert len(received_by_fix) >= 1
+    assert received_by_fix[0] is None
