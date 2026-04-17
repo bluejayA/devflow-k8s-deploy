@@ -1,7 +1,7 @@
 # Workflow Plan
 
 **Timestamp**: 2026-04-17T00:10:00+09:00
-**Selected Approach**: TBD (오케스트레이터 gate에서 사용자 선택 후 업데이트)
+**Selected Approach**: A안 (설계 우선) — 2026-04-17 사용자 승인
 
 ---
 
@@ -70,3 +70,4 @@ CONSTRUCTION
 ## Change Log
 
 - 2026-04-17T00:10:00+09:00 — 최초 생성. 3개 접근법 (A: 설계 우선, B: 유닛 직행, C: 빠른 구현). A안 권장
+- 2026-04-17 — 사용자가 A안(설계 우선) 선택. application-design(Comprehensive, NFR Design 활성) → units-generation(Standard) → code-generation(Standard, TDD) → build-and-test(Standard) 확정

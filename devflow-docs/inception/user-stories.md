@@ -15,14 +15,17 @@
 ## Stories
 
 ### US-001: 배포 정보 구조적 수집
-**Actor**: JVM 개발자
-**Story**: As a JVM 개발자, I want 앱명·포트·노출 방식·namespace 등 배포 정보를 구조적으로 입력하고 싶다 so that 스킬이 정확한 K8s 아티팩트를 생성할 수 있다
+**Actor**: JVM 개발자 / AI-assisted 개발자
+**Story**: As a 개발자(JVM 숙련도 무관), I want 앱명·포트·노출 방식·namespace 등 배포 정보를 **K8s 원어 없이 한국어로** 구조적으로 입력하고 싶다 so that 스킬이 정확한 K8s 아티팩트를 생성하면서도 비전문가도 이해할 수 있다
 **Acceptance Criteria**:
 - Given 스킬이 STEP 1을 시작할 때, When 사용자에게 입력을 요청하면, Then 앱명 / 노출 포트 / 노출 방식(ClusterIP|NodePort|LoadBalancer) / namespace / 출력 디렉토리 / 리소스 프로파일 힌트를 수집한다
 - Given NodePort 또는 LoadBalancer를 선택했을 때, When 서비스 타입을 확정하면, Then 해당 타입의 제약사항(nodePort 명시 권장 / 클라우드 프로바이더 전제)을 안내한다
 - Given 설정 파일에 값이 이미 있을 때, When STEP 1을 시작하면, Then 설정값을 기본값으로 제안하고 사용자 확인을 받는다
+- Given STEP 1 질문 문구를 확인할 때, When K8s/Spring 원어(ClusterIP, namespace 등)가 포함되는 경우, Then 사용자 의도 기반 한국어 질문으로 번역되어 있다 (예: "노출 방식?" → "어디서 접속할 건가요?")
+- Given 각 STEP 1 질문에서, When 사용자가 "? 도움말" 옵션을 선택하면, Then 1-2줄 설명(한국어 + 원어 병기)이 표시된 뒤 원 질문으로 복귀한다
+- Given 용어 번역 매핑이 적용된 후, When rationale.md를 확인하면, Then 각 결정값의 원어(ClusterIP 등)가 함께 기록되어 감사 추적이 가능하다
 **Priority**: Must
-**Traces**: F-02, F-36
+**Traces**: F-02, F-02a, F-02b, F-36
 
 ### US-002: JVM 프로젝트 자동 분석
 **Actor**: JVM 개발자
@@ -99,14 +102,16 @@
 **Priority**: Must
 **Traces**: F-05, F-51, F-56
 
-### US-009: 검증 실패 자동 수정 루프
-**Actor**: 시스템
-**Story**: As a 시스템, I want 검증 실패 시 자동으로 수정을 시도하고 싶다 so that 사용자 개입 없이 대부분의 검증 문제를 해결할 수 있다
+### US-009: 검증 실패 자동 수정 루프 + 비개발자 친화 bail-out
+**Actor**: 시스템 / JVM 개발자 / AI-assisted 개발자
+**Story**: As a 시스템 + 사용자, I want 검증 실패 시 자동으로 수정을 시도하고, 실패하면 비개발자도 다음 행동을 알 수 있는 한국어 요약을 받고 싶다 so that 대부분의 문제는 자동 해결되고, 막히는 경우에도 원어 로그를 읽지 않아도 된다
 **Acceptance Criteria**:
 - Given validate_k8s.py 또는 kubectl dry-run이 실패할 때, When 자동 수정 루프에 진입하면, Then 수정안 생성 → 재검증을 최대 3회 반복한다
 - Given 3회 시도 후에도 실패할 때, When bail-out하면, Then 현재 상태 보존 + k8s-output/troubleshoot.md에 전체 시도 로그 저장 + 사용자에게 수동 개입 요청
+- Given troubleshoot.md를 생성할 때, When 상단 섹션을 확인하면, Then "어느 STEP / 어느 컴포넌트 / 무슨 이유로 실패" 한국어 1-2줄 요약이 포함되어 있다
+- Given 실패 메시지를 출력할 때, When 사용자 대면 텍스트를 확인하면, Then 한국어 요약 + 원문(영문) 병기 형식이다 (NFR-17 정책)
 **Priority**: Must
-**Traces**: F-50, F-51, F-52
+**Traces**: F-50, F-51, F-52, NFR-17
 
 ### US-010: 3계층 설정 관리
 **Actor**: 조직 관리자
@@ -133,8 +138,8 @@
 **Story**: As a JVM 개발자, I want 생성물과 판단 근거가 단일 디렉토리에 패키징되길 원한다 so that 팀 리뷰와 감사 추적이 용이하다
 **Acceptance Criteria**:
 - Given STEP 5가 실행될 때, When 출력 파일을 패키징하면, Then k8s-output/에 Dockerfile, deployment.yaml, service.yaml, serviceaccount.yaml, rationale.md, summary.json이 생성된다
-- Given summary.json을 생성할 때, When 스키마를 따르면, Then version/generated_at(UTC)/stack/app/images/namespace/validation/files 필드가 포함된다
-- Given rationale.md를 생성할 때, When 섹션을 구성하면, Then 감지 스택 / 진입점 / 포트 / 상태성 / 베이스 이미지 / 리소스 / namespace / probe / 검증 결과 / 경고 목록 섹션이 포함된다
+- Given summary.json을 생성할 때, When 스키마를 따르면, Then version/generated_at(UTC)/stack/app/images/namespace/validation/files 필드가 포함되며, **validation 객체에 `skipped: [string]` 필드를 포함하여 스킵된 검증(예: kubectl_dry_run, container_build)을 기계 판독 가능 형태로 노출**한다
+- Given rationale.md를 생성할 때, When 섹션을 구성하면, Then 감지 스택 / 진입점 / 포트 / 상태성 / 베이스 이미지 / 리소스 / namespace / probe / 검증 결과 / 경고 목록 / **스킵된 검증 목록과 사유** 섹션이 포함된다
 **Priority**: Must
 **Traces**: F-06, F-80, F-81, F-82, F-83
 
@@ -180,14 +185,16 @@
 **Traces**: F-01, F-07, F-08
 
 ### US-017: CI/CD 파이프라인 연동 계약
-**Actor**: CI/CD 파이프라인
-**Story**: As a CI/CD 파이프라인, I want summary.json 스키마와 exit code 계약이 안정적으로 유지되길 원한다 so that 자동화 파이프라인이 깨지지 않는다
+**Actor**: CI/CD 파이프라인 / CI 엔지니어
+**Story**: As a CI/CD 파이프라인 + CI 엔지니어, I want summary.json 스키마와 exit code 계약이 안정적이고, set -e 환경에서도 안전하게 호출 가능하길 원한다 so that 자동화 파이프라인이 깨지지 않고 degraded success를 "전부 통과"로 오인하지 않는다
 **Acceptance Criteria**:
 - Given summary.json 스키마를 확인할 때, When v0.1.x 패치에서 변경이 있으면, Then 필드 제거/타입 변경 없이 하위호환을 유지한다
 - Given exit code를 소비할 때, When 결과를 판단하면, Then 0=성공, 1=실패, 2=경고만(soft-success, continue 처리)으로 해석한다
+- Given README와 summary.json 스펙 문서를 확인할 때, When exit code 2 처리 가이드를 찾으면, Then 쉘 호출 예제(`&& [ $? -le 2 ]` 또는 `\|\| [ $? -eq 2 ]`)와 set -e 호환 경고가 명시되어 있다
 - Given --json 플래그로 실행할 때, When validate_k8s.py 결과를 확인하면, Then summary.json에 포함 가능한 JSON 형태로 stdout에 출력한다
+- Given degraded success(kubectl 또는 빌드 엔진 미감지)가 발생할 때, When summary.json을 확인하면, Then validation.skipped 배열에 스킵된 검증 식별자가 기록되어 CI가 "전부 통과"로 오인하지 못한다
 **Priority**: Must
-**Traces**: F-42, F-47, F-83, F-101, NFR-06
+**Traces**: F-42, F-47, F-56, F-58, F-83, F-101, NFR-06, NFR-PLG-02
 
 ### US-018: Container image build (opt-in)
 **Actor**: JVM 개발자
@@ -256,3 +263,5 @@
 ## Change Log
 
 - 2026-04-16T10:00:00+09:00 — 최초 생성. 22개 스토리 (Must: 17, Should: 4, Could: 1) + 기술 요구사항 8건
+- 2026-04-17 — US-001 확장: 비개발자/AI-assisted 개발자 사용성 반영 (F-02a 용어 번역 + F-02b 도움말). Actor 범위 확장 "JVM 개발자 / AI-assisted 개발자".
+- 2026-04-17 (3-페르소나 + Codex 리뷰 반영) — US-009 확장(troubleshoot.md 한국어 요약, NFR-17 메시지 정책 트레이스), US-012 확장(summary.json validation.skipped 필드 + rationale.md 스킵 섹션), US-017 확장(exit code 2 소비자 가이드 + degraded skipped 계약, Actor에 CI 엔지니어 추가).

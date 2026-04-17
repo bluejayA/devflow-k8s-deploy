@@ -15,6 +15,7 @@
 | 보안 (생성물 품질) | NFR-SEC-02 | 생성된 manifest에 평문 시크릿 포함 금지 | env[].value 시크릿 패턴 0건 | SEC-009 규칙. Secret 참조(valueFrom.secretKeyRef)만 허용 |
 | 보안 (경계 준수) | NFR-SEC-03 | 컨테이너 push / kubectl apply(dry-run 외) / cluster API 호출 0건 | 통합 테스트로 검증 | 생성 전용 도구의 존재 이유. 경계 위반은 치명적 |
 | 보안 (네트워크) | NFR-SEC-04 | 허용 외부 호출: 컨테이너 레지스트리 + 선언된 의존성 레포지토리만 | 그 외 네트워크 호출 0건 | 오프라인 동작 가능해야 함 (캐시 존재 시) |
+| 보안 (경계 엔포스먼트) | NFR-SEC-05 | 통합 테스트가 금지 CLI 호출(`docker push` / `podman push` / `nerdctl push` / `kubectl apply`(`--dry-run=client` 외) / `kubectl create/delete/replace/rollout/scale/edit/patch`)을 호출하면 테스트 실패 | `subprocess.Popen`/`subprocess.run` 패치 픽스처(`cli_allowlist_guard`, autouse=True). shell=True 차단 + argv 리스트 강제 + 인젝션 토큰(;, &&, \|, `, $(, > 등) 차단 + 정확한 토큰 위치 매칭 | NFR-SEC-03(생성 전용 경계)의 회귀 방지 — 런타임 가드는 추가하지 않음 (오버엔지니어링). 자기 보안 검증 우회 방지가 목적 |
 | 테스트 신뢰성 | NFR-TEST-01 | pytest 커버리지: validate_k8s.py ≥ 70% | pytest --cov 출력 | MVP 완화 기준. v0.2+에서 85%로 상향 검토 |
 | 테스트 신뢰성 | NFR-TEST-02 | pytest 커버리지: 스택 추론 모듈 ≥ 60% | pytest --cov 출력 | MVP 완화 기준. v0.2+에서 75%로 상향 검토 |
 | 테스트 신뢰성 | NFR-TEST-03 | CI 실행 10회 연속 성공률 100% | flaky 테스트 0건 | 결정론적 도구는 flaky 허용 불가 |
@@ -33,13 +34,14 @@
 
 ## 카테고리별 상세
 
-### 1. 보안 (생성물 품질 + 경계 준수)
+### 1. 보안 (생성물 품질 + 경계 준수 + 경계 엔포스먼트)
 
-이 프로젝트에서 "보안"은 두 축:
+이 프로젝트에서 "보안"은 세 축:
 - **생성물 보안**: 만들어내는 K8s manifest/Dockerfile의 보안 품질 (NFR-SEC-01, NFR-SEC-02)
 - **도구 경계**: 도구 자체가 위험한 행위를 하지 않음 (NFR-SEC-03, NFR-SEC-04)
+- **경계 회귀 방지**: 통합 테스트로 금지 CLI 호출 자동 감지 (NFR-SEC-05)
 
-MVP에서도 양쪽 모두 타협 불가. "시니어 엔지니어의 판단력을 인코딩"이 프로젝트 존재 이유.
+MVP에서도 모두 타협 불가. "시니어 엔지니어의 판단력을 인코딩"이 프로젝트 존재 이유.
 
 ### 2. 테스트 신뢰성
 
@@ -111,3 +113,4 @@ degraded success 패턴:
 ## Change Log
 
 - 2026-04-17T00:00:00+09:00 — 최초 생성. GENERATE 모드. 도메인: 개발자 도구/CLI, 프로파일: MVP. 17개 NFR 항목, 2건 조정 (테스트 커버리지 완화)
+- 2026-04-17 (DETAIL 외부 검토 반영) — NFR-SEC-05 추가 (경계 엔포스먼트 CI 감지 테스트). NFR 항목 17 → 18. 보안 카테고리 설명 3축으로 확대.

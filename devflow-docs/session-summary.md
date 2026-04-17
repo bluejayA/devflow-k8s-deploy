@@ -2,10 +2,10 @@
 
 ## Current State
 - **Phase**: INCEPTION
-- **Stage**: workflow-planning (접근법 선택 대기)
+- **Stage**: application-design DETAIL 완료 (INCEPTION 종료 게이트)
 - **Complexity**: Comprehensive
-- **Commit**: f963b7b
-- **Session paused**: 2026-04-17
+- **Commit**: f951748 (이후 변경 미커밋)
+- **Session continued**: 2026-04-17
 
 ## Completed Work
 
@@ -15,7 +15,8 @@
 - [x] requirements-analysis — Comprehensive. 60 F-*, 17 NFR-*, 13 assumptions, 0 open questions, 8 risks. Jinja2 + container engine auto-detect (docker/podman/nerdctl) 결정
 - [x] user-stories — 22개 스토리 (Must 17, Should 4, Could 1), 4 액터 (JVM 개발자, 조직 관리자, CI/CD 파이프라인, 시스템), 기술 요구사항 8건 별도
 - [x] nfr-requirements — GENERATE 모드, 도메인: 개발자 도구/CLI, 프로파일: MVP. 17 NFR, 2건 조정 (테스트 커버리지 완화)
-- [x] workflow-planning — 3 접근법 생성 (A: 설계 우선(권장), B: 유닛 직행, C: 빠른 구현). 사용자 A/B/C 선택 대기
+- [x] workflow-planning — 3 접근법 생성. 사용자 **A안(설계 우선) 선택** (2026-04-17)
+- [x] application-design — **DETAIL 완료 + 외부 검토 8건 반영** (Comprehensive). 12개 컴포넌트 상세 설계 + 5-STEP ASCII 시퀀스 다이어그램 + 보조 산출물 7종(도움말 카탈로그 10개 step 라벨, retry.py 시그니처 강화, NFR-SEC-05 allowlist 보안 강화, types.py 카탈로그, SkillPipeline 서브유닛 매핑, AtomicWriter prompt 콜백, 테스트 경계 매트릭스). **spec-reviewer + Codex 두 리뷰 모두 GO 상태.** INCEPTION 종료 게이트 대기 중
 
 ## Key Decisions
 
@@ -35,14 +36,16 @@
 
 ## Next Steps
 
-- **workflow-planning 접근법 선택** (A/B/C 중 선택)
-- 선택 후 개발 환경 설정 (worktree 또는 현재 브랜치)
-- **application-design** 스테이지 (A안 선택 시)
-- 이후 CONSTRUCTION phase 전환
+- **INCEPTION 종료 게이트** (사용자 결정)
+  - A) DETAIL 산출물 그대로 INCEPTION 종료 → CONSTRUCTION phase 진입 (units-generation → code-generation TDD → build-and-test)
+  - B) DETAIL에 대해 spec-reviewer + Codex 외부 검토 1회 → 반영 후 INCEPTION 종료
+  - C) DETAIL 추가 수정 지시
+- INCEPTION 종료 직후 commit + 브랜치 전략 결정 (worktree vs 현재 main)
 
 ## For Next Session
 
 - "devflow 재개해줘"로 시작하면 `devflow-state.md`에서 자동 복원
-- workflow-planning 접근법 선택 대기 중: A) 설계 우선(권장) / B) 유닛 직행 / C) 빠른 구현
-- 확장성 5가지 제약(F-90~F-94)은 application-design에서 구체 인터페이스 설계 필요
-- Codex adversarial review v0.2 연기 6건은 backlog.md에 추가 필요 (향후)
+- 현재 상태: application-design DETAIL 완료, INCEPTION 종료 게이트
+- INCEPTION 산출물: workspace.md / brainstorming(side-skill) / requirements.md(73 F-* / 18 NFR) / user-stories.md(22 stories) / nfr-requirements.md / workflow-plan.md / application-design.md(12 components + DETAIL)
+- v0.2+ 백로그는 `application-design.md`의 "v0.2+ 백로그" 섹션에 통합 기록 (별도 backlog.md 불필요)
+- CONSTRUCTION 진입 시 첫 스테이지: units-generation (Standard depth) — 12개 컴포넌트를 unit으로 분해 + 의존성 순서
