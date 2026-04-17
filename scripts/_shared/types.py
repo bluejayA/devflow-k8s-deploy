@@ -1,0 +1,290 @@
+"""DETAIL 단계의 모든 컴포넌트가 공유하는 데이터 모델.
+모두 frozen dataclass 또는 Protocol. 변경은 INCEPTION 후속 변경관리 절차로."""
+
+from collections.abc import Callable
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Generic, Literal, TypeVar
+
+T = TypeVar("T")
+
+# ─── 설정 / 입력 ───
+
+
+@dataclass(frozen=True)
+class ResolvedConfig:
+    """ConfigLoader.load() 결과."""
+
+    raw: dict  # 병합된 dict
+    source_map: dict[str, str]  # 키 경로 → 출처 레이어
+    warnings: list[str] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class NamespaceResolution:
+    """ConfigLoader.resolve_namespace() 결과."""
+
+    value: str
+    source: Literal["project_config", "org_config", "user_input", "project_dir", "default"]
+    requires_confirmation: bool  # 'default' 명시 선택 시 True
+
+
+@dataclass(frozen=True)
+class StackDecision:
+    """ConfigLoader.stack_decision() 결과."""
+
+    forced_stack: str | None  # 'jvm' / 'go' / None (auto)
+    source: str  # 'project_config' / 'org_config' / 'auto'
+
+
+@dataclass(frozen=True)
+class UserInputs:
+    """STEP 1에서 수집한 사용자 입력."""
+
+    app_name: str
+    port: int
+    exposure: Literal["ClusterIP", "NodePort", "LoadBalancer"]
+    namespace: str
+    output_dir: Path
+    resource_hint: Literal["small", "medium", "large"]
+
+
+# ─── 분석 ───
+
+
+@dataclass(frozen=True)
+class StackDetectResult:
+    """StackModule.detect() 결과."""
+
+    port: int | None
+    entrypoint: str
+    framework: str  # 'spring-boot' / 'ktor' / 'micronaut' / 'jvm-generic'
+    version: str | None  # Spring Boot 등 버전
+
+
+@dataclass(frozen=True)
+class BuildPlan:
+    """StackModule.build_plan() 결과."""
+
+    builder_image: str
+    runner_image: str
+    build_cmd: str
+    artifact_path: str
+    # v0.2+ 일반화 예정: stages: list[Stage]
+
+
+@dataclass(frozen=True)
+class ProbeSpec:
+    """단일 probe 스펙 (http 또는 tcp)."""
+
+    kind: Literal["http", "tcp"]
+    path: str | None  # http일 때만
+    port: int
+
+
+@dataclass(frozen=True)
+class ProbeConfig:
+    """liveness/readiness probe 쌍."""
+
+    liveness: ProbeSpec
+    readiness: ProbeSpec
+
+
+@dataclass(frozen=True)
+class ResourceDefaults:
+    """StackModule.defaults() 결과 — 리소스 기본값."""
+
+    cpu_request: str
+    memory_request: str
+    cpu_limit: str
+    memory_limit: str
+    writable_paths: list[str]  # ['/tmp', '/var/log']
+
+
+@dataclass(frozen=True)
+class ModuleInfo:
+    """multi-module 프로젝트의 개별 모듈 정보."""
+
+    name: str
+    path: Path
+    is_likely_app: bool  # '-api', '-web', '-server' 패턴 매칭
+
+
+@dataclass(frozen=True)
+class StatefulnessSignal:
+    """상태성 감지 결과 + 신뢰도."""
+
+    is_stateful: bool
+    confidence: Literal["high", "medium", "low"]
+    reasons: list[str]  # 한국어 사유
+
+
+@dataclass(frozen=True)
+class AnalysisResult:
+    """ProjectAnalyzer.analyze() 최종 결과."""
+
+    stack: str  # 'jvm'
+    detect_result: StackDetectResult
+    build_plan: BuildPlan
+    probe_config: ProbeConfig
+    defaults: ResourceDefaults
+    artifact_paths: list[Path]
+    selected_module: ModuleInfo | None
+    statefulness: StatefulnessSignal
+    gaps: list[str]  # 추론 실패 항목
+
+
+# ─── 도움말 ───
+
+
+@dataclass(frozen=True)
+class HelpEntry:
+    """HelpCatalog 항목 — 비개발자 한국어 설명."""
+
+    term_id: str
+    ko_short: str
+    ko_detail: str
+    original: str
+    example: str
+    step: Literal[1, 2, "config"]
+
+
+# ─── 생성 ───
+
+
+@dataclass(frozen=True)
+class GeneratedArtifacts:
+    """STEP 3 생성 결과물 경로."""
+
+    dockerfile_path: Path
+    manifest_paths: list[Path]  # deployment/service/serviceaccount
+
+
+# ─── 검증 ───
+
+
+@dataclass(frozen=True)
+class CheckResult:
+    """K8sValidator 단일 규칙 결과."""
+
+    rule_id: str  # 'SEC-001' 등
+    level: Literal["PASS", "WARN", "FAIL"]
+    container: str
+    message_ko: str
+    message_en: str
+    suggestion: str
+
+
+@dataclass(frozen=True)
+class ValidationReport:
+    """K8sValidator.validate() 결과."""
+
+    results: list[CheckResult]
+    counts: dict[Literal["pass", "warn", "fail"], int]
+    exit_code: int  # 0 / 1 / 2
+    skipped: list[str]  # CLI --skipped 인자 통과값
+
+
+@dataclass(frozen=True)
+class DryRunResult:
+    """KubectlDryRunner.dry_run() 결과. F-56 degraded 시 None 필드."""
+
+    success: bool
+    stdout: str | None
+    stderr: str | None
+    exit_code: int | None
+    skipped: bool  # True면 미설치
+    skip_reason_ko: str | None
+
+
+@dataclass(frozen=True)
+class BuildResult:
+    """ContainerBuildRunner.build() 결과."""
+
+    success: bool
+    image_ref: str | None  # repository:tag (성공 시)
+    engine: Literal["docker", "podman", "nerdctl"] | None
+    skipped: bool
+    skip_reason_ko: str | None
+
+
+@dataclass
+class ValidationOutcome:
+    """SkillPipeline.step4_validate_gate() 결과 — STEP 5로 pass-through."""
+
+    k8s_report: ValidationReport
+    dry_run: DryRunResult | None
+    build: BuildResult | None
+    skipped: list[str]  # ['kubectl_dry_run', 'container_build']
+    skip_reasons: dict[str, str]  # 식별자 → 한국어 사유
+    bailed: bool
+
+
+# ─── 재시도 ───
+
+
+@dataclass(frozen=True)
+class FixOutcome:
+    """fix_attempt() 반환 구조체.
+
+    applied: 이번 attempt 이전에 수정이 실제로 적용됐는가
+             (False면 다음 attempt 안 함 — 즉시 bailout)
+    summary_ko: 수정 내용 한국어 요약. troubleshoot.md attempts 로그에 사용.
+                applied=False여도 사유를 한국어로 기록 (예: '수정안 생성 실패')
+    """
+
+    applied: bool
+    summary_ko: str | None
+
+
+@dataclass
+class RetryAttempt(Generic[T]):
+    """단일 재시도 attempt 기록."""
+
+    attempt_number: int  # 1-based
+    result: T | None  # operation 반환값 (예외 시 None)
+    error: Exception | None  # operation 예외 (성공 시 None)
+    success: bool  # success_predicate 결과
+    fix_outcome: FixOutcome | None  # 이 attempt 직후 fix_attempt 결과 (마지막 attempt면 None)
+
+
+# ─── 패키징 ───
+
+
+@dataclass(frozen=True)
+class PackagingResult:
+    """OutputPackager.write() 결과."""
+
+    final_dir: Path
+    files_written: list[str]
+    troubleshoot_written: bool
+
+
+@dataclass(frozen=True)
+class BailOutContext:
+    """OutputPackager.write_troubleshoot() 입력."""
+
+    step_number: int  # 4 (검증 게이트에서 bail)
+    step_name_ko: str  # 'STEP 4 정적 검증'
+    component_ko: str  # 'K8s 검증기'
+    ko_summary: str  # 한국어 1-2줄
+    en_detail: str
+    attempts_log: list  # _shared/retry.RetryAttempt 리스트
+
+
+# ─── 프롬프트 콜백 (UI 추상화) ───
+
+
+@dataclass(frozen=True)
+class PromptRequest:
+    """prompt_callback에 전달되는 요청 구조체."""
+
+    kind: Literal["question", "confirm", "select"]
+    ko_text: str  # 한국어 질문
+    options: list[str] | None  # select일 때
+    help_term_id: str | None  # "? 도움말" 옵션 활성화 시 HelpCatalog 키
+
+
+PromptCallback = Callable[["PromptRequest"], str]
+"""SkillPipeline에서 ProjectAnalyzer/AtomicWriter에 주입.
+None이면 자동 모드 (테스트성)."""
