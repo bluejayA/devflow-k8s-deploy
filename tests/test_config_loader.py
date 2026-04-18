@@ -386,3 +386,185 @@ class TestStackDecision:
 
         assert result.source == "org_config"
         assert result.forced_stack == "jvm"
+
+
+# ---------------------------------------------------------------------------
+# 4. Important 2: OSError 구분 — PermissionError는 warnings로
+# ---------------------------------------------------------------------------
+
+
+class TestOSErrorHandling:
+    def test_permission_error_records_warning(self, tmp_path: Path) -> None:
+        """PermissionError → warnings에 한국어 메시지 기록 (파일명 포함, 절대경로 비포함)."""
+        import unittest.mock as mock
+
+        proj_dir = tmp_path / "proj"
+        proj_dir.mkdir()
+        config_path = proj_dir / ".devflow-k8s-deploy.yml"
+        config_path.write_text("namespace: proj-ns\n", encoding="utf-8")
+
+        loader = _loader_with_org(None)
+
+        def raise_permission(*args: Any, **kwargs: Any) -> str:
+            raise PermissionError("Permission denied")
+
+        # config_loader는 `from scripts._shared.fileio import read_text_limited`로 임포트
+        # 하므로 패치 대상은 config_loader 모듈 내 이름
+        with mock.patch("scripts.config_loader.read_text_limited", side_effect=raise_permission):
+            result = loader.load(proj_dir)
+
+        # PermissionError는 warnings에 기록됨
+        assert len(result.warnings) >= 1
+        assert any("프로젝트" in w for w in result.warnings)
+        # 절대 경로 미포함, 파일명만
+        assert any(".devflow-k8s-deploy.yml" in w for w in result.warnings)
+        assert not any(str(tmp_path) in w for w in result.warnings)
+
+    def test_file_not_found_is_silent(self, tmp_path: Path) -> None:
+        """FileNotFoundError(파일 없음)는 warnings 없이 조용히 처리."""
+        proj_dir = tmp_path / "proj-absent"
+        # config 파일 없이 디렉토리만 존재
+        proj_dir.mkdir()
+
+        loader = _loader_with_org(None)
+        result = loader.load(proj_dir)
+
+        assert result.warnings == []
+        assert result.raw["stack"] == "auto"
+
+
+# ---------------------------------------------------------------------------
+# 5. Important 3: layer_raws 필드 — resolve_namespace 재파싱 제거 검증
+# ---------------------------------------------------------------------------
+
+
+class TestLayerRaws:
+    def test_load_returns_layer_raws(self, tmp_path: Path) -> None:
+        """load() 결과에 layer_raws가 계층별 원본 dict를 담는다."""
+        org_path = _make_org_config(tmp_path / "org", {"stack": "jvm", "namespace": "org-ns"})
+        proj_dir = _make_project_config(tmp_path / "proj", {"namespace": "proj-ns"})
+
+        loader = _loader_with_org(org_path)
+        result = loader.load(proj_dir)
+
+        assert "project_config" in result.layer_raws
+        assert "org_config" in result.layer_raws
+        assert "builtin_default" in result.layer_raws
+        assert result.layer_raws["project_config"]["namespace"] == "proj-ns"
+        assert result.layer_raws["org_config"]["stack"] == "jvm"
+
+    def test_resolve_namespace_uses_layer_raws_no_reparse(self, tmp_path: Path) -> None:
+        """resolve_namespace가 layer_raws를 사용 — 파일 삭제 후에도 올바른 값 반환."""
+        proj_dir = _make_project_config(tmp_path / "proj", {"namespace": "cached-ns"})
+
+        loader = _loader_with_org(None)
+        config = loader.load(proj_dir)
+
+        # 파일 삭제 후 resolve_namespace 호출 → layer_raws에서 조회하므로 성공
+        (proj_dir / ".devflow-k8s-deploy.yml").unlink()
+        result = loader.resolve_namespace(config, user_input=None, project_dir=proj_dir)
+
+        assert result.value == "cached-ns"
+        assert result.source == "project_config"
+
+
+# ---------------------------------------------------------------------------
+# 6. Important 4: YAML bomb 방어
+# ---------------------------------------------------------------------------
+
+
+class TestYamlBombDefense:
+    def test_yaml_bomb_rejected_with_warning(self, tmp_path: Path) -> None:
+        """17개 anchor/alias 포함 YAML → warnings에 한국어 메시지 + 해당 계층 무시."""
+        proj_dir = tmp_path / "proj"
+        proj_dir.mkdir()
+
+        # 17개 anchor 포함 YAML (bomb 방어 임계값 16 초과)
+        anchors = "\n".join(f"anchor_{i}: &anchor_{i} value_{i}" for i in range(17))
+        yaml_content = f"{anchors}\nnamespace: bomb-ns\n"
+        (proj_dir / ".devflow-k8s-deploy.yml").write_text(yaml_content, encoding="utf-8")
+
+        loader = _loader_with_org(None)
+        result = loader.load(proj_dir)
+
+        # bomb 감지 → warnings에 기록
+        assert len(result.warnings) >= 1
+        assert any(
+            "anchor" in w.lower() or "bomb" in w.lower() or "과다" in w
+            for w in result.warnings
+        )
+        # 해당 계층 무시 → builtin 기본값 사용
+        assert result.raw["namespace"] is None or result.raw.get("namespace") != "bomb-ns"
+
+    def test_yaml_within_limit_not_rejected(self, tmp_path: Path) -> None:
+        """16개 이하 anchor → 정상 파싱."""
+        proj_dir = tmp_path / "proj"
+        proj_dir.mkdir()
+
+        anchors = "\n".join(f"anchor_{i}: &anchor_{i} value_{i}" for i in range(16))
+        yaml_content = f"{anchors}\nnamespace: safe-ns\n"
+        (proj_dir / ".devflow-k8s-deploy.yml").write_text(yaml_content, encoding="utf-8")
+
+        loader = _loader_with_org(None)
+        result = loader.load(proj_dir)
+
+        assert result.raw.get("namespace") == "safe-ns"
+        # bomb 관련 경고 없음
+        assert not any("과다" in w or "bomb" in w.lower() for w in result.warnings)
+
+
+# ---------------------------------------------------------------------------
+# 7. Important 5: Symlink escape 방어
+# ---------------------------------------------------------------------------
+
+
+class TestSymlinkDefense:
+    def test_project_config_symlink_outside_rejected(self, tmp_path: Path) -> None:
+        """project config symlink가 project_dir 외부를 가리키면 거부 + 한국어 warning."""
+        # 외부 파일 생성
+        external_dir = tmp_path / "external"
+        external_dir.mkdir()
+        external_file = external_dir / "secret.yml"
+        external_file.write_text("namespace: leaked-ns\n", encoding="utf-8")
+
+        # project_dir에 symlink 생성
+        proj_dir = tmp_path / "proj"
+        proj_dir.mkdir()
+        symlink_path = proj_dir / ".devflow-k8s-deploy.yml"
+        symlink_path.symlink_to(external_file)
+
+        loader = _loader_with_org(None)
+        result = loader.load(proj_dir)
+
+        # symlink escape → 거부, builtin 기본값 사용
+        assert result.raw.get("namespace") != "leaked-ns"
+        # warnings에 기록
+        assert len(result.warnings) >= 1
+        assert any(
+            "프로젝트" in w and ("밖" in w or "symlink" in w.lower() or "심볼릭" in w)
+            for w in result.warnings
+        )
+
+    def test_org_config_symlink_recorded_only(self, tmp_path: Path) -> None:
+        """org config symlink는 로드 성공, warnings에만 기록."""
+        # 실제 config 파일 생성
+        real_dir = tmp_path / "real"
+        real_dir.mkdir()
+        real_file = real_dir / "org.yml"
+        real_file.write_text("namespace: org-symlink-ns\n", encoding="utf-8")
+
+        # org config를 symlink로 설정
+        symlink_org = tmp_path / "org-link.yml"
+        symlink_org.symlink_to(real_file)
+
+        proj_dir = tmp_path / "proj"
+        proj_dir.mkdir()
+
+        loader = ConfigLoader(org_config_path=symlink_org)
+        result = loader.load(proj_dir)
+
+        # 로드 성공 — namespace 반영됨
+        assert result.raw.get("namespace") == "org-symlink-ns"
+        # 심볼릭 링크 경고 기록
+        assert len(result.warnings) >= 1
+        assert any("심볼릭" in w or "symlink" in w.lower() for w in result.warnings)
