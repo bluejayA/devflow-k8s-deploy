@@ -15,24 +15,29 @@ Spring Boot 버전 추출:
 
 actuator 감지:
   - spring-boot-starter-actuator 의존성 존재
-  - AND application(-{profile}).yml/properties에 management.endpoints.web.exposure.include에
-    'health' 포함 (또는 '*' 와일드카드)
+  - AND (
+      application(-{profile}).yml/properties에 management.endpoints.web.exposure.include에
+      'health' 포함 (또는 '*' 와일드카드)
+      OR Boot 3.x는 include 미설정 시에도 기본 health 노출로 활성화
+    )
 
-빌드 시스템 인코딩:
-  detect()에서 entrypoint 필드에 'build_system:{gradle|maven};actuator:{true|false}' 형식으로
-  저장한다. probe_plan/build_plan/artifact_locator에서 이 값을 파싱해 사용한다.
+빌드 시스템/actuator:
+  detect()에서 StackDetectResult.build_system / .actuator_enabled 필드에 직접 저장.
+  probe_plan / build_plan / artifact_locator에서 이 필드를 직접 참조한다.
 """
 
 from __future__ import annotations
 
 import re
-import xml.etree.ElementTree as ET
+import xml.etree.ElementTree as StdET
 from pathlib import Path
-from typing import ClassVar
+from typing import ClassVar, Literal
 
 import yaml
+from defusedxml import ElementTree as ET
 
 from scripts._shared.errors import JvmDetectionError
+from scripts._shared.fileio import is_within, read_text_limited
 from scripts._shared.types import (
     BuildPlan,
     ProbeConfig,
@@ -71,7 +76,7 @@ _ACTUATOR_RE = re.compile(r"spring-boot-starter-actuator")
 _MVN_NS = "http://maven.apache.org/POM/4.0.0"
 
 
-def _mvn_find(element: ET.Element, tag: str) -> ET.Element | None:
+def _mvn_find(element: StdET.Element, tag: str) -> StdET.Element | None:
     """ET.Element에서 namespace 포함/미포함 두 가지 방식으로 child 탐색.
 
     ET.Element의 bool()은 자식 유무 기반이므로 'or' 연산자 대신 이 함수 사용.
@@ -90,10 +95,8 @@ def _mvn_find(element: ET.Element, tag: str) -> ET.Element | None:
 class JvmStackModule:
     """JVM 스택 모듈 (StackModule Protocol 구현체).
 
-    StackDetectResult.entrypoint 필드를 내부 마커로 활용한다:
-      "build_system:{gradle|maven};actuator:{true|false}"
-    이 인코딩 덕분에 probe_plan / build_plan / artifact_locator가
-    project_dir 재접근 없이 detect() 결과만으로 동작한다.
+    detect() 결과의 build_system / actuator_enabled 필드를
+    probe_plan / build_plan / artifact_locator에서 직접 참조한다.
     """
 
     name: ClassVar[str] = "jvm"
@@ -116,24 +119,20 @@ class JvmStackModule:
 
         framework, version = self._detect_framework_and_version(build_files)
         port = self._detect_port(project_dir)
-        build_system = self._detect_build_system(build_files)
+        build_system: Literal["gradle", "maven"] = self._detect_build_system(build_files)
 
         # actuator 감지 (Spring Boot 프로젝트일 때만)
-        actuator_detected = False
+        actuator_enabled = False
         if framework == "spring-boot":
-            actuator_detected = self._detect_actuator(project_dir)
-
-        # entrypoint 필드에 빌드 시스템 + actuator 플래그 인코딩
-        entrypoint = (
-            f"build_system:{build_system};"
-            f"actuator:{'true' if actuator_detected else 'false'}"
-        )
+            actuator_enabled = self._detect_actuator(project_dir, version)
 
         return StackDetectResult(
             port=port,
-            entrypoint=entrypoint,
+            entrypoint="",
             framework=framework,
             version=version,
+            build_system=build_system,
+            actuator_enabled=actuator_enabled,
         )
 
     def build_plan(self, detect_result: StackDetectResult) -> BuildPlan:
@@ -143,14 +142,14 @@ class JvmStackModule:
           - Maven: "mvn package"
           - Gradle: "gradle bootJar"
         """
-        is_maven = self._is_maven(detect_result)
+        maven = detect_result.build_system == "maven"
         jdk_version = _DEFAULT_JDK_VERSION
 
         return BuildPlan(
             builder_image=f"eclipse-temurin:{jdk_version}-jdk-alpine",
             runner_image=f"eclipse-temurin:{jdk_version}-jre-alpine",
-            build_cmd="mvn package" if is_maven else "gradle bootJar",
-            artifact_path="target/*.jar" if is_maven else "build/libs/*.jar",
+            build_cmd="mvn package" if maven else "gradle bootJar",
+            artifact_path="target/*.jar" if maven else "build/libs/*.jar",
         )
 
     def probe_plan(self, detect_result: StackDetectResult) -> ProbeConfig:
@@ -165,8 +164,7 @@ class JvmStackModule:
         if detect_result.framework != "spring-boot":
             return self._tcp_probe_config(port)
 
-        actuator_active = self._parse_actuator_flag(detect_result.entrypoint)
-        if not actuator_active:
+        if not detect_result.actuator_enabled:
             return self._tcp_probe_config(port)
 
         version = detect_result.version or ""
@@ -206,23 +204,25 @@ class JvmStackModule:
         Gradle: build/libs/*.jar — plain jar 제외, fat jar 우선
         Maven:  target/*.jar — original- prefix 제외 시 spring-boot 산출물 우선
         """
-        if self._is_maven(detect_result):
+        if detect_result.build_system == "maven":
             return self._locate_maven_jars(project_dir)
         return self._locate_gradle_jars(project_dir)
 
     # ── 내부 헬퍼: 빌드 파일 탐색 ─────────────────────────────────────────────
 
     def _find_build_files(self, project_dir: Path) -> list[Path]:
-        """판별 우선순위에 따라 존재하는 빌드 파일 반환."""
+        """판별 우선순위에 따라 존재하는 빌드 파일 반환 (symlink escape 방어)."""
         candidates = [
             project_dir / "build.gradle.kts",
             project_dir / "build.gradle",
             project_dir / "pom.xml",
         ]
-        return [f for f in candidates if f.exists()]
+        return [
+            f for f in candidates if f.exists() and is_within(project_dir, f)
+        ]
 
     @staticmethod
-    def _detect_build_system(build_files: list[Path]) -> str:
+    def _detect_build_system(build_files: list[Path]) -> Literal["gradle", "maven"]:
         """빌드 파일 목록에서 gradle 또는 maven 판별."""
         for build_file in build_files:
             if build_file.name == "pom.xml":
@@ -234,7 +234,11 @@ class JvmStackModule:
     def _detect_framework_and_version(
         self, build_files: list[Path]
     ) -> tuple[str, str | None]:
-        """build 파일들로부터 framework + version 반환."""
+        """build 파일들로부터 framework + version 반환.
+
+        Raises:
+            JvmDetectionError: Gradle 빌드 파일 읽기 실패 시.
+        """
         # Spring Boot 우선
         boot_version = self._detect_boot_version(build_files)
         if boot_version:
@@ -243,8 +247,12 @@ class JvmStackModule:
         # Spring Boot 버전 없어도 spring-boot 문자열이 있으면 spring-boot
         for build_file in build_files:
             try:
-                content = build_file.read_text(encoding="utf-8")
-            except OSError:
+                content = read_text_limited(build_file)
+            except (OSError, UnicodeDecodeError) as exc:
+                if build_file.name != "pom.xml":
+                    raise JvmDetectionError(
+                        f"Gradle 빌드 파일 파싱 실패: {build_file.name}: {exc}"
+                    ) from exc
                 continue
             if "spring-boot" in content.lower() or "springframework.boot" in content:
                 return ("spring-boot", None)
@@ -254,17 +262,23 @@ class JvmStackModule:
             if build_file.name == "pom.xml":
                 continue
             try:
-                content = build_file.read_text(encoding="utf-8")
-            except OSError:
-                continue
+                content = read_text_limited(build_file)
+            except (OSError, UnicodeDecodeError) as exc:
+                raise JvmDetectionError(
+                    f"Gradle 빌드 파일 파싱 실패: {build_file.name}: {exc}"
+                ) from exc
             if _KTOR_RE.search(content):
                 return ("ktor", None)
 
         # Micronaut
         for build_file in build_files:
             try:
-                content = build_file.read_text(encoding="utf-8")
-            except OSError:
+                content = read_text_limited(build_file)
+            except (OSError, UnicodeDecodeError) as exc:
+                if build_file.name != "pom.xml":
+                    raise JvmDetectionError(
+                        f"Gradle 빌드 파일 파싱 실패: {build_file.name}: {exc}"
+                    ) from exc
                 continue
             if _MICRONAUT_RE.search(content):
                 return ("micronaut", None)
@@ -276,11 +290,18 @@ class JvmStackModule:
 
         Gradle: spring-boot plugin 버전 또는 starter 의존성 버전
         Maven:  spring-boot-starter-parent <version>
+
+        Raises:
+            JvmDetectionError: Gradle 빌드 파일 읽기 실패 시.
         """
         for build_file in build_files:
             try:
-                content = build_file.read_text(encoding="utf-8")
-            except OSError:
+                content = read_text_limited(build_file)
+            except (OSError, UnicodeDecodeError) as exc:
+                if build_file.name != "pom.xml":
+                    raise JvmDetectionError(
+                        f"Gradle 빌드 파일 파싱 실패: {build_file.name}: {exc}"
+                    ) from exc
                 continue
 
             if build_file.name == "pom.xml":
@@ -298,21 +319,22 @@ class JvmStackModule:
 
         return None
 
-    def _detect_actuator(self, project_dir: Path) -> bool:
+    def _detect_actuator(self, project_dir: Path, version: str | None) -> bool:
         """actuator 활성화 여부.
 
         조건:
           1. build 파일에 spring-boot-starter-actuator 의존성 존재
-          2. application(-{profile}).yml/properties에
-             management.endpoints.web.exposure.include에 'health' 또는 '*' 포함
+          2-a. application(-{profile}).yml/properties에
+               management.endpoints.web.exposure.include에 'health' 또는 '*' 포함
+          2-b. 또는 Boot 3.x인 경우 include 미설정이어도 기본 health 노출 (Minor 9)
         """
         build_files = self._find_build_files(project_dir)
         has_actuator_dep = False
 
         for build_file in build_files:
             try:
-                content = build_file.read_text(encoding="utf-8")
-            except OSError:
+                content = read_text_limited(build_file)
+            except (OSError, UnicodeDecodeError):
                 continue
             if build_file.name == "pom.xml":
                 if self._maven_has_actuator(content):
@@ -326,7 +348,12 @@ class JvmStackModule:
             return False
 
         # management.endpoints.web.exposure.include 에 health 포함 여부
-        return self._check_management_exposure(project_dir)
+        if self._check_management_exposure(project_dir):
+            return True
+
+        # Minor 9: Boot 3.x는 include 미설정이어도 기본 health 노출
+        major = self._parse_major_version(version or "")
+        return major >= 3
 
     def _detect_port(self, project_dir: Path) -> int:
         """포트 추론 (F-12 우선순위).
@@ -342,11 +369,15 @@ class JvmStackModule:
 
         # 1. profile 파일 먼저 검색 (application-*.yml / application-*.properties)
         for yml_file in sorted(resources_dir.glob("application-*.yml")):
+            if not is_within(project_dir, yml_file):
+                continue
             port = self._read_port_from_yaml(yml_file)
             if port is not None:
                 return port
 
         for props_file in sorted(resources_dir.glob("application-*.properties")):
+            if not is_within(project_dir, props_file):
+                continue
             port = self._read_port_from_properties(props_file)
             if port is not None:
                 return port
@@ -356,13 +387,13 @@ class JvmStackModule:
             resources_dir / "application.yml",
             resources_dir / "application.yaml",
         ]:
-            if yml_file.exists():
+            if yml_file.exists() and is_within(project_dir, yml_file):
                 port = self._read_port_from_yaml(yml_file)
                 if port is not None:
                     return port
 
         props_file = resources_dir / "application.properties"
-        if props_file.exists():
+        if props_file.exists() and is_within(project_dir, props_file):
             port = self._read_port_from_properties(props_file)
             if port is not None:
                 return port
@@ -421,13 +452,22 @@ class JvmStackModule:
             return False
 
         config_files: list[Path] = []
-        config_files.extend(sorted(resources_dir.glob("application-*.yml")))
-        config_files.extend(sorted(resources_dir.glob("application-*.yaml")))
-        config_files.extend(sorted(resources_dir.glob("application-*.properties")))
+        config_files.extend(
+            f for f in sorted(resources_dir.glob("application-*.yml"))
+            if is_within(project_dir, f)
+        )
+        config_files.extend(
+            f for f in sorted(resources_dir.glob("application-*.yaml"))
+            if is_within(project_dir, f)
+        )
+        config_files.extend(
+            f for f in sorted(resources_dir.glob("application-*.properties"))
+            if is_within(project_dir, f)
+        )
 
         for base_name in ("application.yml", "application.yaml", "application.properties"):
             base_file = resources_dir / base_name
-            if base_file.exists():
+            if base_file.exists() and is_within(project_dir, base_file):
                 config_files.append(base_file)
 
         for cfg_file in config_files:
@@ -438,8 +478,8 @@ class JvmStackModule:
     def _file_exposes_health(self, config_file: Path) -> bool:
         """단일 설정 파일에서 management.endpoints.web.exposure.include에 health/* 포함."""
         try:
-            content = config_file.read_text(encoding="utf-8")
-        except OSError:
+            content = read_text_limited(config_file)
+        except (OSError, UnicodeDecodeError):
             return False
 
         suffix = config_file.suffix.lower()
@@ -498,20 +538,10 @@ class JvmStackModule:
     # ── 내부 헬퍼: probe_plan 보조 ────────────────────────────────────────────
 
     @staticmethod
-    def _parse_actuator_flag(entrypoint: str) -> bool:
-        """entrypoint 인코딩에서 actuator 여부 파싱."""
-        return "actuator:true" in entrypoint
-
-    @staticmethod
     def _parse_major_version(version: str) -> int:
         """'3.2.0' → 3. 파싱 실패 시 2 반환."""
         m = re.match(r"(\d+)\.", version)
         return int(m.group(1)) if m else 2
-
-    @staticmethod
-    def _is_maven(detect_result: StackDetectResult) -> bool:
-        """detect_result.entrypoint에서 Maven 빌드 시스템 여부 판단."""
-        return "build_system:maven" in detect_result.entrypoint
 
     @staticmethod
     def _tcp_probe_config(port: int) -> ProbeConfig:
@@ -555,9 +585,9 @@ class JvmStackModule:
     def _read_port_from_yaml(yml_file: Path) -> int | None:
         """YAML 파일에서 server.port 값 추출."""
         try:
-            content = yml_file.read_text(encoding="utf-8")
+            content = read_text_limited(yml_file)
             data = yaml.safe_load(content)
-        except (OSError, yaml.YAMLError):
+        except (OSError, UnicodeDecodeError, yaml.YAMLError):
             return None
 
         if not isinstance(data, dict):
@@ -570,16 +600,28 @@ class JvmStackModule:
 
         if port_val is not None:
             try:
-                return int(port_val)
+                port = int(port_val)
             except (ValueError, TypeError):
                 return None
+            if not 1 <= port <= 65535:
+                return None
+            return port
         return None
 
     @staticmethod
     def _read_port_from_properties(props_file: Path) -> int | None:
-        """properties 파일에서 server.port 값 추출."""
+        """properties 파일에서 server.port 값 추출.
+
+        UTF-8 읽기 실패 시 ISO-8859-1로 재시도 (Spring Boot 관례).
+        """
+        content: str
         try:
-            content = props_file.read_text(encoding="utf-8")
+            content = read_text_limited(props_file)
+        except UnicodeDecodeError:
+            try:
+                content = read_text_limited(props_file, encoding="iso-8859-1")
+            except (OSError, UnicodeDecodeError):
+                return None
         except OSError:
             return None
 
@@ -589,7 +631,10 @@ class JvmStackModule:
                 _, _, value = line.partition("=")
                 value = value.strip()
                 try:
-                    return int(value)
+                    port = int(value)
                 except ValueError:
                     return None
+                if not 1 <= port <= 65535:
+                    return None
+                return port
         return None
