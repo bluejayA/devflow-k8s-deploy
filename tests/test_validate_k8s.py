@@ -1,6 +1,28 @@
 """K8sValidator (validate_k8s.py) 단위 테스트.
 
+F-43 Rule 매트릭스 기준으로 전면 재작성.
 TDD: 이 파일의 모든 테스트가 먼저 실패한 뒤 구현으로 통과시킨다.
+
+규칙 매트릭스 (F-43):
+  SEC-001: runAsNonRoot: true (Pod or container securityContext)
+  SEC-002: privileged: true 금지
+  SEC-003: allowPrivilegeEscalation: false 필수
+  SEC-004: readOnlyRootFilesystem: true 필수
+  SEC-005: capabilities.drop=[ALL] 필수
+  SEC-006: seccompProfile.type=RuntimeDefault|Localhost (Pod)
+  SEC-007: runAsUser > 0 (Pod or container)
+  SEC-008: fsGroup > 0 (Pod)
+  SEC-009: 평문 시크릿 금지 (env[].value)
+  RES-001: resources.requests/limits cpu+memory 완비
+  IMG-001: latest 태그 또는 태그 누락 금지
+  SA-001:  automountServiceAccountToken: false
+  SA-002:  serviceAccountName 명시
+  SVC-001: Service 리소스 존재
+  SVC-002: targetPort ↔ containerPort 일치
+  PRB-001: livenessProbe 존재
+  PRB-002: readinessProbe 존재
+  RES-W01: CPU limit/request > 4배 WARN
+  IMG-W01: digest pinning 미사용 WARN
 """
 
 from __future__ import annotations
@@ -21,22 +43,35 @@ def _minimal_deployment(
     *,
     container_name: str = "app",
     image: str = "myregistry.io/app:v1.0.0",
+    # SEC-001: runAsNonRoot
     run_as_non_root: bool = True,
-    readonly_root: bool = True,
-    allow_priv_esc: bool = False,
-    capabilities_drop: list[str] | None = None,
-    capabilities_add: list[str] | None = None,
-    seccomp_type: str | None = "RuntimeDefault",
+    # SEC-002: privileged
     privileged: bool | None = None,
-    host_pid: bool = False,
-    host_network: bool = False,
-    host_ipc: bool = False,
+    # SEC-003: allowPrivilegeEscalation
+    allow_priv_esc: bool = False,
+    # SEC-004: readOnlyRootFilesystem
+    readonly_root: bool = True,
+    # SEC-005: capabilities.drop
+    capabilities_drop: list[str] | None = None,
+    # SEC-006: seccompProfile (Pod level)
+    seccomp_type: str | None = "RuntimeDefault",
+    # SEC-007: runAsUser (container level, overrides pod)
+    run_as_user: int | None = 1000,
+    # SEC-008: fsGroup (Pod level)
+    fs_group: int | None = 1000,
+    # SEC-009: env vars
     env_vars: list[dict] | None = None,
+    # RES-001
     resources: dict | None = None,
-    service_account_name: str | None = "myapp-sa",
+    # SA-001: automountServiceAccountToken
     automount_sa_token: bool = False,
+    # SA-002: serviceAccountName
+    service_account_name: str | None = "myapp-sa",
+    # PRB-001/002
     liveness_probe: dict | None = None,
     readiness_probe: dict | None = None,
+    # container ports (for SVC-002 cross-check)
+    container_ports: list[dict] | None = None,
 ) -> dict:
     """모든 검증을 통과하는 최소 Deployment dict 반환.
 
@@ -53,10 +88,10 @@ def _minimal_deployment(
             "drop": capabilities_drop,
         },
     }
-    if capabilities_add is not None:
-        container_sc["capabilities"]["add"] = capabilities_add
     if privileged is not None:
         container_sc["privileged"] = privileged
+    if run_as_user is not None:
+        container_sc["runAsUser"] = run_as_user
 
     default_res: dict = {
         "requests": {"cpu": "100m", "memory": "128Mi"},
@@ -75,14 +110,8 @@ def _minimal_deployment(
     pod_sc: dict = {}
     if seccomp_type is not None:
         pod_sc["seccompProfile"] = {"type": seccomp_type}
-
-    spec_extra: dict = {}
-    if host_pid:
-        spec_extra["hostPID"] = True
-    if host_network:
-        spec_extra["hostNetwork"] = True
-    if host_ipc:
-        spec_extra["hostIPC"] = True
+    if fs_group is not None:
+        pod_sc["fsGroup"] = fs_group
 
     container: dict = {
         "name": container_name,
@@ -94,14 +123,16 @@ def _minimal_deployment(
     }
     if env_vars is not None:
         container["env"] = env_vars
+    if container_ports is not None:
+        container["ports"] = container_ports
 
     pod_spec: dict = {
-        "serviceAccountName": service_account_name,
         "automountServiceAccountToken": automount_sa_token,
         "securityContext": pod_sc,
         "containers": [container],
-        **spec_extra,
     }
+    if service_account_name is not None:
+        pod_spec["serviceAccountName"] = service_account_name
 
     return {
         "apiVersion": "apps/v1",
@@ -113,6 +144,28 @@ def _minimal_deployment(
             }
         },
     }
+
+
+def _minimal_service(
+    *,
+    svc_name: str = "myapp-svc",
+    svc_type: str | None = "ClusterIP",
+    target_port: int | str = 8080,
+    port: int = 80,
+) -> dict:
+    """Service document 생성 헬퍼."""
+    svc: dict = {
+        "apiVersion": "v1",
+        "kind": "Service",
+        "metadata": {"name": svc_name},
+        "spec": {
+            "selector": {"app": "myapp"},
+            "ports": [{"port": port, "targetPort": target_port}],
+        },
+    }
+    if svc_type is not None:
+        svc["spec"]["type"] = svc_type
+    return svc
 
 
 def _manifest_yaml(*docs: dict, extra_yaml: str = "") -> str:
@@ -128,277 +181,290 @@ def _validator(skipped: list[str] | None = None) -> K8sValidator:
     return K8sValidator(skipped=skipped or [])
 
 
+def _write_file(tmp_path: Path, *docs: dict, filename: str = "manifest.yaml") -> Path:
+    """tmp_path에 YAML 파일을 작성하고 경로를 반환."""
+    mf = tmp_path / filename
+    mf.write_text(_manifest_yaml(*docs))
+    return mf
+
+
 # ─── SEC-001: runAsNonRoot ───────────────────────────────────────────────────
 
 
 class TestSEC001:
-    def test_sec001_runasnonroot_missing_fails(self, tmp_path: Path) -> None:
+    """SEC-001: runAsNonRoot: true 필수 (Pod 또는 container securityContext)."""
+
+    def test_fail_when_run_as_non_root_missing(self, tmp_path: Path) -> None:
         doc = _minimal_deployment(run_as_non_root=False)
-        # securityContext 자체에서 runAsNonRoot 제거
         doc["spec"]["template"]["spec"]["containers"][0]["securityContext"].pop(
             "runAsNonRoot", None
         )
-        mf = tmp_path / "dep.yaml"
-        mf.write_text(_manifest_yaml(doc))
-
+        mf = _write_file(tmp_path, doc)
         report = _validator().validate([mf])
-        fail_ids = [r.rule_id for r in report.results if r.level == "FAIL"]
-        assert "SEC-001" in fail_ids
+        assert "SEC-001" in [r.rule_id for r in report.results if r.level == "FAIL"]
 
-    def test_sec001_runasnonroot_false_fails(self, tmp_path: Path) -> None:
+    def test_fail_when_run_as_non_root_false(self, tmp_path: Path) -> None:
         doc = _minimal_deployment(run_as_non_root=False)
-        mf = tmp_path / "dep.yaml"
-        mf.write_text(_manifest_yaml(doc))
-
+        mf = _write_file(tmp_path, doc)
         report = _validator().validate([mf])
-        fail_ids = [r.rule_id for r in report.results if r.level == "FAIL"]
-        assert "SEC-001" in fail_ids
+        assert "SEC-001" in [r.rule_id for r in report.results if r.level == "FAIL"]
 
-    def test_sec001_runasnotroot_true_passes(self, tmp_path: Path) -> None:
+    def test_pass_when_run_as_non_root_true(self, tmp_path: Path) -> None:
         doc = _minimal_deployment(run_as_non_root=True)
-        mf = tmp_path / "dep.yaml"
-        mf.write_text(_manifest_yaml(doc))
-
+        mf = _write_file(tmp_path, doc)
         report = _validator().validate([mf])
-        fail_ids = [r.rule_id for r in report.results if r.level == "FAIL"]
-        assert "SEC-001" not in fail_ids
+        assert "SEC-001" not in [r.rule_id for r in report.results if r.level == "FAIL"]
+
+    def test_pass_when_pod_level_run_as_non_root_true(self, tmp_path: Path) -> None:
+        """Pod securityContext에서 runAsNonRoot=true 이면 container PASS."""
+        doc = _minimal_deployment(run_as_non_root=False)
+        # container 레벨에서 제거하고 pod 레벨에 설정
+        container_sc = doc["spec"]["template"]["spec"]["containers"][0]["securityContext"]
+        container_sc.pop("runAsNonRoot", None)
+        doc["spec"]["template"]["spec"]["securityContext"]["runAsNonRoot"] = True
+        mf = _write_file(tmp_path, doc)
+        report = _validator().validate([mf])
+        assert "SEC-001" not in [r.rule_id for r in report.results if r.level == "FAIL"]
 
 
-# ─── SEC-002: readOnlyRootFilesystem ────────────────────────────────────────
+# ─── SEC-002: privileged 금지 ────────────────────────────────────────────────
 
 
 class TestSEC002:
-    def test_sec002_readonlyrootfilesystem_false_fails(self, tmp_path: Path) -> None:
-        doc = _minimal_deployment(readonly_root=False)
-        mf = tmp_path / "dep.yaml"
-        mf.write_text(_manifest_yaml(doc))
+    """SEC-002: privileged: true 금지."""
 
+    def test_fail_when_privileged_true(self, tmp_path: Path) -> None:
+        doc = _minimal_deployment(privileged=True)
+        mf = _write_file(tmp_path, doc)
         report = _validator().validate([mf])
-        fail_ids = [r.rule_id for r in report.results if r.level == "FAIL"]
-        assert "SEC-002" in fail_ids
+        assert "SEC-002" in [r.rule_id for r in report.results if r.level == "FAIL"]
 
-    def test_sec002_readonlyrootfilesystem_true_passes(self, tmp_path: Path) -> None:
-        doc = _minimal_deployment(readonly_root=True)
-        mf = tmp_path / "dep.yaml"
-        mf.write_text(_manifest_yaml(doc))
-
+    def test_pass_when_privileged_false(self, tmp_path: Path) -> None:
+        doc = _minimal_deployment(privileged=False)
+        mf = _write_file(tmp_path, doc)
         report = _validator().validate([mf])
-        fail_ids = [r.rule_id for r in report.results if r.level == "FAIL"]
-        assert "SEC-002" not in fail_ids
+        assert "SEC-002" not in [r.rule_id for r in report.results if r.level == "FAIL"]
+
+    def test_pass_when_privileged_not_set(self, tmp_path: Path) -> None:
+        doc = _minimal_deployment()  # privileged 미설정
+        mf = _write_file(tmp_path, doc)
+        report = _validator().validate([mf])
+        assert "SEC-002" not in [r.rule_id for r in report.results if r.level == "FAIL"]
 
 
 # ─── SEC-003: allowPrivilegeEscalation ──────────────────────────────────────
 
 
 class TestSEC003:
-    def test_sec003_allow_priv_esc_true_fails(self, tmp_path: Path) -> None:
+    """SEC-003: allowPrivilegeEscalation: false 필수."""
+
+    def test_fail_when_allow_priv_esc_true(self, tmp_path: Path) -> None:
         doc = _minimal_deployment(allow_priv_esc=True)
-        mf = tmp_path / "dep.yaml"
-        mf.write_text(_manifest_yaml(doc))
-
+        mf = _write_file(tmp_path, doc)
         report = _validator().validate([mf])
-        fail_ids = [r.rule_id for r in report.results if r.level == "FAIL"]
-        assert "SEC-003" in fail_ids
+        assert "SEC-003" in [r.rule_id for r in report.results if r.level == "FAIL"]
 
-    def test_sec003_allow_priv_esc_false_passes(self, tmp_path: Path) -> None:
+    def test_fail_when_allow_priv_esc_not_set(self, tmp_path: Path) -> None:
         doc = _minimal_deployment(allow_priv_esc=False)
-        mf = tmp_path / "dep.yaml"
-        mf.write_text(_manifest_yaml(doc))
-
+        doc["spec"]["template"]["spec"]["containers"][0]["securityContext"].pop(
+            "allowPrivilegeEscalation", None
+        )
+        mf = _write_file(tmp_path, doc)
         report = _validator().validate([mf])
-        fail_ids = [r.rule_id for r in report.results if r.level == "FAIL"]
-        assert "SEC-003" not in fail_ids
+        assert "SEC-003" in [r.rule_id for r in report.results if r.level == "FAIL"]
+
+    def test_pass_when_allow_priv_esc_false(self, tmp_path: Path) -> None:
+        doc = _minimal_deployment(allow_priv_esc=False)
+        mf = _write_file(tmp_path, doc)
+        report = _validator().validate([mf])
+        assert "SEC-003" not in [r.rule_id for r in report.results if r.level == "FAIL"]
 
 
-# ─── SEC-004: capabilities.drop ALL ─────────────────────────────────────────
+# ─── SEC-004: readOnlyRootFilesystem ────────────────────────────────────────
 
 
 class TestSEC004:
-    def test_sec004_capabilities_drop_all_passes(self, tmp_path: Path) -> None:
-        doc = _minimal_deployment(capabilities_drop=["ALL"])
-        mf = tmp_path / "dep.yaml"
-        mf.write_text(_manifest_yaml(doc))
+    """SEC-004: readOnlyRootFilesystem: true 필수."""
 
+    def test_fail_when_readonly_root_false(self, tmp_path: Path) -> None:
+        doc = _minimal_deployment(readonly_root=False)
+        mf = _write_file(tmp_path, doc)
         report = _validator().validate([mf])
-        fail_ids = [r.rule_id for r in report.results if r.level == "FAIL"]
-        assert "SEC-004" not in fail_ids
+        assert "SEC-004" in [r.rule_id for r in report.results if r.level == "FAIL"]
 
-    def test_sec004_capabilities_drop_missing_fails(self, tmp_path: Path) -> None:
-        doc = _minimal_deployment(capabilities_drop=[])
-        mf = tmp_path / "dep.yaml"
-        mf.write_text(_manifest_yaml(doc))
-
+    def test_fail_when_readonly_root_not_set(self, tmp_path: Path) -> None:
+        doc = _minimal_deployment()
+        doc["spec"]["template"]["spec"]["containers"][0]["securityContext"].pop(
+            "readOnlyRootFilesystem", None
+        )
+        mf = _write_file(tmp_path, doc)
         report = _validator().validate([mf])
-        fail_ids = [r.rule_id for r in report.results if r.level == "FAIL"]
-        assert "SEC-004" in fail_ids
+        assert "SEC-004" in [r.rule_id for r in report.results if r.level == "FAIL"]
+
+    def test_pass_when_readonly_root_true(self, tmp_path: Path) -> None:
+        doc = _minimal_deployment(readonly_root=True)
+        mf = _write_file(tmp_path, doc)
+        report = _validator().validate([mf])
+        assert "SEC-004" not in [r.rule_id for r in report.results if r.level == "FAIL"]
 
 
-# ─── SEC-005: dangerous capabilities ────────────────────────────────────────
+# ─── SEC-005: capabilities.drop=[ALL] ───────────────────────────────────────
 
 
 class TestSEC005:
-    def test_sec005_dangerous_capability_fails(self, tmp_path: Path) -> None:
-        doc = _minimal_deployment(capabilities_add=["SYS_ADMIN"])
-        mf = tmp_path / "dep.yaml"
-        mf.write_text(_manifest_yaml(doc))
+    """SEC-005: capabilities.drop에 ALL 포함 필수."""
 
+    def test_pass_when_drop_all(self, tmp_path: Path) -> None:
+        doc = _minimal_deployment(capabilities_drop=["ALL"])
+        mf = _write_file(tmp_path, doc)
         report = _validator().validate([mf])
-        fail_ids = [r.rule_id for r in report.results if r.level == "FAIL"]
-        assert "SEC-005" in fail_ids
+        assert "SEC-005" not in [r.rule_id for r in report.results if r.level == "FAIL"]
 
-    def test_sec005_net_admin_fails(self, tmp_path: Path) -> None:
-        doc = _minimal_deployment(capabilities_add=["NET_ADMIN"])
-        mf = tmp_path / "dep.yaml"
-        mf.write_text(_manifest_yaml(doc))
-
+    def test_fail_when_drop_empty(self, tmp_path: Path) -> None:
+        doc = _minimal_deployment(capabilities_drop=[])
+        mf = _write_file(tmp_path, doc)
         report = _validator().validate([mf])
-        fail_ids = [r.rule_id for r in report.results if r.level == "FAIL"]
-        assert "SEC-005" in fail_ids
+        assert "SEC-005" in [r.rule_id for r in report.results if r.level == "FAIL"]
 
-    def test_sec005_safe_capability_passes(self, tmp_path: Path) -> None:
-        doc = _minimal_deployment(capabilities_add=["NET_BIND_SERVICE"])
-        mf = tmp_path / "dep.yaml"
-        mf.write_text(_manifest_yaml(doc))
-
+    def test_fail_when_drop_partial_no_all(self, tmp_path: Path) -> None:
+        doc = _minimal_deployment(capabilities_drop=["NET_RAW", "SYS_ADMIN"])
+        mf = _write_file(tmp_path, doc)
         report = _validator().validate([mf])
-        fail_ids = [r.rule_id for r in report.results if r.level == "FAIL"]
-        assert "SEC-005" not in fail_ids
+        assert "SEC-005" in [r.rule_id for r in report.results if r.level == "FAIL"]
+
+    def test_fail_when_capabilities_not_set(self, tmp_path: Path) -> None:
+        doc = _minimal_deployment()
+        doc["spec"]["template"]["spec"]["containers"][0]["securityContext"].pop(
+            "capabilities", None
+        )
+        mf = _write_file(tmp_path, doc)
+        report = _validator().validate([mf])
+        assert "SEC-005" in [r.rule_id for r in report.results if r.level == "FAIL"]
 
 
 # ─── SEC-006: seccompProfile ─────────────────────────────────────────────────
 
 
 class TestSEC006:
-    def test_sec006_seccomp_missing_fails(self, tmp_path: Path) -> None:
+    """SEC-006: Pod seccompProfile.type=RuntimeDefault|Localhost."""
+
+    def test_fail_when_seccomp_missing(self, tmp_path: Path) -> None:
         doc = _minimal_deployment(seccomp_type=None)
-        mf = tmp_path / "dep.yaml"
-        mf.write_text(_manifest_yaml(doc))
-
+        mf = _write_file(tmp_path, doc)
         report = _validator().validate([mf])
-        fail_ids = [r.rule_id for r in report.results if r.level == "FAIL"]
-        assert "SEC-006" in fail_ids
+        assert "SEC-006" in [r.rule_id for r in report.results if r.level == "FAIL"]
 
-    def test_sec006_seccomp_runtime_default_passes(self, tmp_path: Path) -> None:
+    def test_pass_when_seccomp_runtime_default(self, tmp_path: Path) -> None:
         doc = _minimal_deployment(seccomp_type="RuntimeDefault")
-        mf = tmp_path / "dep.yaml"
-        mf.write_text(_manifest_yaml(doc))
-
+        mf = _write_file(tmp_path, doc)
         report = _validator().validate([mf])
-        fail_ids = [r.rule_id for r in report.results if r.level == "FAIL"]
-        assert "SEC-006" not in fail_ids
+        assert "SEC-006" not in [r.rule_id for r in report.results if r.level == "FAIL"]
 
-    def test_sec006_seccomp_localhost_passes(self, tmp_path: Path) -> None:
+    def test_pass_when_seccomp_localhost(self, tmp_path: Path) -> None:
         doc = _minimal_deployment(seccomp_type="Localhost")
-        mf = tmp_path / "dep.yaml"
-        mf.write_text(_manifest_yaml(doc))
-
+        mf = _write_file(tmp_path, doc)
         report = _validator().validate([mf])
-        fail_ids = [r.rule_id for r in report.results if r.level == "FAIL"]
-        assert "SEC-006" not in fail_ids
+        assert "SEC-006" not in [r.rule_id for r in report.results if r.level == "FAIL"]
 
-    def test_sec006_seccomp_unconfined_fails(self, tmp_path: Path) -> None:
+    def test_fail_when_seccomp_unconfined(self, tmp_path: Path) -> None:
         doc = _minimal_deployment(seccomp_type="Unconfined")
-        mf = tmp_path / "dep.yaml"
-        mf.write_text(_manifest_yaml(doc))
-
+        mf = _write_file(tmp_path, doc)
         report = _validator().validate([mf])
-        fail_ids = [r.rule_id for r in report.results if r.level == "FAIL"]
-        assert "SEC-006" in fail_ids
+        assert "SEC-006" in [r.rule_id for r in report.results if r.level == "FAIL"]
 
 
-# ─── SEC-007: privileged ─────────────────────────────────────────────────────
+# ─── SEC-007: runAsUser > 0 ──────────────────────────────────────────────────
 
 
 class TestSEC007:
-    def test_sec007_privileged_true_fails(self, tmp_path: Path) -> None:
-        doc = _minimal_deployment(privileged=True)
-        mf = tmp_path / "dep.yaml"
-        mf.write_text(_manifest_yaml(doc))
+    """SEC-007: runAsUser > 0 필수 (root=0 금지)."""
 
+    def test_fail_when_run_as_user_zero(self, tmp_path: Path) -> None:
+        doc = _minimal_deployment(run_as_user=0)
+        mf = _write_file(tmp_path, doc)
         report = _validator().validate([mf])
-        fail_ids = [r.rule_id for r in report.results if r.level == "FAIL"]
-        assert "SEC-007" in fail_ids
+        assert "SEC-007" in [r.rule_id for r in report.results if r.level == "FAIL"]
 
-    def test_sec007_privileged_false_passes(self, tmp_path: Path) -> None:
-        doc = _minimal_deployment(privileged=False)
-        mf = tmp_path / "dep.yaml"
-        mf.write_text(_manifest_yaml(doc))
-
+    def test_fail_when_run_as_user_not_set(self, tmp_path: Path) -> None:
+        doc = _minimal_deployment(run_as_user=None)
+        # pod level에도 없는지 확인
+        pod_sc = doc["spec"]["template"]["spec"]["securityContext"]
+        pod_sc.pop("runAsUser", None)
+        mf = _write_file(tmp_path, doc)
         report = _validator().validate([mf])
-        fail_ids = [r.rule_id for r in report.results if r.level == "FAIL"]
-        assert "SEC-007" not in fail_ids
+        assert "SEC-007" in [r.rule_id for r in report.results if r.level == "FAIL"]
+
+    def test_pass_when_run_as_user_nonzero(self, tmp_path: Path) -> None:
+        doc = _minimal_deployment(run_as_user=1000)
+        mf = _write_file(tmp_path, doc)
+        report = _validator().validate([mf])
+        assert "SEC-007" not in [r.rule_id for r in report.results if r.level == "FAIL"]
+
+    def test_pass_when_pod_level_run_as_user(self, tmp_path: Path) -> None:
+        """Pod securityContext에 runAsUser가 있으면 container에서 미설정이어도 PASS."""
+        doc = _minimal_deployment(run_as_user=None)
+        pod_sc = doc["spec"]["template"]["spec"]["securityContext"]
+        pod_sc["runAsUser"] = 1000
+        mf = _write_file(tmp_path, doc)
+        report = _validator().validate([mf])
+        assert "SEC-007" not in [r.rule_id for r in report.results if r.level == "FAIL"]
 
 
-# ─── SEC-008: hostPID / hostNetwork / hostIPC ────────────────────────────────
+# ─── SEC-008: fsGroup > 0 ────────────────────────────────────────────────────
 
 
 class TestSEC008:
-    def test_sec008_hostnetwork_true_fails(self, tmp_path: Path) -> None:
-        doc = _minimal_deployment(host_network=True)
-        mf = tmp_path / "dep.yaml"
-        mf.write_text(_manifest_yaml(doc))
+    """SEC-008: fsGroup > 0 필수 (Pod securityContext)."""
 
+    def test_fail_when_fs_group_zero(self, tmp_path: Path) -> None:
+        doc = _minimal_deployment(fs_group=0)
+        mf = _write_file(tmp_path, doc)
         report = _validator().validate([mf])
-        fail_ids = [r.rule_id for r in report.results if r.level == "FAIL"]
-        assert "SEC-008" in fail_ids
+        assert "SEC-008" in [r.rule_id for r in report.results if r.level == "FAIL"]
 
-    def test_sec008_hostpid_true_fails(self, tmp_path: Path) -> None:
-        doc = _minimal_deployment(host_pid=True)
-        mf = tmp_path / "dep.yaml"
-        mf.write_text(_manifest_yaml(doc))
-
+    def test_fail_when_fs_group_not_set(self, tmp_path: Path) -> None:
+        doc = _minimal_deployment(fs_group=None)
+        pod_sc = doc["spec"]["template"]["spec"]["securityContext"]
+        pod_sc.pop("fsGroup", None)
+        mf = _write_file(tmp_path, doc)
         report = _validator().validate([mf])
-        fail_ids = [r.rule_id for r in report.results if r.level == "FAIL"]
-        assert "SEC-008" in fail_ids
+        assert "SEC-008" in [r.rule_id for r in report.results if r.level == "FAIL"]
 
-    def test_sec008_hostipc_true_fails(self, tmp_path: Path) -> None:
-        doc = _minimal_deployment(host_ipc=True)
-        mf = tmp_path / "dep.yaml"
-        mf.write_text(_manifest_yaml(doc))
-
+    def test_pass_when_fs_group_nonzero(self, tmp_path: Path) -> None:
+        doc = _minimal_deployment(fs_group=1000)
+        mf = _write_file(tmp_path, doc)
         report = _validator().validate([mf])
-        fail_ids = [r.rule_id for r in report.results if r.level == "FAIL"]
-        assert "SEC-008" in fail_ids
-
-    def test_sec008_no_host_flags_passes(self, tmp_path: Path) -> None:
-        doc = _minimal_deployment()
-        mf = tmp_path / "dep.yaml"
-        mf.write_text(_manifest_yaml(doc))
-
-        report = _validator().validate([mf])
-        fail_ids = [r.rule_id for r in report.results if r.level == "FAIL"]
-        assert "SEC-008" not in fail_ids
+        assert "SEC-008" not in [r.rule_id for r in report.results if r.level == "FAIL"]
 
 
-# ─── SEC-009: plaintext secret detection ────────────────────────────────────
+# ─── SEC-009: 평문 시크릿 ───────────────────────────────────────────────────
 
 
 class TestSEC009:
-    def test_sec009_plaintext_secret_detected(self, tmp_path: Path) -> None:
-        env_vars = [
-            {"name": "DB_PASSWORD", "value": "mysupersecretpassword123"},
-        ]
+    """SEC-009: env[].value에 평문 시크릿 금지."""
+
+    def test_fail_when_db_password_plaintext(self, tmp_path: Path) -> None:
+        env_vars = [{"name": "DB_PASSWORD", "value": "mysupersecret"}]
         doc = _minimal_deployment(env_vars=env_vars)
-        mf = tmp_path / "dep.yaml"
-        mf.write_text(_manifest_yaml(doc))
-
+        mf = _write_file(tmp_path, doc)
         report = _validator().validate([mf])
-        fail_ids = [r.rule_id for r in report.results if r.level == "FAIL"]
-        assert "SEC-009" in fail_ids
+        assert "SEC-009" in [r.rule_id for r in report.results if r.level == "FAIL"]
 
-    def test_sec009_api_key_detected(self, tmp_path: Path) -> None:
-        env_vars = [
-            {"name": "API_KEY", "value": "sk-abcdefghijklmnopqrstuvwxyz1234"},
-        ]
+    def test_fail_when_api_key_plaintext(self, tmp_path: Path) -> None:
+        env_vars = [{"name": "API_KEY", "value": "sk-abc"}]
         doc = _minimal_deployment(env_vars=env_vars)
-        mf = tmp_path / "dep.yaml"
-        mf.write_text(_manifest_yaml(doc))
-
+        mf = _write_file(tmp_path, doc)
         report = _validator().validate([mf])
-        fail_ids = [r.rule_id for r in report.results if r.level == "FAIL"]
-        assert "SEC-009" in fail_ids
+        assert "SEC-009" in [r.rule_id for r in report.results if r.level == "FAIL"]
 
-    def test_sec009_secretref_passes(self, tmp_path: Path) -> None:
+    def test_fail_when_token_plaintext(self, tmp_path: Path) -> None:
+        env_vars = [{"name": "AUTH_TOKEN", "value": "t"}]
+        doc = _minimal_deployment(env_vars=env_vars)
+        mf = _write_file(tmp_path, doc)
+        report = _validator().validate([mf])
+        assert "SEC-009" in [r.rule_id for r in report.results if r.level == "FAIL"]
+
+    def test_pass_when_secret_ref_used(self, tmp_path: Path) -> None:
         env_vars = [
             {
                 "name": "DB_PASSWORD",
@@ -408,295 +474,317 @@ class TestSEC009:
             }
         ]
         doc = _minimal_deployment(env_vars=env_vars)
-        mf = tmp_path / "dep.yaml"
-        mf.write_text(_manifest_yaml(doc))
-
+        mf = _write_file(tmp_path, doc)
         report = _validator().validate([mf])
-        fail_ids = [r.rule_id for r in report.results if r.level == "FAIL"]
-        assert "SEC-009" not in fail_ids
+        assert "SEC-009" not in [r.rule_id for r in report.results if r.level == "FAIL"]
 
-    def test_sec009_empty_value_passes(self, tmp_path: Path) -> None:
+    def test_pass_when_non_secret_env_var(self, tmp_path: Path) -> None:
         env_vars = [{"name": "APP_ENV", "value": "production"}]
         doc = _minimal_deployment(env_vars=env_vars)
-        mf = tmp_path / "dep.yaml"
-        mf.write_text(_manifest_yaml(doc))
-
+        mf = _write_file(tmp_path, doc)
         report = _validator().validate([mf])
-        fail_ids = [r.rule_id for r in report.results if r.level == "FAIL"]
-        assert "SEC-009" not in fail_ids
+        assert "SEC-009" not in [r.rule_id for r in report.results if r.level == "FAIL"]
+
+    def test_fail_when_password_short_value(self, tmp_path: Path) -> None:
+        """길이 조건 없음 — 짧은 값도 FAIL."""
+        env_vars = [{"name": "SECRET", "value": "x"}]
+        doc = _minimal_deployment(env_vars=env_vars)
+        mf = _write_file(tmp_path, doc)
+        report = _validator().validate([mf])
+        assert "SEC-009" in [r.rule_id for r in report.results if r.level == "FAIL"]
+
+    def test_pass_when_value_is_empty_string(self, tmp_path: Path) -> None:
+        """빈 문자열 value는 PASS."""
+        env_vars = [{"name": "SECRET_KEY", "value": ""}]
+        doc = _minimal_deployment(env_vars=env_vars)
+        mf = _write_file(tmp_path, doc)
+        report = _validator().validate([mf])
+        assert "SEC-009" not in [r.rule_id for r in report.results if r.level == "FAIL"]
+
+    def test_fail_case_insensitive_secret_name(self, tmp_path: Path) -> None:
+        """대소문자 무관 패턴 매치."""
+        env_vars = [{"name": "Db_PassWord", "value": "plainvalue"}]
+        doc = _minimal_deployment(env_vars=env_vars)
+        mf = _write_file(tmp_path, doc)
+        report = _validator().validate([mf])
+        assert "SEC-009" in [r.rule_id for r in report.results if r.level == "FAIL"]
+
+    def test_suggestion_contains_secret_key_ref(self, tmp_path: Path) -> None:
+        """제안 메시지에 valueFrom.secretKeyRef 포함 (F-46a)."""
+        env_vars = [{"name": "DB_PASSWORD", "value": "mysupersecret"}]
+        doc = _minimal_deployment(env_vars=env_vars)
+        mf = _write_file(tmp_path, doc)
+        report = _validator().validate([mf])
+        fail_results = [r for r in report.results if r.rule_id == "SEC-009" and r.level == "FAIL"]
+        assert fail_results
+        assert "secretKeyRef" in fail_results[0].suggestion
 
 
 # ─── RES-001: resources ──────────────────────────────────────────────────────
 
 
 class TestRES001:
-    def test_res001_missing_resources_fails(self, tmp_path: Path) -> None:
+    """RES-001: cpu+memory requests/limits 완비."""
+
+    def test_fail_when_resources_empty(self, tmp_path: Path) -> None:
         doc = _minimal_deployment(resources={})
-        mf = tmp_path / "dep.yaml"
-        mf.write_text(_manifest_yaml(doc))
-
+        mf = _write_file(tmp_path, doc)
         report = _validator().validate([mf])
-        fail_ids = [r.rule_id for r in report.results if r.level == "FAIL"]
-        assert "RES-001" in fail_ids
+        assert "RES-001" in [r.rule_id for r in report.results if r.level == "FAIL"]
 
-    def test_res001_partial_resources_fails(self, tmp_path: Path) -> None:
+    def test_fail_when_partial_resources(self, tmp_path: Path) -> None:
         doc = _minimal_deployment(
             resources={"requests": {"cpu": "100m"}, "limits": {"memory": "256Mi"}}
         )
-        mf = tmp_path / "dep.yaml"
-        mf.write_text(_manifest_yaml(doc))
-
+        mf = _write_file(tmp_path, doc)
         report = _validator().validate([mf])
-        fail_ids = [r.rule_id for r in report.results if r.level == "FAIL"]
-        assert "RES-001" in fail_ids
+        assert "RES-001" in [r.rule_id for r in report.results if r.level == "FAIL"]
 
-    def test_res001_complete_resources_passes(self, tmp_path: Path) -> None:
+    def test_pass_when_all_resources_set(self, tmp_path: Path) -> None:
         doc = _minimal_deployment()
-        mf = tmp_path / "dep.yaml"
-        mf.write_text(_manifest_yaml(doc))
-
+        mf = _write_file(tmp_path, doc)
         report = _validator().validate([mf])
-        fail_ids = [r.rule_id for r in report.results if r.level == "FAIL"]
-        assert "RES-001" not in fail_ids
+        assert "RES-001" not in [r.rule_id for r in report.results if r.level == "FAIL"]
 
 
-# ─── IMG-001 + IMG-W01 ────────────────────────────────────────────────────────
+# ─── IMG-001 ─────────────────────────────────────────────────────────────────
 
 
 class TestIMG001:
-    def test_img001_latest_tag_fails(self, tmp_path: Path) -> None:
+    """IMG-001: latest 태그 또는 태그 누락 금지."""
+
+    def test_fail_when_latest_tag(self, tmp_path: Path) -> None:
         doc = _minimal_deployment(image="myregistry.io/app:latest")
-        mf = tmp_path / "dep.yaml"
-        mf.write_text(_manifest_yaml(doc))
-
+        mf = _write_file(tmp_path, doc)
         report = _validator().validate([mf])
-        fail_ids = [r.rule_id for r in report.results if r.level == "FAIL"]
-        assert "IMG-001" in fail_ids
+        assert "IMG-001" in [r.rule_id for r in report.results if r.level == "FAIL"]
 
-    def test_img001_no_tag_fails(self, tmp_path: Path) -> None:
+    def test_fail_when_no_tag(self, tmp_path: Path) -> None:
         doc = _minimal_deployment(image="myregistry.io/app")
-        mf = tmp_path / "dep.yaml"
-        mf.write_text(_manifest_yaml(doc))
-
+        mf = _write_file(tmp_path, doc)
         report = _validator().validate([mf])
-        fail_ids = [r.rule_id for r in report.results if r.level == "FAIL"]
-        assert "IMG-001" in fail_ids
+        assert "IMG-001" in [r.rule_id for r in report.results if r.level == "FAIL"]
 
-    def test_img001_versioned_tag_passes(self, tmp_path: Path) -> None:
+    def test_pass_when_versioned_tag(self, tmp_path: Path) -> None:
         doc = _minimal_deployment(image="myregistry.io/app:v1.2.3")
-        mf = tmp_path / "dep.yaml"
-        mf.write_text(_manifest_yaml(doc))
-
+        mf = _write_file(tmp_path, doc)
         report = _validator().validate([mf])
-        fail_ids = [r.rule_id for r in report.results if r.level == "FAIL"]
-        assert "IMG-001" not in fail_ids
-
-    def test_img_w01_no_digest_warns(self, tmp_path: Path) -> None:
-        # 태그는 있지만 digest(@sha256:...) 없으면 WARN
-        doc = _minimal_deployment(image="myregistry.io/app:v1.2.3")
-        mf = tmp_path / "dep.yaml"
-        mf.write_text(_manifest_yaml(doc))
-
-        report = _validator().validate([mf])
-        warn_ids = [r.rule_id for r in report.results if r.level == "WARN"]
-        assert "IMG-W01" in warn_ids
-
-    def test_img_w01_digest_no_warn(self, tmp_path: Path) -> None:
-        doc = _minimal_deployment(
-            image="myregistry.io/app:v1.2.3@sha256:abc123def456abc123def456abc123def456abc123def456abc123def456abc1"
-        )
-        mf = tmp_path / "dep.yaml"
-        mf.write_text(_manifest_yaml(doc))
-
-        report = _validator().validate([mf])
-        warn_ids = [r.rule_id for r in report.results if r.level == "WARN"]
-        assert "IMG-W01" not in warn_ids
+        assert "IMG-001" not in [r.rule_id for r in report.results if r.level == "FAIL"]
 
 
-# ─── SA-001 + SA-002 ─────────────────────────────────────────────────────────
+# ─── SA-001 ───────────────────────────────────────────────────────────────────
 
 
-class TestSA:
-    def test_sa001_no_serviceaccount_fails(self, tmp_path: Path) -> None:
-        doc = _minimal_deployment(service_account_name=None)
-        mf = tmp_path / "dep.yaml"
-        mf.write_text(_manifest_yaml(doc))
+class TestSA001:
+    """SA-001: automountServiceAccountToken: false 필수."""
 
-        report = _validator().validate([mf])
-        fail_ids = [r.rule_id for r in report.results if r.level == "FAIL"]
-        assert "SA-001" in fail_ids
-
-    def test_sa001_with_serviceaccount_passes(self, tmp_path: Path) -> None:
-        doc = _minimal_deployment(service_account_name="myapp-sa")
-        mf = tmp_path / "dep.yaml"
-        mf.write_text(_manifest_yaml(doc))
-
-        report = _validator().validate([mf])
-        fail_ids = [r.rule_id for r in report.results if r.level == "FAIL"]
-        assert "SA-001" not in fail_ids
-
-    def test_sa002_automount_true_fails(self, tmp_path: Path) -> None:
+    def test_fail_when_automount_true(self, tmp_path: Path) -> None:
         doc = _minimal_deployment(automount_sa_token=True)
-        mf = tmp_path / "dep.yaml"
-        mf.write_text(_manifest_yaml(doc))
-
+        mf = _write_file(tmp_path, doc)
         report = _validator().validate([mf])
-        fail_ids = [r.rule_id for r in report.results if r.level == "FAIL"]
-        assert "SA-002" in fail_ids
+        assert "SA-001" in [r.rule_id for r in report.results if r.level == "FAIL"]
 
-    def test_sa002_automount_false_passes(self, tmp_path: Path) -> None:
+    def test_fail_when_automount_not_set(self, tmp_path: Path) -> None:
         doc = _minimal_deployment(automount_sa_token=False)
-        mf = tmp_path / "dep.yaml"
-        mf.write_text(_manifest_yaml(doc))
-
+        doc["spec"]["template"]["spec"].pop("automountServiceAccountToken", None)
+        mf = _write_file(tmp_path, doc)
         report = _validator().validate([mf])
-        fail_ids = [r.rule_id for r in report.results if r.level == "FAIL"]
-        assert "SA-002" not in fail_ids
+        assert "SA-001" in [r.rule_id for r in report.results if r.level == "FAIL"]
 
-
-# ─── SVC-001 + SVC-002 ───────────────────────────────────────────────────────
-
-
-def _service_yaml(*, svc_type: str | None = "ClusterIP") -> dict:
-    svc: dict = {
-        "apiVersion": "v1",
-        "kind": "Service",
-        "metadata": {"name": "myapp-svc"},
-        "spec": {
-            "selector": {"app": "myapp"},
-            "ports": [{"port": 80, "targetPort": 8080}],
-        },
-    }
-    if svc_type is not None:
-        svc["spec"]["type"] = svc_type
-    return svc
-
-
-class TestSVC:
-    def test_svc001_no_type_fails(self, tmp_path: Path) -> None:
-        svc = _service_yaml(svc_type=None)
-        mf = tmp_path / "svc.yaml"
-        mf.write_text(_manifest_yaml(svc))
-
+    def test_pass_when_automount_false(self, tmp_path: Path) -> None:
+        doc = _minimal_deployment(automount_sa_token=False)
+        mf = _write_file(tmp_path, doc)
         report = _validator().validate([mf])
-        fail_ids = [r.rule_id for r in report.results if r.level == "FAIL"]
-        assert "SVC-001" in fail_ids
+        assert "SA-001" not in [r.rule_id for r in report.results if r.level == "FAIL"]
 
-    def test_svc001_clusterip_passes(self, tmp_path: Path) -> None:
-        svc = _service_yaml(svc_type="ClusterIP")
-        mf = tmp_path / "svc.yaml"
-        mf.write_text(_manifest_yaml(svc))
 
+# ─── SA-002 ───────────────────────────────────────────────────────────────────
+
+
+class TestSA002:
+    """SA-002: serviceAccountName 명시."""
+
+    def test_fail_when_sa_name_missing(self, tmp_path: Path) -> None:
+        doc = _minimal_deployment(service_account_name=None)
+        mf = _write_file(tmp_path, doc)
         report = _validator().validate([mf])
-        fail_ids = [r.rule_id for r in report.results if r.level == "FAIL"]
-        assert "SVC-001" not in fail_ids
+        assert "SA-002" in [r.rule_id for r in report.results if r.level == "FAIL"]
 
-    def test_svc002_loadbalancer_warns(self, tmp_path: Path) -> None:
-        svc = _service_yaml(svc_type="LoadBalancer")
-        mf = tmp_path / "svc.yaml"
-        mf.write_text(_manifest_yaml(svc))
-
+    def test_pass_when_sa_name_set(self, tmp_path: Path) -> None:
+        doc = _minimal_deployment(service_account_name="myapp-sa")
+        mf = _write_file(tmp_path, doc)
         report = _validator().validate([mf])
-        warn_ids = [r.rule_id for r in report.results if r.level == "WARN"]
-        assert "SVC-002" in warn_ids
+        assert "SA-002" not in [r.rule_id for r in report.results if r.level == "FAIL"]
 
-    def test_svc002_nodeport_no_warn(self, tmp_path: Path) -> None:
-        svc = _service_yaml(svc_type="NodePort")
-        mf = tmp_path / "svc.yaml"
-        mf.write_text(_manifest_yaml(svc))
 
+# ─── SVC-001 ─────────────────────────────────────────────────────────────────
+
+
+class TestSVC001:
+    """SVC-001: Service 리소스 존재."""
+
+    def test_pass_when_service_exists(self, tmp_path: Path) -> None:
+        """Service document가 있으면 SVC-001 PASS."""
+        svc = _minimal_service()
+        mf = _write_file(tmp_path, svc)
         report = _validator().validate([mf])
-        warn_ids = [r.rule_id for r in report.results if r.level == "WARN"]
-        assert "SVC-002" not in warn_ids
+        pass_ids = [r.rule_id for r in report.results if r.level == "PASS"]
+        assert "SVC-001" in pass_ids
+
+    def test_svc001_not_triggered_for_deployment(self, tmp_path: Path) -> None:
+        """Deployment만 있으면 SVC-001이 체크되지 않음 (Service 없음)."""
+        dep = _minimal_deployment()
+        mf = _write_file(tmp_path, dep)
+        report = _validator().validate([mf])
+        svc001_results = [r for r in report.results if r.rule_id == "SVC-001"]
+        assert len(svc001_results) == 0
 
 
-# ─── PRB-001 + PRB-002 ───────────────────────────────────────────────────────
+# ─── SVC-002 ─────────────────────────────────────────────────────────────────
 
 
-class TestPRB:
-    def test_prb001_no_probes_fails(self, tmp_path: Path) -> None:
-        # liveness/readiness 모두 제거
-        doc = _minimal_deployment(
-            liveness_probe=None,  # type: ignore[arg-type]
-            readiness_probe=None,  # type: ignore[arg-type]
+class TestSVC002:
+    """SVC-002: targetPort ↔ containerPort 일치 (교차 검증)."""
+
+    def test_pass_when_target_port_matches_container_port(self, tmp_path: Path) -> None:
+        dep = _minimal_deployment(container_ports=[{"containerPort": 8080}])
+        svc = _minimal_service(target_port=8080)
+        mf = _write_file(tmp_path, dep, svc)
+        report = _validator().validate([mf])
+        assert "SVC-002" not in [r.rule_id for r in report.results if r.level == "FAIL"]
+
+    def test_fail_when_target_port_mismatch(self, tmp_path: Path) -> None:
+        dep = _minimal_deployment(container_ports=[{"containerPort": 8080}])
+        svc = _minimal_service(target_port=9999)
+        mf = _write_file(tmp_path, dep, svc)
+        report = _validator().validate([mf])
+        assert "SVC-002" in [r.rule_id for r in report.results if r.level == "FAIL"]
+
+    def test_pass_when_named_port_matches(self, tmp_path: Path) -> None:
+        dep = _minimal_deployment(
+            container_ports=[{"name": "http", "containerPort": 8080}]
         )
-        # _minimal_deployment 는 None 이면 기본값을 사용하므로 직접 제거
-        container = doc["spec"]["template"]["spec"]["containers"][0]
-        container.pop("livenessProbe", None)
-        container.pop("readinessProbe", None)
-        mf = tmp_path / "dep.yaml"
-        mf.write_text(_manifest_yaml(doc))
-
+        svc = _minimal_service(target_port="http")
+        mf = _write_file(tmp_path, dep, svc)
         report = _validator().validate([mf])
-        fail_ids = [r.rule_id for r in report.results if r.level == "FAIL"]
-        assert "PRB-001" in fail_ids
+        assert "SVC-002" not in [r.rule_id for r in report.results if r.level == "FAIL"]
 
-    def test_prb001_only_liveness_fails(self, tmp_path: Path) -> None:
+    def test_fail_when_named_port_mismatch(self, tmp_path: Path) -> None:
+        dep = _minimal_deployment(
+            container_ports=[{"name": "http", "containerPort": 8080}]
+        )
+        svc = _minimal_service(target_port="grpc")
+        mf = _write_file(tmp_path, dep, svc)
+        report = _validator().validate([mf])
+        assert "SVC-002" in [r.rule_id for r in report.results if r.level == "FAIL"]
+
+    def test_skip_when_no_deployment_in_context(self, tmp_path: Path) -> None:
+        """Deployment가 없으면 SVC-002 skip (컨테이너 포트 불명)."""
+        svc = _minimal_service(target_port=8080)
+        mf = _write_file(tmp_path, svc)
+        report = _validator().validate([mf])
+        svc002_results = [r for r in report.results if r.rule_id == "SVC-002"]
+        # containerPort 없으면 skip → 결과 없음
+        assert len(svc002_results) == 0
+
+
+# ─── PRB-001 ─────────────────────────────────────────────────────────────────
+
+
+class TestPRB001:
+    """PRB-001: livenessProbe 존재."""
+
+    def test_fail_when_liveness_probe_missing(self, tmp_path: Path) -> None:
         doc = _minimal_deployment()
-        container = doc["spec"]["template"]["spec"]["containers"][0]
-        container.pop("readinessProbe", None)
-        mf = tmp_path / "dep.yaml"
-        mf.write_text(_manifest_yaml(doc))
-
+        doc["spec"]["template"]["spec"]["containers"][0].pop("livenessProbe", None)
+        mf = _write_file(tmp_path, doc)
         report = _validator().validate([mf])
-        fail_ids = [r.rule_id for r in report.results if r.level == "FAIL"]
-        assert "PRB-001" in fail_ids
+        assert "PRB-001" in [r.rule_id for r in report.results if r.level == "FAIL"]
 
-    def test_prb001_both_probes_passes(self, tmp_path: Path) -> None:
+    def test_pass_when_liveness_probe_set(self, tmp_path: Path) -> None:
         doc = _minimal_deployment()
-        mf = tmp_path / "dep.yaml"
-        mf.write_text(_manifest_yaml(doc))
-
+        mf = _write_file(tmp_path, doc)
         report = _validator().validate([mf])
-        fail_ids = [r.rule_id for r in report.results if r.level == "FAIL"]
-        assert "PRB-001" not in fail_ids
+        assert "PRB-001" not in [r.rule_id for r in report.results if r.level == "FAIL"]
 
-    def test_prb002_initialdelay_zero_warns(self, tmp_path: Path) -> None:
-        probe_zero = {"httpGet": {"path": "/healthz", "port": 8080}, "initialDelaySeconds": 0}
-        doc = _minimal_deployment(liveness_probe=probe_zero)
-        mf = tmp_path / "dep.yaml"
-        mf.write_text(_manifest_yaml(doc))
 
+# ─── PRB-002 ─────────────────────────────────────────────────────────────────
+
+
+class TestPRB002:
+    """PRB-002: readinessProbe 존재."""
+
+    def test_fail_when_readiness_probe_missing(self, tmp_path: Path) -> None:
+        doc = _minimal_deployment()
+        doc["spec"]["template"]["spec"]["containers"][0].pop("readinessProbe", None)
+        mf = _write_file(tmp_path, doc)
         report = _validator().validate([mf])
-        warn_ids = [r.rule_id for r in report.results if r.level == "WARN"]
-        assert "PRB-002" in warn_ids
+        assert "PRB-002" in [r.rule_id for r in report.results if r.level == "FAIL"]
 
-    def test_prb002_positive_delay_no_warn(self, tmp_path: Path) -> None:
-        doc = _minimal_deployment()  # 기본값 initialDelaySeconds=10
-        mf = tmp_path / "dep.yaml"
-        mf.write_text(_manifest_yaml(doc))
-
+    def test_pass_when_readiness_probe_set(self, tmp_path: Path) -> None:
+        doc = _minimal_deployment()
+        mf = _write_file(tmp_path, doc)
         report = _validator().validate([mf])
-        warn_ids = [r.rule_id for r in report.results if r.level == "WARN"]
-        assert "PRB-002" not in warn_ids
+        assert "PRB-002" not in [r.rule_id for r in report.results if r.level == "FAIL"]
 
 
-# ─── RES-W01: CPU limit < request ────────────────────────────────────────────
+# ─── RES-W01: CPU limit/request > 4배 ───────────────────────────────────────
 
 
 class TestRESW01:
-    def test_res_w01_cpu_limit_less_than_request_warns(self, tmp_path: Path) -> None:
-        # cpu request=500m, limit=100m → limit < request
+    """RES-W01: limit/request > 4배 WARN."""
+
+    def test_warn_when_ratio_exceeds_4x(self, tmp_path: Path) -> None:
         res = {
-            "requests": {"cpu": "500m", "memory": "128Mi"},
-            "limits": {"cpu": "100m", "memory": "512Mi"},
+            "requests": {"cpu": "100m", "memory": "128Mi"},
+            "limits": {"cpu": "500m", "memory": "512Mi"},
         }
         doc = _minimal_deployment(resources=res)
-        mf = tmp_path / "dep.yaml"
-        mf.write_text(_manifest_yaml(doc))
-
+        mf = _write_file(tmp_path, doc)
         report = _validator().validate([mf])
-        warn_ids = [r.rule_id for r in report.results if r.level == "WARN"]
-        assert "RES-W01" in warn_ids
+        assert "RES-W01" in [r.rule_id for r in report.results if r.level == "WARN"]
 
-    def test_res_w01_sane_cpu_no_warn(self, tmp_path: Path) -> None:
-        doc = _minimal_deployment()
-        mf = tmp_path / "dep.yaml"
-        mf.write_text(_manifest_yaml(doc))
-
+    def test_no_warn_when_ratio_exactly_4x(self, tmp_path: Path) -> None:
+        res = {
+            "requests": {"cpu": "100m", "memory": "128Mi"},
+            "limits": {"cpu": "400m", "memory": "512Mi"},
+        }
+        doc = _minimal_deployment(resources=res)
+        mf = _write_file(tmp_path, doc)
         report = _validator().validate([mf])
-        warn_ids = [r.rule_id for r in report.results if r.level == "WARN"]
-        assert "RES-W01" not in warn_ids
+        assert "RES-W01" not in [r.rule_id for r in report.results if r.level == "WARN"]
+
+    def test_no_warn_when_sane_ratio(self, tmp_path: Path) -> None:
+        doc = _minimal_deployment()  # 100m / 500m = 5x → WARN
+        # 기본값은 5배이므로 4배 이하로 변경
+        doc["spec"]["template"]["spec"]["containers"][0]["resources"] = {
+            "requests": {"cpu": "200m", "memory": "128Mi"},
+            "limits": {"cpu": "500m", "memory": "512Mi"},
+        }
+        mf = _write_file(tmp_path, doc)
+        report = _validator().validate([mf])
+        assert "RES-W01" not in [r.rule_id for r in report.results if r.level == "WARN"]
+
+
+# ─── IMG-W01: digest pinning ─────────────────────────────────────────────────
+
+
+class TestIMGW01:
+    """IMG-W01: digest pinning 미사용 WARN."""
+
+    def test_warn_when_no_digest(self, tmp_path: Path) -> None:
+        doc = _minimal_deployment(image="myregistry.io/app:v1.2.3")
+        mf = _write_file(tmp_path, doc)
+        report = _validator().validate([mf])
+        assert "IMG-W01" in [r.rule_id for r in report.results if r.level == "WARN"]
+
+    def test_no_warn_when_digest_pinned(self, tmp_path: Path) -> None:
+        doc = _minimal_deployment(
+            image="myregistry.io/app:v1.2.3@sha256:abc123def456abc123def456abc123def456abc123def456abc123def456abc1"
+        )
+        mf = _write_file(tmp_path, doc)
+        report = _validator().validate([mf])
+        assert "IMG-W01" not in [r.rule_id for r in report.results if r.level == "WARN"]
 
 
 # ─── YAML 파싱 / 멀티문서 / 디렉토리 탐색 ──────────────────────────────────────
@@ -706,20 +794,16 @@ class TestYAMLHandling:
     def test_malformed_yaml_reports_fail(self, tmp_path: Path) -> None:
         mf = tmp_path / "bad.yaml"
         mf.write_text("key: [unclosed bracket\n")
-
         report = _validator().validate([mf])
         assert report.exit_code == 1
         assert any(r.level == "FAIL" for r in report.results)
 
     def test_multi_document_yaml(self, tmp_path: Path) -> None:
         dep = _minimal_deployment()
-        svc = _service_yaml(svc_type="ClusterIP")
-        mf = tmp_path / "manifests.yaml"
-        mf.write_text(_manifest_yaml(dep, svc))
-
+        svc = _minimal_service()
+        mf = _write_file(tmp_path, dep, svc)
         report = _validator().validate([mf])
         rule_ids = {r.rule_id for r in report.results}
-        # Deployment 규칙과 Service 규칙이 모두 체크됨
         assert any(rid.startswith("SEC-") for rid in rule_ids)
         assert any(rid.startswith("SVC-") for rid in rule_ids)
 
@@ -728,9 +812,8 @@ class TestYAMLHandling:
         sub.mkdir()
         dep = _minimal_deployment()
         (sub / "deployment.yaml").write_text(_manifest_yaml(dep))
-        svc = _service_yaml()
+        svc = _minimal_service()
         (sub / "service.yaml").write_text(_manifest_yaml(svc))
-
         report = _validator().validate([sub])
         rule_ids = {r.rule_id for r in report.results}
         assert any(rid.startswith("SEC-") for rid in rule_ids)
@@ -739,8 +822,6 @@ class TestYAMLHandling:
     def test_empty_yaml_document_skipped(self, tmp_path: Path) -> None:
         mf = tmp_path / "empty.yaml"
         mf.write_text("---\n---\n")
-
-        # 빈 document 처리 시 예외 발생하지 않음
         report = _validator().validate([mf])
         assert isinstance(report, ValidationReport)
 
@@ -750,30 +831,33 @@ class TestYAMLHandling:
 
 class TestExitCode:
     def test_exit_code_0_all_pass(self, tmp_path: Path) -> None:
-        # 완전히 올바른 manifest → exit_code 0
         dep = _minimal_deployment(
-            image="myregistry.io/app:v1.0.0@sha256:abc123def456abc123def456abc123def456abc123def456abc123def456abc1"
+            image="myregistry.io/app:v1.0.0@sha256:abc123def456abc123def456abc123def456abc123def456abc123def456abc1",
+            resources={
+                "requests": {"cpu": "200m", "memory": "128Mi"},
+                "limits": {"cpu": "500m", "memory": "512Mi"},
+            },
         )
-        mf = tmp_path / "dep.yaml"
-        mf.write_text(_manifest_yaml(dep))
-
+        mf = _write_file(tmp_path, dep)
         report = _validator().validate([mf])
         assert report.exit_code == 0
 
     def test_exit_code_1_any_fail(self, tmp_path: Path) -> None:
         doc = _minimal_deployment(run_as_non_root=False)
-        mf = tmp_path / "dep.yaml"
-        mf.write_text(_manifest_yaml(doc))
-
+        mf = _write_file(tmp_path, doc)
         report = _validator().validate([mf])
         assert report.exit_code == 1
 
     def test_exit_code_2_warn_only(self, tmp_path: Path) -> None:
-        # LoadBalancer Service → SVC-002 WARN, FAIL 없음
-        svc = _service_yaml(svc_type="LoadBalancer")
-        mf = tmp_path / "svc.yaml"
-        mf.write_text(_manifest_yaml(svc))
-
+        # IMG-W01 WARN만 발생하도록: 완전히 올바른 manifest + digest 없음
+        dep = _minimal_deployment(
+            image="myregistry.io/app:v1.0.0",
+            resources={
+                "requests": {"cpu": "200m", "memory": "128Mi"},
+                "limits": {"cpu": "500m", "memory": "512Mi"},
+            },
+        )
+        mf = _write_file(tmp_path, dep)
         report = _validator().validate([mf])
         assert report.exit_code == 2
 
@@ -788,47 +872,44 @@ class TestExitCode:
 
 
 class TestJSONOutput:
-    def test_json_output_contains_all_fields(self, tmp_path: Path) -> None:
+    def test_json_output_contains_all_top_level_fields(self, tmp_path: Path) -> None:
         dep = _minimal_deployment(
-            image="myregistry.io/app:v1.0.0@sha256:abc123def456abc123def456abc123def456abc123def456abc123def456abc1"
+            image="myregistry.io/app:v1.0.0@sha256:abc123def456abc123def456abc123def456abc123def456abc123def456abc1",
+            resources={
+                "requests": {"cpu": "200m", "memory": "128Mi"},
+                "limits": {"cpu": "500m", "memory": "512Mi"},
+            },
         )
-        mf = tmp_path / "dep.yaml"
-        mf.write_text(_manifest_yaml(dep))
-
+        mf = _write_file(tmp_path, dep)
         v = K8sValidator(skipped=["kubectl_dry_run"])
         report = v.validate([mf])
-        output = v.to_json(report, skipped=["kubectl_dry_run"])
-
-        data = json.loads(output)
+        data = json.loads(v.to_json(report, skipped=["kubectl_dry_run"]))
         assert "results" in data
         assert "counts" in data
         assert "exit_code" in data
         assert "skipped" in data
 
-    def test_skipped_field_passed_through_to_json(self, tmp_path: Path) -> None:
+    def test_skipped_field_passed_through(self, tmp_path: Path) -> None:
         dep = _minimal_deployment(
-            image="myregistry.io/app:v1.0.0@sha256:abc123def456abc123def456abc123def456abc123def456abc123def456abc1"
+            image="myregistry.io/app:v1.0.0@sha256:abc123def456abc123def456abc123def456abc123def456abc123def456abc1",
+            resources={
+                "requests": {"cpu": "200m", "memory": "128Mi"},
+                "limits": {"cpu": "500m", "memory": "512Mi"},
+            },
         )
-        mf = tmp_path / "dep.yaml"
-        mf.write_text(_manifest_yaml(dep))
-
+        mf = _write_file(tmp_path, dep)
         v = K8sValidator(skipped=["kubectl_dry_run", "container_build"])
         report = v.validate([mf])
-        output = v.to_json(report, skipped=["kubectl_dry_run", "container_build"])
-
-        data = json.loads(output)
+        data = json.loads(v.to_json(report, skipped=["kubectl_dry_run", "container_build"]))
         assert "kubectl_dry_run" in data["skipped"]
         assert "container_build" in data["skipped"]
 
     def test_json_results_have_required_keys(self, tmp_path: Path) -> None:
         dep = _minimal_deployment(run_as_non_root=False)
-        mf = tmp_path / "dep.yaml"
-        mf.write_text(_manifest_yaml(dep))
-
+        mf = _write_file(tmp_path, dep)
         v = K8sValidator()
         report = v.validate([mf])
         data = json.loads(v.to_json(report))
-
         for item in data["results"]:
             assert "rule_id" in item
             assert "level" in item
@@ -837,39 +918,33 @@ class TestJSONOutput:
             assert "message_en" in item
             assert "suggestion" in item
 
-    def test_skipped_in_report_without_extra_arg(self, tmp_path: Path) -> None:
+    def test_skipped_in_report_object(self, tmp_path: Path) -> None:
         dep = _minimal_deployment(
-            image="myregistry.io/app:v1.0.0@sha256:abc123def456abc123def456abc123def456abc123def456abc123def456abc1"
+            image="myregistry.io/app:v1.0.0@sha256:abc123def456abc123def456abc123def456abc123def456abc123def456abc1",
+            resources={
+                "requests": {"cpu": "200m", "memory": "128Mi"},
+                "limits": {"cpu": "500m", "memory": "512Mi"},
+            },
         )
-        mf = tmp_path / "dep.yaml"
-        mf.write_text(_manifest_yaml(dep))
-
+        mf = _write_file(tmp_path, dep)
         v = K8sValidator(skipped=["kubectl_dry_run"])
         report = v.validate([mf])
-
         assert "kubectl_dry_run" in report.skipped
 
     def test_counts_accurate(self, tmp_path: Path) -> None:
-        # FAIL + WARN 모두 발생하는 케이스에서 counts 검증
-        dep = _minimal_deployment(run_as_non_root=False)  # SEC-001 FAIL
-        svc = _service_yaml(svc_type="LoadBalancer")  # SVC-002 WARN
-        mf = tmp_path / "multi.yaml"
-        mf.write_text(_manifest_yaml(dep, svc))
-
+        dep = _minimal_deployment(run_as_non_root=False)
+        mf = _write_file(tmp_path, dep)
         report = _validator().validate([mf])
         assert report.counts["fail"] >= 1
-        assert report.counts["warn"] >= 1
 
 
-# ─── CheckResult 메시지 품질 ─────────────────────────────────────────────────
+# ─── CheckResult 메시지 품질 (F-46) ─────────────────────────────────────────
 
 
 class TestMessageQuality:
-    def test_checkresult_has_korean_and_english_messages(self, tmp_path: Path) -> None:
+    def test_fail_result_has_korean_and_english_messages(self, tmp_path: Path) -> None:
         doc = _minimal_deployment(run_as_non_root=False)
-        mf = tmp_path / "dep.yaml"
-        mf.write_text(_manifest_yaml(doc))
-
+        mf = _write_file(tmp_path, doc)
         report = _validator().validate([mf])
         fails = [r for r in report.results if r.rule_id == "SEC-001" and r.level == "FAIL"]
         assert len(fails) >= 1
@@ -878,16 +953,30 @@ class TestMessageQuality:
         assert cr.message_en, "message_en 비어있음"
         assert cr.suggestion, "suggestion 비어있음"
 
-    def test_checkresult_rule_id_format(self, tmp_path: Path) -> None:
+    def test_rule_id_format(self, tmp_path: Path) -> None:
         doc = _minimal_deployment(run_as_non_root=False)
-        mf = tmp_path / "dep.yaml"
-        mf.write_text(_manifest_yaml(doc))
-
+        mf = _write_file(tmp_path, doc)
         report = _validator().validate([mf])
         for r in report.results:
-            # rule_id는 PREFIX-NNN 형식
             parts = r.rule_id.split("-")
             assert len(parts) >= 2, f"잘못된 rule_id 형식: {r.rule_id}"
+
+    def test_f46_message_format_structure(self, tmp_path: Path) -> None:
+        """F-46: FAIL result는 message_ko와 suggestion이 각각 분리되어 있어야 함."""
+        doc = _minimal_deployment(run_as_non_root=False)
+        mf = _write_file(tmp_path, doc)
+        report = _validator().validate([mf])
+        sec001_fails = [
+            r for r in report.results if r.rule_id == "SEC-001" and r.level == "FAIL"
+        ]
+        assert sec001_fails
+        cr = sec001_fails[0]
+        # message_ko는 설명만 (제안 없음)
+        assert cr.message_ko
+        # suggestion은 수정 제안만
+        assert cr.suggestion
+        # 두 필드가 분리되어 있음
+        assert cr.message_ko != cr.suggestion
 
 
 # ─── CLI 통합 (argparse + main) ───────────────────────────────────────────────
@@ -900,13 +989,14 @@ class TestCLI:
         import sys
 
         dep = _minimal_deployment(
-            image="myregistry.io/app:v1.0.0@sha256:abc123def456abc123def456abc123def456abc123def456abc123def456abc1"
+            image="myregistry.io/app:v1.0.0@sha256:abc123def456abc123def456abc123def456abc123def456abc123def456abc1",
+            resources={
+                "requests": {"cpu": "200m", "memory": "128Mi"},
+                "limits": {"cpu": "500m", "memory": "512Mi"},
+            },
         )
-        mf = tmp_path / "dep.yaml"
-        mf.write_text(_manifest_yaml(dep))
-
+        mf = _write_file(tmp_path, dep)
         from scripts.validate_k8s import main
-
         monkeypatch.setattr(sys, "argv", ["validate_k8s.py", str(mf)])
         code = main()
         assert code == 0
@@ -915,11 +1005,8 @@ class TestCLI:
         import sys
 
         dep = _minimal_deployment(run_as_non_root=False)
-        mf = tmp_path / "dep.yaml"
-        mf.write_text(_manifest_yaml(dep))
-
+        mf = _write_file(tmp_path, dep)
         from scripts.validate_k8s import main
-
         monkeypatch.setattr(sys, "argv", ["validate_k8s.py", str(mf)])
         code = main()
         assert code == 1
@@ -930,13 +1017,14 @@ class TestCLI:
         import sys
 
         dep = _minimal_deployment(
-            image="myregistry.io/app:v1.0.0@sha256:abc123def456abc123def456abc123def456abc123def456abc123def456abc1"
+            image="myregistry.io/app:v1.0.0@sha256:abc123def456abc123def456abc123def456abc123def456abc123def456abc1",
+            resources={
+                "requests": {"cpu": "200m", "memory": "128Mi"},
+                "limits": {"cpu": "500m", "memory": "512Mi"},
+            },
         )
-        mf = tmp_path / "dep.yaml"
-        mf.write_text(_manifest_yaml(dep))
-
+        mf = _write_file(tmp_path, dep)
         from scripts.validate_k8s import main
-
         monkeypatch.setattr(sys, "argv", ["validate_k8s.py", "--json", str(mf)])
         main()
         captured = capsys.readouterr()
@@ -949,13 +1037,14 @@ class TestCLI:
         import sys
 
         dep = _minimal_deployment(
-            image="myregistry.io/app:v1.0.0@sha256:abc123def456abc123def456abc123def456abc123def456abc123def456abc1"
+            image="myregistry.io/app:v1.0.0@sha256:abc123def456abc123def456abc123def456abc123def456abc123def456abc1",
+            resources={
+                "requests": {"cpu": "200m", "memory": "128Mi"},
+                "limits": {"cpu": "500m", "memory": "512Mi"},
+            },
         )
-        mf = tmp_path / "dep.yaml"
-        mf.write_text(_manifest_yaml(dep))
-
+        mf = _write_file(tmp_path, dep)
         from scripts.validate_k8s import main
-
         monkeypatch.setattr(
             sys,
             "argv",

@@ -7,6 +7,10 @@ Exit codes (F-42):
     0 — all PASS
     1 — FAIL 존재
     2 — FAIL 없음 + WARN 존재 (soft-success)
+
+Consumer 주의 (F-42):
+    set -e 환경에서 exit code 2 (soft-success)를 실패로 오인하지 않도록
+    ``&& [ $? -le 2 ]`` 또는 ``|| [ $? -eq 2 ]`` 처리가 필요합니다.
 """
 
 from __future__ import annotations
@@ -25,49 +29,18 @@ from scripts._shared.errors import MalformedManifestError
 from scripts._shared.fileio import read_text_limited
 from scripts._shared.types import CheckResult, ValidationReport
 
-# ─── 위험 Capability 목록 (SEC-005) ──────────────────────────────────────────
+# ─── 상수 ─────────────────────────────────────────────────────────────────────
 
-_DANGEROUS_CAPS: frozenset[str] = frozenset(
-    [
-        "SYS_ADMIN",
-        "NET_ADMIN",
-        "SYS_PTRACE",
-        "SYS_MODULE",
-        "SYS_RAWIO",
-        "SYS_BOOT",
-        "SYS_TIME",
-        "SYS_TTY_CONFIG",
-        "NET_RAW",
-        "IPC_LOCK",
-        "LINUX_IMMUTABLE",
-        "SYS_CHROOT",
-        "MKNOD",
-        "SETPCAP",
-        "AUDIT_WRITE",
-        "AUDIT_CONTROL",
-        "MAC_OVERRIDE",
-        "MAC_ADMIN",
-        "SYSLOG",
-        "WAKE_ALARM",
-        "BLOCK_SUSPEND",
-        "AUDIT_READ",
-        "PERFMON",
-        "BPF",
-        "CHECKPOINT_RESTORE",
-    ]
-)
-
-# 유효 seccompProfile type
+# 유효 seccompProfile type (SEC-006)
 _VALID_SECCOMP_TYPES: frozenset[str] = frozenset(["RuntimeDefault", "Localhost"])
 
-# 시크릿 keyword 패턴 (환경변수 이름 기준, case-insensitive)
+# 시크릿 keyword 패턴 (환경변수 이름 기준, case-insensitive) — SEC-009
 _SECRET_NAME_RE = re.compile(
-    r"(password|passwd|secret|token|api[_-]?key|auth[_-]?key"
-    r"|private[_-]?key|credential|apikey)",
+    r"(password|passwd|secret|token|api[_-]?key|apikey|auth[_-]?key|private[_-]?key)",
     re.IGNORECASE,
 )
 
-# CPU 단위를 millicores(int)로 변환하기 위한 패턴
+# CPU 단위를 millicores(int)로 변환 — RES-W01
 _CPU_MILLI_RE = re.compile(r"^(\d+(?:\.\d+)?)(m?)$")
 
 
@@ -92,7 +65,7 @@ def _compute_exit_code(counts: dict[str, int]) -> int:
     Returns:
         0 if no FAIL, no WARN  (all pass)
         1 if any FAIL
-        2 if no FAIL, any WARN
+        2 if no FAIL, any WARN (soft-success)
     """
     if counts.get("fail", 0) > 0:
         return 1
@@ -116,7 +89,7 @@ def _safe_collect_file(path: Path) -> list[dict[str, Any]]:
 
 
 class K8sValidator:
-    """stack-agnostic Kubernetes manifest 정적 검증기.
+    """stack-agnostic Kubernetes manifest 정적 검증기 (F-43).
 
     Args:
         skipped: CLI --skipped 로 전달된 식별자 목록 (결과에 영향 없이 pass-through).
@@ -130,14 +103,18 @@ class K8sValidator:
     def validate(self, manifests: list[Path | str]) -> ValidationReport:
         """manifests 경로 목록(파일 또는 디렉토리)에 대해 모든 규칙 적용.
 
+        SVC-002 교차 검증을 위해 먼저 전체 document 목록을 수집한 뒤 검증한다.
+
         Args:
             manifests: YAML 파일 경로 또는 디렉토리 경로 목록.
 
         Returns:
             ValidationReport (results, counts, exit_code, skipped).
         """
-        results: list[CheckResult] = []
+        # 파일/디렉토리별로 document 목록을 수집 (파일 단위 PARSE-ERR 처리 포함)
+        all_docs_per_file: list[tuple[Path, list[dict[str, Any]] | None]] = []
 
+        file_paths: list[Path] = []
         for entry in manifests:
             path = Path(entry)
             if path.is_dir():
@@ -146,10 +123,38 @@ class K8sValidator:
                     for p in path.rglob("*")
                     if p.suffix in (".yaml", ".yml") and p.is_file()
                 )
-                for yf in yaml_files:
-                    results.extend(self._validate_file_safe(yf))
+                file_paths.extend(yaml_files)
             else:
-                results.extend(self._validate_file_safe(path))
+                file_paths.append(path)
+
+        results: list[CheckResult] = []
+        all_valid_docs: list[dict[str, Any]] = []
+
+        for fp in file_paths:
+            try:
+                docs = _safe_collect_file(fp)
+                valid_docs = [d for d in docs if d is not None]
+                all_docs_per_file.append((fp, valid_docs))
+                all_valid_docs.extend(valid_docs)
+            except MalformedManifestError as exc:
+                all_docs_per_file.append((fp, None))
+                results.append(
+                    CheckResult(
+                        rule_id="PARSE-ERR",
+                        level="FAIL",
+                        container="(file)",
+                        message_ko=f"YAML 파싱 실패: {exc}",
+                        message_en=f"YAML parse error: {exc}",
+                        suggestion="YAML 구문을 확인하세요.",
+                    )
+                )
+
+        # 각 파일의 document를 검증 (SVC-002 교차 검증은 file-scope)
+        for _fp, file_docs in all_docs_per_file:
+            if file_docs is None:
+                continue
+            for doc in file_docs:
+                results.extend(self._validate_doc(doc, context_docs=file_docs))
 
         counts: dict[str, int] = {
             "pass": sum(1 for r in results if r.level == "PASS"),
@@ -202,36 +207,19 @@ class K8sValidator:
             indent=2,
         )
 
-    # ── 파일 단위 처리 ────────────────────────────────────────────────────────
+    # ── document 단위 처리 ────────────────────────────────────────────────────
 
-    def _validate_file_safe(self, path: Path) -> list[CheckResult]:
-        """MalformedManifestError를 단일 FAIL CheckResult 로 변환하여 반환."""
-        try:
-            return self._validate_file(path)
-        except MalformedManifestError as exc:
-            return [
-                CheckResult(
-                    rule_id="PARSE-ERR",
-                    level="FAIL",
-                    container="(file)",
-                    message_ko=f"YAML 파싱 실패: {exc}",
-                    message_en=f"YAML parse error: {exc}",
-                    suggestion="YAML 구문을 확인하세요.",
-                )
-            ]
+    def _validate_doc(
+        self,
+        doc: dict[str, Any],
+        context_docs: list[dict[str, Any]] | None = None,
+    ) -> list[CheckResult]:
+        """단일 YAML document 검증 (kind 기반 분기).
 
-    def _validate_file(self, path: Path) -> list[CheckResult]:
-        """단일 YAML 파일 검증. 파싱 실패 시 MalformedManifestError raise."""
-        docs = _safe_collect_file(path)
-        results: list[CheckResult] = []
-        for doc in docs:
-            if doc is None:
-                continue
-            results.extend(self._validate_doc(doc))
-        return results
-
-    def _validate_doc(self, doc: dict[str, Any]) -> list[CheckResult]:
-        """단일 YAML document 검증 (kind 기반 분기)."""
+        Args:
+            doc: 검증할 document.
+            context_docs: SVC-002 교차 검증에 사용할 동일 파일 내 document 목록.
+        """
         kind = str(doc.get("kind", ""))
         results: list[CheckResult] = []
 
@@ -240,7 +228,7 @@ class K8sValidator:
         elif kind == "Pod":
             results.extend(self._check_pod_spec(doc.get("spec", {})))
         elif kind == "Service":
-            results.extend(self._check_service(doc))
+            results.extend(self._check_service(doc, context_docs=context_docs))
 
         return results
 
@@ -263,7 +251,7 @@ class K8sValidator:
         return self._check_pod_spec(pod_spec)
 
     def _check_pod_spec(self, pod_spec: dict[str, Any]) -> list[CheckResult]:
-        """Pod spec 레벨 규칙 검증."""
+        """Pod spec 레벨 규칙 검증 (F-44: containers + initContainers 모두 순회)."""
         results: list[CheckResult] = []
 
         # Pod-level 규칙
@@ -276,19 +264,23 @@ class K8sValidator:
         init_containers: list[dict[str, Any]] = pod_spec.get("initContainers", [])
 
         for container in containers + init_containers:
-            results.extend(self._check_container(container))
+            results.extend(self._check_container(container, pod_spec=pod_spec))
 
         return results
 
-    def _check_container(self, container: dict[str, Any]) -> list[CheckResult]:
+    def _check_container(
+        self, container: dict[str, Any], pod_spec: dict[str, Any] | None = None
+    ) -> list[CheckResult]:
         """컨테이너 레벨 규칙 전체 적용."""
         results: list[CheckResult] = []
-        results.extend(self._rule_sec001(container))
+        pod_sc = (pod_spec or {}).get("securityContext", {})
+
+        results.extend(self._rule_sec001(container, pod_sc=pod_sc))
         results.extend(self._rule_sec002(container))
         results.extend(self._rule_sec003(container))
         results.extend(self._rule_sec004(container))
         results.extend(self._rule_sec005(container))
-        results.extend(self._rule_sec007(container))
+        results.extend(self._rule_sec007(container, pod_sc=pod_sc))
         results.extend(self._rule_sec009(container))
         results.extend(self._rule_res001(container))
         results.extend(self._rule_res_w01(container))
@@ -300,11 +292,19 @@ class K8sValidator:
 
     # ── SEC 규칙 ──────────────────────────────────────────────────────────────
 
-    def _rule_sec001(self, c: dict[str, Any]) -> list[CheckResult]:
-        """SEC-001: runAsNonRoot: true 필수."""
+    def _rule_sec001(
+        self, c: dict[str, Any], pod_sc: dict[str, Any] | None = None
+    ) -> list[CheckResult]:
+        """SEC-001: runAsNonRoot: true 필수 (Pod 또는 container securityContext)."""
         name = str(c.get("name", "unknown"))
-        sc = c.get("securityContext", {})
-        if sc.get("runAsNonRoot") is True:
+        container_sc = c.get("securityContext", {})
+
+        # container 레벨 우선, 없으면 pod 레벨 확인
+        value = container_sc.get("runAsNonRoot")
+        if value is None and pod_sc:
+            value = pod_sc.get("runAsNonRoot")
+
+        if value is True:
             return [
                 CheckResult(
                     rule_id="SEC-001",
@@ -320,41 +320,41 @@ class K8sValidator:
                 rule_id="SEC-001",
                 level="FAIL",
                 container=name,
-                message_ko=f"[{name}] runAsNonRoot가 설정되지 않았거나 false입니다.",
-                message_en=f"[{name}] runAsNonRoot is not set or is false.",
+                message_ko="runAsNonRoot 미설정",
+                message_en="runAsNonRoot is not set or is false.",
                 suggestion=(
-                    "spec.securityContext.runAsNonRoot: true 를 추가하세요. "
-                    "미설정 시 컨테이너 탈출 공격에서 호스트 root 권한 획득이 가능합니다."
+                    "spec.securityContext.runAsNonRoot: true 추가. "
+                    "미설정 시 컨테이너 탈출 공격 시 호스트 root 권한 획득 가능"
                 ),
             )
         ]
 
     def _rule_sec002(self, c: dict[str, Any]) -> list[CheckResult]:
-        """SEC-002: readOnlyRootFilesystem: true 필수."""
+        """SEC-002: privileged: true 금지 (false 또는 미설정)."""
         name = str(c.get("name", "unknown"))
         sc = c.get("securityContext", {})
-        if sc.get("readOnlyRootFilesystem") is True:
+        if sc.get("privileged") is True:
             return [
                 CheckResult(
                     rule_id="SEC-002",
-                    level="PASS",
+                    level="FAIL",
                     container=name,
-                    message_ko="readOnlyRootFilesystem이 true로 설정되어 있습니다.",
-                    message_en="readOnlyRootFilesystem is set to true.",
-                    suggestion="",
+                    message_ko="privileged: true 설정 금지",
+                    message_en="privileged: true is not allowed.",
+                    suggestion=(
+                        "securityContext.privileged: true 를 제거하세요. "
+                        "privileged 컨테이너는 호스트 커널에 무제한 접근이 가능합니다."
+                    ),
                 )
             ]
         return [
             CheckResult(
                 rule_id="SEC-002",
-                level="FAIL",
+                level="PASS",
                 container=name,
-                message_ko=f"[{name}] readOnlyRootFilesystem이 true가 아닙니다.",
-                message_en=f"[{name}] readOnlyRootFilesystem is not true.",
-                suggestion=(
-                    "securityContext.readOnlyRootFilesystem: true 를 추가하세요. "
-                    "쓰기 가능한 루트 파일시스템은 악성코드 주입 경로가 됩니다."
-                ),
+                message_ko="privileged 모드가 비활성화되어 있습니다.",
+                message_en="privileged mode is disabled.",
+                suggestion="",
             )
         ]
 
@@ -379,8 +379,8 @@ class K8sValidator:
                 rule_id="SEC-003",
                 level="FAIL",
                 container=name,
-                message_ko=f"[{name}] allowPrivilegeEscalation이 false가 아닙니다 (현재: {val!r}).",
-                message_en=f"[{name}] allowPrivilegeEscalation is not false (current: {val!r}).",
+                message_ko=f"allowPrivilegeEscalation 미설정 (현재: {val!r})",
+                message_en=f"allowPrivilegeEscalation is not false (current: {val!r}).",
                 suggestion=(
                     "securityContext.allowPrivilegeEscalation: false 를 추가하세요. "
                     "setuid 바이너리를 통한 권한 상승이 가능해집니다."
@@ -389,7 +389,36 @@ class K8sValidator:
         ]
 
     def _rule_sec004(self, c: dict[str, Any]) -> list[CheckResult]:
-        """SEC-004: capabilities.drop에 ALL 포함 필수."""
+        """SEC-004: readOnlyRootFilesystem: true 필수."""
+        name = str(c.get("name", "unknown"))
+        sc = c.get("securityContext", {})
+        if sc.get("readOnlyRootFilesystem") is True:
+            return [
+                CheckResult(
+                    rule_id="SEC-004",
+                    level="PASS",
+                    container=name,
+                    message_ko="readOnlyRootFilesystem이 true로 설정되어 있습니다.",
+                    message_en="readOnlyRootFilesystem is set to true.",
+                    suggestion="",
+                )
+            ]
+        return [
+            CheckResult(
+                rule_id="SEC-004",
+                level="FAIL",
+                container=name,
+                message_ko="readOnlyRootFilesystem 미설정",
+                message_en="readOnlyRootFilesystem is not set to true.",
+                suggestion=(
+                    "securityContext.readOnlyRootFilesystem: true 를 추가하세요. "
+                    "쓰기 가능한 루트 파일시스템은 악성코드 주입 경로가 됩니다."
+                ),
+            )
+        ]
+
+    def _rule_sec005(self, c: dict[str, Any]) -> list[CheckResult]:
+        """SEC-005: capabilities.drop에 ALL 포함 필수."""
         name = str(c.get("name", "unknown"))
         sc = c.get("securityContext", {})
         caps = sc.get("capabilities", {})
@@ -397,7 +426,7 @@ class K8sValidator:
         if "ALL" in drop:
             return [
                 CheckResult(
-                    rule_id="SEC-004",
+                    rule_id="SEC-005",
                     level="PASS",
                     container=name,
                     message_ko="capabilities.drop에 ALL이 포함되어 있습니다.",
@@ -407,11 +436,11 @@ class K8sValidator:
             ]
         return [
             CheckResult(
-                rule_id="SEC-004",
+                rule_id="SEC-005",
                 level="FAIL",
                 container=name,
-                message_ko=f"[{name}] capabilities.drop에 ALL이 없습니다.",
-                message_en=f"[{name}] capabilities.drop does not include ALL.",
+                message_ko="capabilities.drop에 ALL 미포함",
+                message_en="capabilities.drop does not include ALL.",
                 suggestion=(
                     "securityContext.capabilities.drop: [ALL] 을 추가하세요. "
                     "불필요한 Linux capability를 모두 제거해야 공격 표면이 최소화됩니다."
@@ -419,40 +448,8 @@ class K8sValidator:
             )
         ]
 
-    def _rule_sec005(self, c: dict[str, Any]) -> list[CheckResult]:
-        """SEC-005: capabilities.add에 위험 capability 없음."""
-        name = str(c.get("name", "unknown"))
-        sc = c.get("securityContext", {})
-        caps = sc.get("capabilities", {})
-        add = [str(x).upper() for x in caps.get("add", [])]
-        dangerous = [cap for cap in add if cap in _DANGEROUS_CAPS]
-        if dangerous:
-            return [
-                CheckResult(
-                    rule_id="SEC-005",
-                    level="FAIL",
-                    container=name,
-                    message_ko=f"[{name}] 위험한 capability가 추가되었습니다: {dangerous}.",
-                    message_en=f"[{name}] Dangerous capabilities added: {dangerous}.",
-                    suggestion=(
-                        f"capabilities.add에서 {dangerous}를 제거하세요. "
-                        "이 capability들은 호스트 커널에 대한 광범위한 접근을 허용합니다."
-                    ),
-                )
-            ]
-        return [
-            CheckResult(
-                rule_id="SEC-005",
-                level="PASS",
-                container=name,
-                message_ko="위험한 capability가 없습니다.",
-                message_en="No dangerous capabilities found.",
-                suggestion="",
-            )
-        ]
-
     def _rule_sec006(self, pod_spec: dict[str, Any]) -> list[CheckResult]:
-        """SEC-006: Pod securityContext.seccompProfile.type 검증."""
+        """SEC-006: Pod securityContext.seccompProfile.type 검증 (RuntimeDefault 또는 Localhost)."""
         pod_sc = pod_spec.get("securityContext", {})
         seccomp = pod_sc.get("seccompProfile", {})
         seccomp_type = seccomp.get("type")
@@ -474,111 +471,131 @@ class K8sValidator:
                 level="FAIL",
                 container="(pod)",
                 message_ko=(
-                    f"Pod securityContext.seccompProfile.type이 올바르지 않습니다 "
-                    f"(현재: {seccomp_type!r})."
+                    f"seccompProfile.type 미설정 또는 잘못된 값 (현재: {seccomp_type!r})"
                 ),
                 message_en=(
-                    f"Pod securityContext.seccompProfile.type is invalid "
-                    f"(current: {seccomp_type!r})."
+                    f"seccompProfile.type is invalid (current: {seccomp_type!r})."
                 ),
                 suggestion=(
                     "spec.securityContext.seccompProfile.type: RuntimeDefault"
-                    " 또는 Localhost 를 설정하세요."
-                    " seccomp 프로파일 없이는 컨테이너가 모든 syscall을 호출할 수 있습니다."
+                    " 또는 Localhost 를 설정하세요. "
+                    "seccomp 프로파일 없이는 컨테이너가 모든 syscall을 호출할 수 있습니다."
                 ),
             )
         ]
 
-    def _rule_sec007(self, c: dict[str, Any]) -> list[CheckResult]:
-        """SEC-007: privileged: true 금지."""
+    def _rule_sec007(
+        self, c: dict[str, Any], pod_sc: dict[str, Any] | None = None
+    ) -> list[CheckResult]:
+        """SEC-007: runAsUser > 0 필수 (root=0 금지). Pod 또는 container securityContext."""
         name = str(c.get("name", "unknown"))
-        sc = c.get("securityContext", {})
-        if sc.get("privileged") is True:
+        container_sc = c.get("securityContext", {})
+
+        # container 레벨 우선, 없으면 pod 레벨 확인
+        run_as_user = container_sc.get("runAsUser")
+        if run_as_user is None and pod_sc:
+            run_as_user = pod_sc.get("runAsUser")
+
+        if run_as_user is not None and int(run_as_user) > 0:
             return [
                 CheckResult(
                     rule_id="SEC-007",
-                    level="FAIL",
+                    level="PASS",
                     container=name,
-                    message_ko=f"[{name}] privileged: true 설정은 금지됩니다.",
-                    message_en=f"[{name}] privileged: true is not allowed.",
-                    suggestion=(
-                        "securityContext.privileged: true 를 제거하세요. "
-                        "privileged 컨테이너는 호스트 커널에 무제한 접근이 가능합니다."
-                    ),
+                    message_ko=f"runAsUser가 {run_as_user}으로 설정되어 있습니다.",
+                    message_en=f"runAsUser is set to {run_as_user}.",
+                    suggestion="",
                 )
             ]
         return [
             CheckResult(
                 rule_id="SEC-007",
-                level="PASS",
+                level="FAIL",
                 container=name,
-                message_ko="privileged 모드가 비활성화되어 있습니다.",
-                message_en="privileged mode is disabled.",
-                suggestion="",
+                message_ko=(
+                    f"runAsUser 미설정 또는 root(0) (현재: {run_as_user!r})"
+                ),
+                message_en=(
+                    f"runAsUser is not set or is 0 (root) (current: {run_as_user!r})."
+                ),
+                suggestion=(
+                    "securityContext.runAsUser 를 1 이상으로 설정하세요. "
+                    "runAsUser=0은 root 실행이며 컨테이너 탈출 시 호스트 침해 위험이 있습니다."
+                ),
             )
         ]
 
     def _rule_sec008(self, pod_spec: dict[str, Any]) -> list[CheckResult]:
-        """SEC-008: hostPID / hostNetwork / hostIPC 금지."""
-        results: list[CheckResult] = []
-        for field_name in ("hostPID", "hostNetwork", "hostIPC"):
-            if pod_spec.get(field_name) is True:
-                results.append(
-                    CheckResult(
-                        rule_id="SEC-008",
-                        level="FAIL",
-                        container="(pod)",
-                        message_ko=f"Pod spec.{field_name}: true 는 금지됩니다.",
-                        message_en=f"Pod spec.{field_name}: true is not allowed.",
-                        suggestion=(
-                            f"spec.{field_name} 를 제거하거나 false로 설정하세요. "
-                            "호스트 네임스페이스 공유는 컨테이너 격리를 무력화합니다."
-                        ),
-                    )
-                )
-        if not results:
-            results.append(
+        """SEC-008: fsGroup > 0 필수 (root 그룹 금지). Pod securityContext."""
+        pod_sc = pod_spec.get("securityContext", {})
+        fs_group = pod_sc.get("fsGroup")
+
+        if fs_group is not None and int(fs_group) > 0:
+            return [
                 CheckResult(
                     rule_id="SEC-008",
                     level="PASS",
                     container="(pod)",
-                    message_ko="hostPID/hostNetwork/hostIPC 모두 비활성화되어 있습니다.",
-                    message_en="hostPID/hostNetwork/hostIPC are all disabled.",
+                    message_ko=f"fsGroup이 {fs_group}으로 설정되어 있습니다.",
+                    message_en=f"fsGroup is set to {fs_group}.",
                     suggestion="",
                 )
+            ]
+        return [
+            CheckResult(
+                rule_id="SEC-008",
+                level="FAIL",
+                container="(pod)",
+                message_ko=(
+                    f"fsGroup 미설정 또는 root(0) (현재: {fs_group!r})"
+                ),
+                message_en=(
+                    f"fsGroup is not set or is 0 (root group) (current: {fs_group!r})."
+                ),
+                suggestion=(
+                    "spec.securityContext.fsGroup 을 1 이상의 값으로 설정하세요. "
+                    "fsGroup=0은 root 그룹으로 볼륨에 접근함을 의미합니다."
+                ),
             )
-        return results
+        ]
 
     def _rule_sec009(self, c: dict[str, Any]) -> list[CheckResult]:
-        """SEC-009: 환경변수에 평문 시크릿 탐지."""
+        """SEC-009: 환경변수에 평문 시크릿 탐지 (F-46a).
+
+        env[].name이 시크릿 패턴과 일치하고, value 필드가 존재하고 비어있지 않으면 FAIL.
+        valueFrom 사용 시 PASS.
+        """
         name = str(c.get("name", "unknown"))
         env_list: list[dict[str, Any]] = c.get("env", [])
         results: list[CheckResult] = []
 
         for env in env_list:
             env_name = str(env.get("name", ""))
-            value = env.get("value")
+            # valueFrom 사용 시 안전
             if "valueFrom" in env:
                 continue
+            value = env.get("value")
             if value is None:
                 continue
             value_str = str(value)
-            if _SECRET_NAME_RE.search(env_name) and len(value_str) >= 8:
+            # 빈 문자열은 제외
+            if not value_str:
+                continue
+            if _SECRET_NAME_RE.search(env_name):
                 results.append(
                     CheckResult(
                         rule_id="SEC-009",
                         level="FAIL",
                         container=name,
                         message_ko=(
-                            f"[{name}] 환경변수 {env_name!r}에"
-                            " 평문 시크릿이 포함된 것으로 의심됩니다."
+                            f"환경변수 {env_name!r}에 평문 시크릿 의심"
                         ),
                         message_en=(
-                            f"[{name}] Env var {env_name!r} appears to contain a plaintext secret."
+                            f"Env var {env_name!r} may contain a plaintext secret."
                         ),
                         suggestion=(
-                            f"env[{env_name!r}].valueFrom.secretKeyRef 를 사용하여 "
-                            "Kubernetes Secret에서 값을 참조하세요."
+                            f"env[{env_name!r}]에 valueFrom.secretKeyRef 사용 권장. "
+                            "Kubernetes Secret 오브젝트에서 값을 참조하세요."
                         ),
                     )
                 )
@@ -621,12 +638,12 @@ class K8sValidator:
                     rule_id="RES-001",
                     level="FAIL",
                     container=name,
-                    message_ko=f"[{name}] 리소스 스펙 누락: {', '.join(missing)}.",
-                    message_en=f"[{name}] Missing resource specs: {', '.join(missing)}.",
+                    message_ko=f"리소스 스펙 누락: {', '.join(missing)}",
+                    message_en=f"Missing resource specs: {', '.join(missing)}.",
                     suggestion=(
                         "resources.requests 및 resources.limits에 cpu, memory 값을"
-                        " 모두 설정하세요."
-                        " 미설정 시 OOM 또는 CPU throttling이 예측 불가하게 발생합니다."
+                        " 모두 설정하세요. "
+                        "미설정 시 OOM 또는 CPU throttling이 예측 불가하게 발생합니다."
                     ),
                 )
             ]
@@ -642,7 +659,7 @@ class K8sValidator:
         ]
 
     def _rule_res_w01(self, c: dict[str, Any]) -> list[CheckResult]:
-        """RES-W01: CPU limit < request 경고."""
+        """RES-W01: requests:limits 비율 과도 (limit/request > 4배) 경고."""
         name = str(c.get("name", "unknown"))
         resources = c.get("resources", {})
         requests = resources.get("requests", {})
@@ -656,21 +673,26 @@ class K8sValidator:
         req_milli = _cpu_to_milli(str(req_cpu_str))
         lim_milli = _cpu_to_milli(str(lim_cpu_str))
 
-        if req_milli is not None and lim_milli is not None and lim_milli < req_milli:
+        if (
+            req_milli is not None
+            and lim_milli is not None
+            and req_milli > 0
+            and lim_milli / req_milli > 4
+        ):
             return [
                 CheckResult(
                     rule_id="RES-W01",
                     level="WARN",
                     container=name,
                     message_ko=(
-                        f"[{name}] CPU limit({lim_cpu_str})이 request({req_cpu_str})보다 작습니다."
+                        f"CPU limit({lim_cpu_str}) / request({req_cpu_str}) 비율이 4배 초과"
                     ),
                     message_en=(
-                        f"[{name}] CPU limit ({lim_cpu_str}) is less than request ({req_cpu_str})."
+                        f"CPU limit ({lim_cpu_str}) / request ({req_cpu_str}) ratio exceeds 4x."
                     ),
                     suggestion=(
-                        "CPU limit은 request 이상으로 설정하세요. "
-                        "limit < request 는 스케줄러 예측 불가를 유발합니다."
+                        "CPU limit은 request의 4배 이하로 설정하세요. "
+                        "과도한 비율은 노드 과부하를 유발할 수 있습니다."
                     ),
                 )
             ]
@@ -694,8 +716,8 @@ class K8sValidator:
                     rule_id="IMG-001",
                     level="FAIL",
                     container=name,
-                    message_ko=f"[{name}] 이미지 태그가 'latest'이거나 태그가 없습니다: {image!r}.",
-                    message_en=f"[{name}] Image tag is 'latest' or missing: {image!r}.",
+                    message_ko=f"이미지 태그가 'latest'이거나 태그가 없음: {image!r}",
+                    message_en=f"Image tag is 'latest' or missing: {image!r}.",
                     suggestion=(
                         "myregistry.io/app:v1.2.3 형식으로 명시적 버전 태그를 사용하세요. "
                         "latest 또는 무태그 이미지는 재현 불가 배포를 유발합니다."
@@ -733,8 +755,8 @@ class K8sValidator:
                 rule_id="IMG-W01",
                 level="WARN",
                 container=name,
-                message_ko=f"[{name}] 이미지 digest pinning이 사용되지 않습니다: {image!r}.",
-                message_en=f"[{name}] Image digest pinning is not used: {image!r}.",
+                message_ko=f"이미지 digest pinning 미사용: {image!r}",
+                message_en=f"Image digest pinning is not used: {image!r}.",
                 suggestion=(
                     "image: myregistry.io/app:v1.2.3@sha256:... 형식으로 "
                     "digest를 고정하면 이미지 교체 공격(supply chain attack)을 방지할 수 있습니다."
@@ -745,40 +767,12 @@ class K8sValidator:
     # ── SA 규칙 ───────────────────────────────────────────────────────────────
 
     def _rule_sa001(self, pod_spec: dict[str, Any]) -> list[CheckResult]:
-        """SA-001: serviceAccountName 명시 필수."""
-        sa_name = pod_spec.get("serviceAccountName")
-        if sa_name and str(sa_name).strip():
-            return [
-                CheckResult(
-                    rule_id="SA-001",
-                    level="PASS",
-                    container="(pod)",
-                    message_ko=f"serviceAccountName이 명시되어 있습니다: {sa_name!r}.",
-                    message_en=f"serviceAccountName is explicitly set: {sa_name!r}.",
-                    suggestion="",
-                )
-            ]
-        return [
-            CheckResult(
-                rule_id="SA-001",
-                level="FAIL",
-                container="(pod)",
-                message_ko="spec.serviceAccountName이 설정되지 않았습니다.",
-                message_en="spec.serviceAccountName is not set.",
-                suggestion=(
-                    "spec.serviceAccountName을 명시하세요. 미설정 시 default ServiceAccount가"
-                    " 자동 마운트되어 불필요한 권한이 부여될 수 있습니다."
-                ),
-            )
-        ]
-
-    def _rule_sa002(self, pod_spec: dict[str, Any]) -> list[CheckResult]:
-        """SA-002: automountServiceAccountToken: false 필수."""
+        """SA-001: automountServiceAccountToken: false 필수."""
         val = pod_spec.get("automountServiceAccountToken")
         if val is False:
             return [
                 CheckResult(
-                    rule_id="SA-002",
+                    rule_id="SA-001",
                     level="PASS",
                     container="(pod)",
                     message_ko="automountServiceAccountToken이 false로 설정되어 있습니다.",
@@ -788,10 +782,10 @@ class K8sValidator:
             ]
         return [
             CheckResult(
-                rule_id="SA-002",
+                rule_id="SA-001",
                 level="FAIL",
                 container="(pod)",
-                message_ko=f"automountServiceAccountToken이 false가 아닙니다 (현재: {val!r}).",
+                message_ko=f"automountServiceAccountToken 미설정 (현재: {val!r})",
                 message_en=f"automountServiceAccountToken is not false (current: {val!r}).",
                 suggestion=(
                     "spec.automountServiceAccountToken: false 를 설정하세요. "
@@ -800,136 +794,240 @@ class K8sValidator:
             )
         ]
 
-    # ── SVC 규칙 ──────────────────────────────────────────────────────────────
-
-    def _check_service(self, doc: dict[str, Any]) -> list[CheckResult]:
-        """Service kind 규칙 적용."""
-        results: list[CheckResult] = []
-        results.extend(self._rule_svc001(doc))
-        results.extend(self._rule_svc002(doc))
-        return results
-
-    def _rule_svc001(self, doc: dict[str, Any]) -> list[CheckResult]:
-        """SVC-001: Service.spec.type 명시 필수."""
-        svc_name = str(doc.get("metadata", {}).get("name", "unknown"))
-        svc_type = doc.get("spec", {}).get("type")
-        if svc_type:
+    def _rule_sa002(self, pod_spec: dict[str, Any]) -> list[CheckResult]:
+        """SA-002: Pod에 serviceAccountName 명시 (default SA 방지)."""
+        sa_name = pod_spec.get("serviceAccountName")
+        if sa_name and str(sa_name).strip():
             return [
                 CheckResult(
-                    rule_id="SVC-001",
+                    rule_id="SA-002",
                     level="PASS",
-                    container=f"svc/{svc_name}",
-                    message_ko=f"Service.spec.type이 명시되어 있습니다: {svc_type!r}.",
-                    message_en=f"Service.spec.type is set: {svc_type!r}.",
+                    container="(pod)",
+                    message_ko=f"serviceAccountName이 명시되어 있습니다: {sa_name!r}.",
+                    message_en=f"serviceAccountName is explicitly set: {sa_name!r}.",
                     suggestion="",
                 )
             ]
         return [
             CheckResult(
-                rule_id="SVC-001",
+                rule_id="SA-002",
                 level="FAIL",
-                container=f"svc/{svc_name}",
-                message_ko=f"Service '{svc_name}'.spec.type이 설정되지 않았습니다.",
-                message_en=f"Service '{svc_name}'.spec.type is not set.",
+                container="(pod)",
+                message_ko="spec.serviceAccountName 미설정",
+                message_en="spec.serviceAccountName is not set.",
                 suggestion=(
-                    "spec.type: ClusterIP 또는 NodePort 를 명시하세요. "
-                    "type 미설정 시 기본값(ClusterIP)이 적용되지만 의도가 불명확합니다."
+                    "spec.serviceAccountName을 명시하세요. 미설정 시 default ServiceAccount가"
+                    " 자동 마운트되어 불필요한 권한이 부여될 수 있습니다."
                 ),
             )
         ]
 
-    def _rule_svc002(self, doc: dict[str, Any]) -> list[CheckResult]:
-        """SVC-002: LoadBalancer 사용 시 WARN."""
+    # ── SVC 규칙 ──────────────────────────────────────────────────────────────
+
+    def _check_service(
+        self,
+        doc: dict[str, Any],
+        context_docs: list[dict[str, Any]] | None = None,
+    ) -> list[CheckResult]:
+        """Service kind 규칙 적용."""
+        results: list[CheckResult] = []
+        results.extend(self._rule_svc001(doc))
+        results.extend(self._rule_svc002(doc, context_docs=context_docs))
+        return results
+
+    def _rule_svc001(self, doc: dict[str, Any]) -> list[CheckResult]:
+        """SVC-001: Service 리소스가 존재 — kind: Service 자체가 존재하면 PASS.
+
+        이 규칙은 Service document가 처리될 때 호출된다.
+        Service가 없으면 _validate_doc에서 이 메서드 자체가 호출되지 않으므로,
+        Service document 존재 시 항상 PASS를 반환한다.
+        """
         svc_name = str(doc.get("metadata", {}).get("name", "unknown"))
-        svc_type = doc.get("spec", {}).get("type")
-        if svc_type == "LoadBalancer":
-            return [
-                CheckResult(
-                    rule_id="SVC-002",
-                    level="WARN",
-                    container=f"svc/{svc_name}",
-                    message_ko=(
-                        f"Service '{svc_name}'가 LoadBalancer 타입을 사용합니다 "
-                        "— 클라우드 비용이 발생합니다."
-                    ),
-                    message_en=(
-                        f"Service '{svc_name}' uses LoadBalancer type — incurs cloud costs."
-                    ),
-                    suggestion=(
-                        "내부 서비스라면 ClusterIP 또는 NodePort 를 사용하세요. "
-                        "LoadBalancer는 클라우드 공급자의 외부 로드밸런서를 프로비저닝합니다."
-                    ),
-                )
-            ]
-        return []
+        return [
+            CheckResult(
+                rule_id="SVC-001",
+                level="PASS",
+                container=f"svc/{svc_name}",
+                message_ko=f"Service 리소스가 존재합니다: {svc_name!r}.",
+                message_en=f"Service resource exists: {svc_name!r}.",
+                suggestion="",
+            )
+        ]
+
+    def _rule_svc002(
+        self,
+        doc: dict[str, Any],
+        context_docs: list[dict[str, Any]] | None = None,
+    ) -> list[CheckResult]:
+        """SVC-002: targetPort ↔ containerPort 교차 검증.
+
+        교차 검증: context_docs에서 Deployment를 찾아 containerPort를 수집.
+        매칭되는 Deployment가 없으면 skip (SVC-001로 Service 부재가 이미 처리됨).
+        """
+        svc_name = str(doc.get("metadata", {}).get("name", "unknown"))
+        svc_ports: list[dict[str, Any]] = doc.get("spec", {}).get("ports", [])
+
+        if not context_docs:
+            return []
+
+        # context_docs 내 Deployment의 containerPort 목록 수집
+        container_ports: set[int] = set()
+        named_ports: dict[str, int] = {}  # port name → containerPort
+
+        for ctx_doc in context_docs:
+            if ctx_doc.get("kind") not in ("Deployment", "StatefulSet", "DaemonSet"):
+                continue
+            pod_spec = ctx_doc.get("spec", {}).get("template", {}).get("spec", {})
+            containers: list[dict[str, Any]] = pod_spec.get("containers", [])
+            init_containers: list[dict[str, Any]] = pod_spec.get("initContainers", [])
+            for c in containers + init_containers:
+                for p in c.get("ports", []):
+                    cp = p.get("containerPort")
+                    if cp is not None:
+                        container_ports.add(int(cp))
+                    port_name = p.get("name")
+                    if port_name and cp is not None:
+                        named_ports[str(port_name)] = int(cp)
+
+        if not container_ports and not named_ports:
+            # Deployment에 ports 정의가 없으면 skip (검증 불가)
+            return []
+
+        results: list[CheckResult] = []
+        for svc_port in svc_ports:
+            target = svc_port.get("targetPort")
+            if target is None:
+                continue
+            if isinstance(target, int):
+                if target not in container_ports:
+                    results.append(
+                        CheckResult(
+                            rule_id="SVC-002",
+                            level="FAIL",
+                            container=f"svc/{svc_name}",
+                            message_ko=(
+                                f"targetPort {target}가 컨테이너 containerPort 목록과 불일치"
+                            ),
+                            message_en=(
+                                f"targetPort {target} does not match any container containerPort."
+                            ),
+                            suggestion=(
+                                f"Service의 targetPort를 컨테이너의 containerPort 중 하나로 "
+                                f"설정하세요. 가용 포트: {sorted(container_ports)}"
+                            ),
+                        )
+                    )
+                else:
+                    results.append(
+                        CheckResult(
+                            rule_id="SVC-002",
+                            level="PASS",
+                            container=f"svc/{svc_name}",
+                            message_ko=(
+                                f"targetPort {target}가 컨테이너 containerPort와 일치합니다."
+                            ),
+                            message_en=(
+                                f"targetPort {target} matches container containerPort."
+                            ),
+                            suggestion="",
+                        )
+                    )
+            else:
+                # 문자열(named port) 매칭
+                target_str = str(target)
+                if target_str in named_ports:
+                    results.append(
+                        CheckResult(
+                            rule_id="SVC-002",
+                            level="PASS",
+                            container=f"svc/{svc_name}",
+                            message_ko=(
+                                f"named targetPort {target_str!r}가 컨테이너 포트와 일치합니다."
+                            ),
+                            message_en=(
+                                f"Named targetPort {target_str!r} matches container port."
+                            ),
+                            suggestion="",
+                        )
+                    )
+                else:
+                    results.append(
+                        CheckResult(
+                            rule_id="SVC-002",
+                            level="FAIL",
+                            container=f"svc/{svc_name}",
+                            message_ko=(
+                                f"named targetPort {target_str!r}가 컨테이너 포트 이름과 불일치"
+                            ),
+                            message_en=(
+                                f"Named targetPort {target_str!r} does not match any port."
+                            ),
+                            suggestion=(
+                                f"컨테이너 ports[].name 중 하나로 targetPort를 설정하세요. "
+                                f"등록된 포트 이름: {sorted(named_ports.keys())}"
+                            ),
+                        )
+                    )
+
+        return results
 
     # ── PRB 규칙 ──────────────────────────────────────────────────────────────
 
     def _rule_prb001(self, c: dict[str, Any]) -> list[CheckResult]:
-        """PRB-001: livenessProbe + readinessProbe 모두 존재."""
+        """PRB-001: livenessProbe 존재."""
         name = str(c.get("name", "unknown"))
-        has_liveness = "livenessProbe" in c
-        has_readiness = "readinessProbe" in c
-
-        if has_liveness and has_readiness:
+        if "livenessProbe" in c:
             return [
                 CheckResult(
                     rule_id="PRB-001",
                     level="PASS",
                     container=name,
-                    message_ko="livenessProbe와 readinessProbe가 모두 설정되어 있습니다.",
-                    message_en="Both livenessProbe and readinessProbe are configured.",
+                    message_ko="livenessProbe가 설정되어 있습니다.",
+                    message_en="livenessProbe is configured.",
                     suggestion="",
                 )
             ]
-
-        missing: list[str] = []
-        if not has_liveness:
-            missing.append("livenessProbe")
-        if not has_readiness:
-            missing.append("readinessProbe")
-
         return [
             CheckResult(
                 rule_id="PRB-001",
                 level="FAIL",
                 container=name,
-                message_ko=f"[{name}] 프로브 미설정: {', '.join(missing)}.",
-                message_en=f"[{name}] Missing probes: {', '.join(missing)}.",
+                message_ko="livenessProbe 미설정",
+                message_en="livenessProbe is not configured.",
                 suggestion=(
-                    f"{', '.join(missing)} 를 설정하세요. "
-                    "프로브 미설정 시 비정상 파드가 트래픽을 계속 수신합니다."
+                    "livenessProbe 를 설정하세요. "
+                    "미설정 시 비정상 파드가 재시작되지 않아 트래픽을 계속 수신합니다."
                 ),
             )
         ]
 
     def _rule_prb002(self, c: dict[str, Any]) -> list[CheckResult]:
-        """PRB-002: initialDelaySeconds가 0이면 WARN."""
+        """PRB-002: readinessProbe 존재."""
         name = str(c.get("name", "unknown"))
-        results: list[CheckResult] = []
-
-        for probe_key in ("livenessProbe", "readinessProbe"):
-            probe = c.get(probe_key)
-            if probe is None:
-                continue
-            delay = probe.get("initialDelaySeconds", None)
-            if delay is not None and int(delay) == 0:
-                results.append(
-                    CheckResult(
-                        rule_id="PRB-002",
-                        level="WARN",
-                        container=name,
-                        message_ko=f"[{name}] {probe_key}.initialDelaySeconds가 0입니다.",
-                        message_en=f"[{name}] {probe_key}.initialDelaySeconds is 0.",
-                        suggestion=(
-                            f"{probe_key}.initialDelaySeconds 를 애플리케이션 기동 시간보다"
-                            " 큰 값으로 설정하세요."
-                            " 0이면 기동 전에 probe가 실행되어 불필요한 재시작이 발생합니다."
-                        ),
-                    )
+        if "readinessProbe" in c:
+            return [
+                CheckResult(
+                    rule_id="PRB-002",
+                    level="PASS",
+                    container=name,
+                    message_ko="readinessProbe가 설정되어 있습니다.",
+                    message_en="readinessProbe is configured.",
+                    suggestion="",
                 )
-
-        return results
+            ]
+        return [
+            CheckResult(
+                rule_id="PRB-002",
+                level="FAIL",
+                container=name,
+                message_ko="readinessProbe 미설정",
+                message_en="readinessProbe is not configured.",
+                suggestion=(
+                    "readinessProbe 를 설정하세요. "
+                    "미설정 시 준비되지 않은 파드에 트래픽이 전달됩니다."
+                ),
+            )
+        ]
 
 
 # ─── CLI ──────────────────────────────────────────────────────────────────────
@@ -945,6 +1043,9 @@ def _build_parser() -> argparse.ArgumentParser:
               0 — PASS만 존재 (경고 없음)
               1 — FAIL 1건 이상
               2 — FAIL 없음 + WARN 1건 이상 (soft-success)
+
+            주의 (F-42): set -e 환경에서 exit 2를 실패로 오인하지 않으려면
+              && [ $? -le 2 ] 또는 || [ $? -eq 2 ] 처리가 필요합니다.
             """
         ),
     )
@@ -989,16 +1090,17 @@ def main() -> int:
 
 
 def _print_human(report: ValidationReport) -> None:
-    """사람이 읽기 쉬운 형식으로 결과 출력."""
+    """사람이 읽기 쉬운 형식으로 결과 출력 (F-46 포맷)."""
     print(f"\n{'=' * 60}")
     print("K8s Manifest 검증 결과")
     print(f"{'=' * 60}")
 
     for r in report.results:
-        prefix = {"PASS": "PASS", "WARN": "WARN", "FAIL": "FAIL"}.get(r.level, r.level)
-        print(f"[{prefix}] {r.rule_id} / {r.container}: {r.message_ko}")
+        prefix = r.level
         if r.suggestion and r.level != "PASS":
-            print(f"      → {r.suggestion}")
+            print(f"[{prefix}] {r.rule_id} {r.container}: {r.message_ko} → {r.suggestion}")
+        else:
+            print(f"[{prefix}] {r.rule_id} {r.container}: {r.message_ko}")
 
     c = report.counts
     print(f"\n결과: PASS {c['pass']}건 / WARN {c['warn']}건 / FAIL {c['fail']}건")
