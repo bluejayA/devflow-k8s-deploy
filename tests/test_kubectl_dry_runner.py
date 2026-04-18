@@ -36,8 +36,10 @@ def runner() -> KubectlDryRunner:
 
 @pytest.fixture
 def manifest_dir(tmp_path: Path) -> Path:
-    """임시 매니페스트 디렉토리."""
-    return tmp_path / "manifests"
+    """임시 매니페스트 디렉토리 (실제 생성)."""
+    d = tmp_path / "manifests"
+    d.mkdir()
+    return d
 
 
 # ─── is_available ──────────────────────────────────────────────────────────
@@ -214,10 +216,14 @@ class TestDryRunExceptions:
         self, runner: KubectlDryRunner, manifest_dir: Path
     ) -> None:
         """subprocess.TimeoutExpired → KubectlExecutionError."""
+        from scripts.kubectl_dry_runner import _TIMEOUT_SECONDS
+
         with patch.object(runner, "is_available", return_value=True):
             with patch(
                 "subprocess.run",
-                side_effect=subprocess.TimeoutExpired(cmd=["kubectl"], timeout=60),
+                side_effect=subprocess.TimeoutExpired(
+                    cmd=["kubectl"], timeout=_TIMEOUT_SECONDS
+                ),
             ):
                 with pytest.raises(KubectlExecutionError):
                     runner.dry_run(manifest_dir)
@@ -336,4 +342,71 @@ class TestSecurityConstraints:
         # env 인자가 없거나 None이어야 함 (os.environ 기본값 활용)
         assert "env" not in call_kwargs or call_kwargs["env"] is None, (
             "env must not be explicitly set in default flow"
+        )
+
+    def test_dry_run_handles_non_utf8_stdout(
+        self, runner: KubectlDryRunner, manifest_dir: Path
+    ) -> None:
+        """subprocess.run 호출 시 errors='replace'가 전달됨 — UnicodeDecodeError 방어."""
+        mock_proc = MagicMock()
+        mock_proc.returncode = 0
+        mock_proc.stdout = ""
+        mock_proc.stderr = ""
+
+        with patch.object(runner, "is_available", return_value=True):
+            with patch("subprocess.run", return_value=mock_proc) as mock_run:
+                runner.dry_run(manifest_dir)
+
+        call_kwargs = mock_run.call_args.kwargs
+        assert call_kwargs.get("errors") == "replace", (
+            "subprocess.run must be called with errors='replace' to handle non-UTF-8 output"
+        )
+
+
+# ─── manifest_dir 방어적 검증 ────────────────────────────────────────────
+
+
+class TestManifestDirValidation:
+    def test_dry_run_invalid_manifest_dir_raises(
+        self, runner: KubectlDryRunner, tmp_path: Path
+    ) -> None:
+        """존재하지 않는 경로 → KubectlExecutionError."""
+        nonexistent = tmp_path / "does_not_exist"
+
+        with patch.object(runner, "is_available", return_value=True):
+            with pytest.raises(KubectlExecutionError, match="manifest_dir"):
+                runner.dry_run(nonexistent)
+
+    def test_dry_run_file_not_directory_raises(
+        self, runner: KubectlDryRunner, tmp_path: Path
+    ) -> None:
+        """파일 경로(디렉토리 아님) → KubectlExecutionError."""
+        file_path = tmp_path / "some_file.yaml"
+        file_path.write_text("apiVersion: v1")
+
+        with patch.object(runner, "is_available", return_value=True):
+            with pytest.raises(KubectlExecutionError, match="manifest_dir"):
+                runner.dry_run(file_path)
+
+    def test_dry_run_dash_prefix_path_resolved_to_absolute(
+        self, runner: KubectlDryRunner, tmp_path: Path
+    ) -> None:
+        """'-'로 시작하는 이름의 실제 디렉토리 → resolve 후 절대경로로 subprocess 호출됨."""
+        dash_dir = tmp_path / "-prefix-dir"
+        dash_dir.mkdir()
+
+        mock_proc = MagicMock()
+        mock_proc.returncode = 0
+        mock_proc.stdout = ""
+        mock_proc.stderr = ""
+
+        with patch.object(runner, "is_available", return_value=True):
+            with patch("subprocess.run", return_value=mock_proc) as mock_run:
+                runner.dry_run(dash_dir)
+
+        # subprocess에 전달된 cmd에서 manifest_dir 인자(마지막)가 절대경로여야 함
+        call_args = mock_run.call_args.args[0]
+        manifest_arg = call_args[-1]
+        assert Path(manifest_arg).is_absolute(), (
+            f"manifest_dir must be resolved to absolute path, got: {manifest_arg}"
         )
