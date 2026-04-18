@@ -17,6 +17,10 @@ Tests:
 14.  staging_dir은 output_dir.parent 하위 (sibling)
 15.  인스턴스마다 고유 uuid staging_dir
 16.  PromptRequest 구조 검증 (kind/ko_text/options/help_term_id)
+17.  [Critical 1] _gc_orphans: .tmp-* symlink는 타겟 삭제 없이 symlink 자체만 제거
+18.  [Important 1] __enter__ mkdir 실패 시 signal handler 원복
+19.  [Important 2] 잘못된 on_exists 값 → ValueError
+20.  [Important 5] suffix 동일 분 충돌 시 카운터 추가
 """
 
 from __future__ import annotations
@@ -356,3 +360,115 @@ def test_prompt_callback_receives_correct_prompt_request(tmp_path: Path) -> None
     assert "취소" in req.options
     assert "suffix로 새 디렉토리 만들기" in req.options
     assert req.help_term_id == "output_dir"
+
+
+# ─── Test 17: [Critical 1] _gc_orphans symlink 방어 ─────────────────────────
+
+
+def test_gc_orphans_symlink_is_unlinked_not_followed(tmp_path: Path) -> None:
+    """GC가 .tmp-* symlink를 발견했을 때 symlink 타겟 경로는 삭제하지 않는다."""
+    output_dir = tmp_path / "output"
+
+    # 타겟 디렉토리 (외부 경로 역할)
+    external_target = tmp_path / "external_target"
+    external_target.mkdir()
+    (external_target / "important.txt").write_text("keep me")
+
+    # 공격자가 심어둔 심볼릭 링크: .tmp-evil → external_target
+    symlink_path = tmp_path / ".tmp-evil"
+    os.symlink(external_target, symlink_path)
+
+    with AtomicWriter(output_dir, on_exists="overwrite") as aw:
+        aw.commit()
+
+    # symlink 자체는 제거되어야 함 (또는 더 이상 존재하지 않아야 함)
+    assert not symlink_path.exists() or not symlink_path.is_symlink(), (
+        ".tmp-evil symlink이 남아 있으면 안 됨"
+    )
+    # 타겟 디렉토리와 내용은 절대 삭제되지 않아야 함
+    assert external_target.exists(), "external_target 디렉토리가 삭제되면 안 됨"
+    assert (external_target / "important.txt").exists(), (
+        "external_target 내 파일이 삭제되면 안 됨"
+    )
+
+
+# ─── Test 18: [Important 1] __enter__ mkdir 실패 시 signal handler 원복 ───────
+
+
+def test_enter_failure_restores_signal_handlers(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """__enter__에서 mkdir 실패 시 등록한 signal handler가 원복된다."""
+    output_dir = tmp_path / "output"
+
+    original_sigint = signal.getsignal(signal.SIGINT)
+    original_sigterm = signal.getsignal(signal.SIGTERM)
+
+    # mkdir을 OSError로 강제 실패
+    from scripts.atomic_writer import AtomicWriter as _AW
+
+    def failing_mkdir(self: Path, **kwargs: object) -> None:  # type: ignore[override]
+        raise OSError("simulated mkdir failure")
+
+    monkeypatch.setattr(Path, "mkdir", failing_mkdir)
+
+    with pytest.raises(OSError, match="simulated mkdir failure"):
+        aw = _AW(output_dir, on_exists="overwrite")
+        aw.__enter__()
+
+    # signal handler가 원래대로 복구되어야 함
+    assert signal.getsignal(signal.SIGINT) is original_sigint, (
+        "SIGINT handler가 원복되어야 함"
+    )
+    assert signal.getsignal(signal.SIGTERM) is original_sigterm, (
+        "SIGTERM handler가 원복되어야 함"
+    )
+
+
+# ─── Test 19: [Important 2] 잘못된 on_exists 값 → ValueError ────────────────
+
+
+def test_invalid_on_exists_raises_value_error(tmp_path: Path) -> None:
+    """on_exists에 잘못된 값을 넘기면 __init__에서 ValueError가 발생한다."""
+    output_dir = tmp_path / "output"
+
+    with pytest.raises(ValueError, match="on_exists"):
+        AtomicWriter(output_dir, on_exists="owerwrite")  # type: ignore[arg-type]
+
+
+# ─── Test 20: [Important 5] suffix 동일 분 충돌 시 카운터 ─────────────────────
+
+
+def test_suffix_counter_on_same_minute_conflict(tmp_path: Path) -> None:
+    """동일 분 내 suffix 충돌 시 -2, -3 ... 카운터로 새 경로를 만든다."""
+    output_dir = tmp_path / "output"
+    output_dir.mkdir()
+    (output_dir / "old.txt").write_text("old")
+
+    # commit 시점의 타임스탬프를 고정 (분단위)
+    from datetime import UTC, datetime
+    fixed_ts = datetime(2099, 1, 1, 12, 0, tzinfo=UTC)
+
+    # suffix 경로 첫 번째 후보도 이미 존재하게 만들기
+    ts_str = fixed_ts.strftime("%Y-%m-%dT%H-%M")
+    conflict_path = tmp_path / f"output-{ts_str}"
+    conflict_path.mkdir()
+    (conflict_path / "conflict.txt").write_text("conflict")
+
+    import unittest.mock as _mock
+    with _mock.patch("scripts.atomic_writer.datetime") as mock_dt:
+        mock_dt.now.return_value = fixed_ts
+
+        with AtomicWriter(output_dir, on_exists="suffix") as aw:
+            (aw.staging_dir / "new.txt").write_text("new")
+            final = aw.commit()
+
+    # -2 카운터가 붙은 경로에 생성되어야 함
+    expected_name = f"output-{ts_str}-2"
+    assert final.name == expected_name, (
+        f"카운터 suffix가 붙어야 함: expected={expected_name}, actual={final.name}"
+    )
+    assert (final / "new.txt").exists(), "새 파일이 최종 경로에 있어야 함"
+    # 원본과 충돌 경로는 그대로
+    assert output_dir.exists()
+    assert conflict_path.exists()

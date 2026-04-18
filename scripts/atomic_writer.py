@@ -11,9 +11,18 @@
 설계 결정:
 - 임시 디렉토리: ``output_dir.parent / ".tmp-{uuid4().hex}"``
 - atomic rename: ``os.replace(staging_dir, final_path)`` (POSIX atomic)
-- 7일 고아 GC: ``.tmp-*`` glob → ``stat().st_mtime`` 7일 이상 → shutil.rmtree
+- 7일 고아 GC: ``.tmp-*`` glob → ``lstat().st_mtime`` 7일 이상 → shutil.rmtree
+  (symlink는 타겟 경로를 따라가지 않고 symlink 자체만 unlink)
 - signal handler: SIGINT/SIGTERM 등록 → cleanup + sys.exit(130) → 이전 핸들러로 복구
+  (__enter__ 실패 시에도 원복 보장)
 - suffix 타임스탬프: UTC ISO 8601 분단위 ``"%Y-%m-%dT%H-%M"``
+  동일 분 내 충돌 시 ``-2``, ``-3`` ... 카운터 추가 (상한 100)
+
+**Precondition — 단일 활성 인스턴스**: 동일 프로세스에서 두 개의 AtomicWriter가
+동시에 ``__enter__`` 상태로 공존하면 signal handler 체인이 꼬여, 먼저
+``__exit__``한 쪽이 다른 쪽의 "이전 핸들러"를 덮어쓴다. v0.1.0은 단일 스레드·순차
+사용 전제. 중첩/동시 사용 시 결과는 정의되지 않음. 멀티스레드 환경에서는
+``signal.signal()``이 메인 스레드에서만 동작하므로 추가 제약이 있다.
 """
 
 from __future__ import annotations
@@ -22,10 +31,12 @@ import os
 import shutil
 import signal
 import sys
-import types
+import time
+import types as _types
+from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 from uuid import uuid4
 
 from scripts._shared.errors import OutputExistsAbort
@@ -34,9 +45,21 @@ from scripts._shared.types import PromptCallback, PromptRequest
 # 7일을 초 단위로
 _ORPHAN_MAX_AGE_SECONDS = 7 * 24 * 3600
 
+_VALID_ON_EXISTS = ("prompt", "overwrite", "suffix")
+
+# signal.signal() 반환 타입: Callable | int | None
+# private `signal._HANDLER` 참조 대신 커스텀 alias 사용
+_SignalHandler = Callable[[int, _types.FrameType | None], Any] | int | None
+
 
 class AtomicWriter:
     """임시 디렉토리(.tmp-{uuid}/)에 쓰고 원자적으로 output_dir로 이름 변경.
+
+    **Precondition — 단일 활성 인스턴스**: 동일 프로세스에서 두 개의 AtomicWriter가
+    동시에 ``__enter__`` 상태로 공존하면 signal handler 체인이 꼬여, 먼저
+    ``__exit__``한 쪽이 다른 쪽의 "이전 핸들러"를 덮어쓴다. v0.1.0은 단일
+    스레드·순차 사용 전제. 중첩/동시 사용 시 결과는 정의되지 않음. 멀티스레드
+    환경에서는 ``signal.signal()``이 메인 스레드에서만 동작하므로 추가 제약이 있다.
 
     Args:
         output_dir: 최종 출력 디렉토리 경로.
@@ -44,6 +67,7 @@ class AtomicWriter:
             - ``"prompt"``: prompt_callback 호출 → 사용자 선택
             - ``"overwrite"``: 기존 삭제 후 rename
             - ``"suffix"``: ``output_dir-YYYY-MM-DDTHH-MM/`` 형태로 rename
+              (동일 분 충돌 시 ``-2``, ``-3`` ... 카운터 추가)
         prompt_callback: ``on_exists="prompt"``일 때 호출되는 콜백.
             ``None``이면 output_dir 존재 시 ``OutputExistsAbort`` raise.
     """
@@ -54,6 +78,10 @@ class AtomicWriter:
         on_exists: Literal["prompt", "overwrite", "suffix"],
         prompt_callback: PromptCallback | None = None,
     ) -> None:
+        if on_exists not in _VALID_ON_EXISTS:
+            raise ValueError(
+                f"on_exists는 {_VALID_ON_EXISTS} 중 하나여야 합니다: {on_exists!r}"
+            )
         self._output_dir = output_dir
         self._on_exists = on_exists
         self._prompt_callback = prompt_callback
@@ -62,9 +90,8 @@ class AtomicWriter:
         self._staging_dir: Path = output_dir.parent / f".tmp-{uuid4().hex}"
 
         # signal handler 이전 핸들러 저장용
-        # signal.signal() 반환 타입이 _HANDLER (Callable | int | None)이므로 Any 사용
-        self._prev_sigint: signal._HANDLER = None
-        self._prev_sigterm: signal._HANDLER = None
+        self._prev_sigint: _SignalHandler = None
+        self._prev_sigterm: _SignalHandler = None
 
         # commit 호출 여부 플래그
         self._committed: bool = False
@@ -75,24 +102,25 @@ class AtomicWriter:
         """1) signal handler 등록 (SIGINT, SIGTERM)
         2) 7일 이상 고아 .tmp-* 자동 회수
         3) 새 .tmp-{uuid}/ 생성
+
+        signal 등록 이후 실패(GC 또는 mkdir 오류) 시 handler를 원복한 뒤 재전파.
         """
-        # signal handler 등록 (이전 핸들러 저장)
         self._prev_sigint = signal.signal(signal.SIGINT, self._signal_handler)
         self._prev_sigterm = signal.signal(signal.SIGTERM, self._signal_handler)
-
-        # 고아 GC
-        self._gc_orphans()
-
-        # staging_dir 생성
-        self._staging_dir.mkdir(parents=True, exist_ok=False)
-
+        try:
+            self._gc_orphans()
+            self._staging_dir.mkdir(parents=True, exist_ok=False)
+        except BaseException:
+            # handler 원복 후 재전파
+            self._restore_signal_handlers()
+            raise
         return self
 
     def __exit__(
         self,
         exc_type: type[BaseException] | None,
         exc_val: BaseException | None,
-        exc_tb: types.TracebackType | None,
+        exc_tb: _types.TracebackType | None,
     ) -> None:
         """예외 없이 정상 종료: commit 미호출이면 cleanup.
         예외 발생: cleanup (output_dir 이전 상태 유지).
@@ -107,13 +135,7 @@ class AtomicWriter:
                 # 예외 발생 — staging_dir 정리
                 self.cleanup()
         finally:
-            # signal handler 원복 (이전 핸들러로 복구)
-            if self._prev_sigint is not None:
-                signal.signal(signal.SIGINT, self._prev_sigint)
-                self._prev_sigint = None
-            if self._prev_sigterm is not None:
-                signal.signal(signal.SIGTERM, self._prev_sigterm)
-                self._prev_sigterm = None
+            self._restore_signal_handlers()
 
     # ─── public API ───────────────────────────────────────────────────────────
 
@@ -152,29 +174,54 @@ class AtomicWriter:
 
     # ─── internal ─────────────────────────────────────────────────────────────
 
-    def _signal_handler(self, signum: int, frame: types.FrameType | None) -> None:
+    def _restore_signal_handlers(self) -> None:
+        """이전 SIGINT/SIGTERM 핸들러를 복구한다."""
+        if self._prev_sigint is not None:
+            signal.signal(signal.SIGINT, self._prev_sigint)
+            self._prev_sigint = None
+        if self._prev_sigterm is not None:
+            signal.signal(signal.SIGTERM, self._prev_sigterm)
+            self._prev_sigterm = None
+
+    def _signal_handler(self, signum: int, frame: _types.FrameType | None) -> None:
         """SIGINT/SIGTERM 수신 시 cleanup → sys.exit(130)."""
         self.cleanup()
         sys.exit(130)
 
     def _gc_orphans(self) -> None:
-        """output_dir.parent / .tmp-* 중 mtime 7일 이상 경과한 디렉토리 삭제."""
+        """output_dir.parent / .tmp-* 중 mtime 7일 이상 경과한 항목 삭제.
+
+        보안:
+        - symlink는 타겟 경로를 따라가지 않고 symlink 자체만 unlink.
+          (공격자가 ``.tmp-evil → /important/path`` symlink를 심어도 임의 경로 삭제
+          방지)
+        - 실제 디렉토리에 대해서만 shutil.rmtree 사용.
+        - mtime은 lstat() (follow_symlinks=False) 기준.
+        """
         parent = self._output_dir.parent
         if not parent.exists():
             return
 
-        now = datetime.now(tz=UTC).timestamp()
+        now = time.time()
         for candidate in parent.glob(".tmp-*"):
-            if not candidate.is_dir():
+            # symlink는 타겟을 따라가지 않고 자체만 제거
+            if candidate.is_symlink():
+                try:
+                    candidate.unlink()
+                except OSError:
+                    pass
                 continue
             try:
-                mtime = candidate.stat().st_mtime
-                age_seconds = now - mtime
-                if age_seconds >= _ORPHAN_MAX_AGE_SECONDS:
-                    shutil.rmtree(candidate, ignore_errors=True)
+                st = candidate.lstat()  # follow_symlinks=False
             except OSError:
                 # stat() 실패 (race condition 등) — 무시
-                pass
+                continue
+            # 실제 디렉토리만 대상
+            if not candidate.is_dir():
+                continue
+            age_seconds = now - st.st_mtime
+            if age_seconds >= _ORPHAN_MAX_AGE_SECONDS:
+                shutil.rmtree(candidate, ignore_errors=True)
 
     def _resolve_final_path(self) -> Path:
         """on_exists 설정에 따라 최종 경로를 결정한다.
@@ -206,10 +253,23 @@ class AtomicWriter:
         return output_dir
 
     def _do_suffix(self, output_dir: Path) -> Path:
-        """output_dir-YYYY-MM-DDTHH-MM/ 형태의 신규 경로 반환."""
-        ts = datetime.now(tz=UTC).strftime("%Y-%m-%dT%H-%M")
-        suffix_path = output_dir.parent / f"{output_dir.name}-{ts}"
-        return suffix_path
+        """output_dir-YYYY-MM-DDTHH-MM/ 형태의 신규 경로 반환.
+
+        동일 분 내 충돌 시 ``-2``, ``-3`` ... 카운터를 붙여 중복을 피한다.
+        100회 초과 충돌 시 ``OutputExistsAbort`` raise.
+        """
+        timestamp = datetime.now(tz=UTC).strftime("%Y-%m-%dT%H-%M")
+        base = output_dir.parent / f"{output_dir.name}-{timestamp}"
+        candidate = base
+        counter = 2
+        while candidate.exists():
+            candidate = output_dir.parent / f"{output_dir.name}-{timestamp}-{counter}"
+            counter += 1
+            if counter > 100:  # 현실적 상한 방어
+                raise OutputExistsAbort(
+                    f"suffix 경로 충돌이 너무 많음 (100회 초과): {base}"
+                )
+        return candidate
 
     def _do_prompt(self, output_dir: Path) -> Path:
         """prompt_callback 호출 후 사용자 선택에 따라 분기.
