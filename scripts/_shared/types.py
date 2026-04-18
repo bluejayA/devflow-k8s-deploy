@@ -57,9 +57,13 @@ class StackDetectResult:
     """StackModule.detect() 결과."""
 
     port: int | None
+    # 컨테이너 진입점 힌트. 감지기는 빈 문자열 또는 "java -jar {artifact}" 형태.
+    # DockerfileGenerator가 채워도 됨.
     entrypoint: str
     framework: str  # 'spring-boot' / 'ktor' / 'micronaut' / 'jvm-generic'
     version: str | None  # Spring Boot 등 버전
+    build_system: Literal["gradle", "maven"] | None = None  # JVM 빌드 시스템
+    actuator_enabled: bool = False  # Spring Boot Actuator 활성화 여부
 
 
 @dataclass(frozen=True)

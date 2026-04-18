@@ -130,6 +130,28 @@ def test_validation_outcome_is_mutable_dataclass() -> None:
     assert "kubectl_dry_run" in vo.skipped
 
 
+def test_stack_detect_result_new_fields() -> None:
+    """StackDetectResult: build_system / actuator_enabled 신규 필드 기본값 확인."""
+    from scripts._shared.types import StackDetectResult
+
+    # 기존 4 필드만으로 생성 → 신규 필드는 기본값
+    result = StackDetectResult(port=8080, entrypoint="", framework="spring-boot", version="3.2.0")
+    assert result.build_system is None
+    assert result.actuator_enabled is False
+
+    # 신규 필드 명시
+    result2 = StackDetectResult(
+        port=8080,
+        entrypoint="",
+        framework="spring-boot",
+        version="3.2.0",
+        build_system="gradle",
+        actuator_enabled=True,
+    )
+    assert result2.build_system == "gradle"
+    assert result2.actuator_enabled is True
+
+
 def test_prompt_callback_type_alias() -> None:
     """PromptCallback: TypeAlias로 Callable 타입 지정."""
     from scripts._shared.types import PromptCallback, PromptRequest
