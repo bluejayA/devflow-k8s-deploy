@@ -125,3 +125,26 @@ class TestIsWithin:
             pytest.skip("symlink 생성 권한 없음")
 
         assert is_within(tmp_path, link) is True
+
+
+class TestCheckYamlRefs:
+    """check_yaml_refs 단위 테스트."""
+
+    def test_normal_content_no_exception(self) -> None:
+        """anchor/alias 개수가 기본값(16) 이하이면 예외 없음."""
+        from scripts._shared.fileio import check_yaml_refs
+
+        # 14개 anchor → 정상
+        content = "\n".join([f"&anchor{i}" for i in range(14)])
+        check_yaml_refs(content)  # 예외 없으면 통과
+
+    def test_exceeded_refs_raises_yaml_error(self) -> None:
+        """anchor/alias 개수가 max_refs 초과 시 yaml.YAMLError raise."""
+        import yaml
+
+        from scripts._shared.fileio import check_yaml_refs
+
+        # 17개 anchor → 기본값(16) 초과
+        content = "\n".join([f"&anchor{i}" for i in range(17)])
+        with pytest.raises(yaml.YAMLError, match="bomb"):
+            check_yaml_refs(content)

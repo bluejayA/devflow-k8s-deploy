@@ -26,7 +26,7 @@ from typing import Any
 import yaml
 
 from scripts._shared.errors import MalformedManifestError
-from scripts._shared.fileio import read_text_limited
+from scripts._shared.fileio import check_yaml_refs, read_text_limited
 from scripts._shared.types import CheckResult, ValidationReport
 
 # ─── 상수 ─────────────────────────────────────────────────────────────────────
@@ -42,6 +42,15 @@ _SECRET_NAME_RE = re.compile(
 
 # CPU 단위를 millicores(int)로 변환 — RES-W01
 _CPU_MILLI_RE = re.compile(r"^(\d+(?:\.\d+)?)(m?)$")
+
+
+def _as_dict(value: object) -> dict[str, Any]:
+    """dict이면 반환, 아니면(None/list/str 등) 빈 dict.
+
+    .get() None-chain 방어: YAML spec: null 처럼 명시적 null이 오면
+    None이 반환되어 AttributeError 발생. 이를 빈 dict로 안전하게 처리.
+    """
+    return value if isinstance(value, dict) else {}
 
 
 def _cpu_to_milli(value: str) -> int | None:
@@ -78,11 +87,20 @@ def _safe_collect_file(path: Path) -> list[dict[str, Any]]:
     """파일에서 YAML document 목록을 안전하게 읽기. 실패 시 MalformedManifestError raise."""
     try:
         raw = read_text_limited(path)
+    except FileNotFoundError as exc:
+        raise MalformedManifestError(f"파일 없음: {path.name}") from exc
+    except (OSError, UnicodeDecodeError) as exc:
+        raise MalformedManifestError(
+            f"파일 읽기 실패: {path.name} ({type(exc).__name__})"
+        ) from exc
+    except ValueError as exc:
+        raise MalformedManifestError(f"파일 크기 초과: {path.name}") from exc
+
+    try:
+        check_yaml_refs(raw)
         return list(yaml.safe_load_all(raw))
     except yaml.YAMLError as exc:
-        raise MalformedManifestError(f"YAML 파싱 실패: {path}") from exc
-    except Exception as exc:  # noqa: BLE001
-        raise MalformedManifestError(f"파일 읽기 실패: {path}") from exc
+        raise MalformedManifestError(f"YAML 파싱 실패: {path.name}") from exc
 
 
 # ─── K8sValidator ─────────────────────────────────────────────────────────────
@@ -226,7 +244,7 @@ class K8sValidator:
         if kind in ("Deployment", "StatefulSet", "DaemonSet", "Job", "CronJob"):
             results.extend(self._check_workload(doc))
         elif kind == "Pod":
-            results.extend(self._check_pod_spec(doc.get("spec", {})))
+            results.extend(self._check_pod_spec(_as_dict(doc.get("spec"))))
         elif kind == "Service":
             results.extend(self._check_service(doc, context_docs=context_docs))
 
@@ -238,15 +256,19 @@ class K8sValidator:
         """Deployment / StatefulSet / DaemonSet 등 workload 규칙 전체 적용."""
         kind = str(doc.get("kind", ""))
         if kind == "CronJob":
-            pod_spec: dict[str, Any] = (
-                doc.get("spec", {})
-                .get("jobTemplate", {})
-                .get("spec", {})
-                .get("template", {})
-                .get("spec", {})
+            pod_spec: dict[str, Any] = _as_dict(
+                _as_dict(
+                    _as_dict(
+                        _as_dict(
+                            _as_dict(doc.get("spec")).get("jobTemplate")
+                        ).get("spec")
+                    ).get("template")
+                ).get("spec")
             )
         else:
-            pod_spec = doc.get("spec", {}).get("template", {}).get("spec", {})
+            pod_spec = _as_dict(
+                _as_dict(_as_dict(doc.get("spec")).get("template")).get("spec")
+            )
 
         return self._check_pod_spec(pod_spec)
 
@@ -496,17 +518,31 @@ class K8sValidator:
         if run_as_user is None and pod_sc:
             run_as_user = pod_sc.get("runAsUser")
 
-        if run_as_user is not None and int(run_as_user) > 0:
-            return [
-                CheckResult(
-                    rule_id="SEC-007",
-                    level="PASS",
-                    container=name,
-                    message_ko=f"runAsUser가 {run_as_user}으로 설정되어 있습니다.",
-                    message_en=f"runAsUser is set to {run_as_user}.",
-                    suggestion="",
-                )
-            ]
+        if run_as_user is not None:
+            try:
+                run_as_user_int = int(run_as_user)
+            except (ValueError, TypeError):
+                return [
+                    CheckResult(
+                        rule_id="SEC-007",
+                        level="FAIL",
+                        container=name,
+                        message_ko=f"runAsUser 값이 정수가 아님: {run_as_user!r}",
+                        message_en=f"runAsUser is not a valid integer: {run_as_user!r}",
+                        suggestion="runAsUser: 1000 같은 양의 정수를 지정하세요.",
+                    )
+                ]
+            if run_as_user_int > 0:
+                return [
+                    CheckResult(
+                        rule_id="SEC-007",
+                        level="PASS",
+                        container=name,
+                        message_ko=f"runAsUser가 {run_as_user}으로 설정되어 있습니다.",
+                        message_en=f"runAsUser is set to {run_as_user}.",
+                        suggestion="",
+                    )
+                ]
         return [
             CheckResult(
                 rule_id="SEC-007",
@@ -530,17 +566,31 @@ class K8sValidator:
         pod_sc = pod_spec.get("securityContext", {})
         fs_group = pod_sc.get("fsGroup")
 
-        if fs_group is not None and int(fs_group) > 0:
-            return [
-                CheckResult(
-                    rule_id="SEC-008",
-                    level="PASS",
-                    container="(pod)",
-                    message_ko=f"fsGroup이 {fs_group}으로 설정되어 있습니다.",
-                    message_en=f"fsGroup is set to {fs_group}.",
-                    suggestion="",
-                )
-            ]
+        if fs_group is not None:
+            try:
+                fs_group_int = int(fs_group)
+            except (ValueError, TypeError):
+                return [
+                    CheckResult(
+                        rule_id="SEC-008",
+                        level="FAIL",
+                        container="(pod)",
+                        message_ko=f"fsGroup 값이 정수가 아님: {fs_group!r}",
+                        message_en=f"fsGroup is not a valid integer: {fs_group!r}",
+                        suggestion="fsGroup: 1000 같은 양의 정수를 지정하세요.",
+                    )
+                ]
+            if fs_group_int > 0:
+                return [
+                    CheckResult(
+                        rule_id="SEC-008",
+                        level="PASS",
+                        container="(pod)",
+                        message_ko=f"fsGroup이 {fs_group}으로 설정되어 있습니다.",
+                        message_en=f"fsGroup is set to {fs_group}.",
+                        suggestion="",
+                    )
+                ]
         return [
             CheckResult(
                 rule_id="SEC-008",
@@ -877,17 +927,27 @@ class K8sValidator:
         for ctx_doc in context_docs:
             if ctx_doc.get("kind") not in ("Deployment", "StatefulSet", "DaemonSet"):
                 continue
-            pod_spec = ctx_doc.get("spec", {}).get("template", {}).get("spec", {})
+            pod_spec = _as_dict(
+                _as_dict(_as_dict(ctx_doc.get("spec")).get("template")).get("spec")
+            )
             containers: list[dict[str, Any]] = pod_spec.get("containers", [])
             init_containers: list[dict[str, Any]] = pod_spec.get("initContainers", [])
             for c in containers + init_containers:
                 for p in c.get("ports", []):
                     cp = p.get("containerPort")
-                    if cp is not None:
-                        container_ports.add(int(cp))
+                    if cp is not None and isinstance(cp, int):
+                        container_ports.add(cp)
+                    elif cp is not None:
+                        try:
+                            container_ports.add(int(cp))
+                        except (ValueError, TypeError):
+                            pass
                     port_name = p.get("name")
                     if port_name and cp is not None:
-                        named_ports[str(port_name)] = int(cp)
+                        try:
+                            named_ports[str(port_name)] = int(cp)
+                        except (ValueError, TypeError):
+                            pass
 
         if not container_ports and not named_ports:
             # Deployment에 ports 정의가 없으면 skip (검증 불가)
@@ -1046,6 +1106,12 @@ def _build_parser() -> argparse.ArgumentParser:
 
             주의 (F-42): set -e 환경에서 exit 2를 실패로 오인하지 않으려면
               && [ $? -le 2 ] 또는 || [ $? -eq 2 ] 처리가 필요합니다.
+
+            사용 예시:
+              validate_k8s.py manifest.yaml
+              validate_k8s.py --json manifest.yaml
+              validate_k8s.py --skipped kubectl_dry_run manifest.yaml
+              validate_k8s.py --skipped kubectl_dry_run,container_build manifests/
             """
         ),
     )
@@ -1062,10 +1128,8 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--skipped",
-        nargs="+",
-        metavar="CHECK",
-        default=[],
-        help="스킵된 검증 식별자 (예: kubectl_dry_run container_build)",
+        default="",
+        help="콤마 구분 스킵 식별자 목록 (예: kubectl_dry_run,container_build)",
     )
     return parser
 
@@ -1076,7 +1140,7 @@ def main() -> int:
     args = parser.parse_args()
 
     path = Path(args.path)
-    skipped: list[str] = args.skipped or []
+    skipped: list[str] = [s.strip() for s in args.skipped.split(",") if s.strip()]
 
     validator = K8sValidator(skipped=skipped)
     report = validator.validate([path])

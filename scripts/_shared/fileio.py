@@ -2,11 +2,38 @@
 
 - read_text_limited: 파일 크기 상한 검증 후 텍스트 읽기 (DoS 방어)
 - is_within: symlink escape 방어용 경로 포함 확인
+- check_yaml_refs: YAML anchor/alias 개수 사전 검사 (bomb 방어)
 """
 
+import re
 from pathlib import Path
 
+import yaml
+
 MAX_FILE_MB = 5
+
+# YAML bomb 방어: anchor(&) / alias(*) 정규식
+_YAML_REF_RE = re.compile(r"[&*][A-Za-z_][\w.-]*")
+MAX_YAML_REFS_DEFAULT = 16
+
+
+def check_yaml_refs(content: str, max_refs: int = MAX_YAML_REFS_DEFAULT) -> None:
+    """YAML content의 anchor(&)/alias(*) 개수를 사전 검사.
+
+    max_refs 초과 시 yaml.YAMLError raise (bomb 방어).
+
+    Args:
+        content: YAML 원문 문자열
+        max_refs: 허용 최대 개수. 기본 16.
+
+    Raises:
+        yaml.YAMLError: anchor/alias 개수가 max_refs 초과
+    """
+    count = len(_YAML_REF_RE.findall(content))
+    if count > max_refs:
+        raise yaml.YAMLError(
+            f"YAML anchor/alias 개수 과다 ({count} > {max_refs}). bomb 방어로 거부."
+        )
 
 
 def read_text_limited(

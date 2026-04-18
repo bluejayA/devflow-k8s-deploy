@@ -5,7 +5,6 @@ F-60~F-63, F-70, F-71, F-92 구현.
 
 from __future__ import annotations
 
-import re
 from pathlib import Path
 from typing import Any
 
@@ -13,17 +12,13 @@ import yaml
 
 from scripts._shared.defaults import load_builtin_defaults
 from scripts._shared.errors import UnsupportedStackError
-from scripts._shared.fileio import is_within, read_text_limited
+from scripts._shared.fileio import check_yaml_refs, is_within, read_text_limited
 from scripts._shared.types import NamespaceResolution, ResolvedConfig, StackDecision
 
 # v0.1.0에서 지원하는 stack 목록 (단일 출처)
 _SUPPORTED_STACKS: frozenset[str] = frozenset({"auto", "jvm"})
 # v0.1.0에서 명시하면 UnsupportedStackError를 발생시킬 stack
 _KNOWN_UNSUPPORTED_STACKS: frozenset[str] = frozenset({"go", "python", "react"})
-
-# YAML bomb 방어: anchor/alias 최대 허용 개수
-_MAX_YAML_REFS = 16
-_YAML_REF_RE = re.compile(r"[&*][A-Za-z_][\w.-]*")
 
 # 조직 설정 기본 경로
 _DEFAULT_ORG_CONFIG_PATH = Path.home() / ".claude" / "devflow-k8s-deploy.yml"
@@ -225,7 +220,7 @@ class ConfigLoader:
         if not path.exists():
             return {}
         text = read_text_limited(path)
-        _check_yaml_bomb(text)  # bomb 방어: anchor/alias 개수 초과 시 YAMLError raise
+        check_yaml_refs(text)  # bomb 방어: anchor/alias 개수 초과 시 YAMLError raise
         result = yaml.safe_load(text)
         if result is None:
             return {}
@@ -291,20 +286,6 @@ class ConfigLoader:
 # Module-level helpers
 # ------------------------------------------------------------------
 
-
-def _check_yaml_bomb(content: str) -> None:
-    """YAML anchor/alias 개수가 _MAX_YAML_REFS 초과 시 YAMLError raise.
-
-    Args:
-        content: YAML 원문 문자열
-
-    Raises:
-        yaml.YAMLError: anchor/alias 개수가 _MAX_YAML_REFS 초과
-    """
-    if len(_YAML_REF_RE.findall(content)) > _MAX_YAML_REFS:
-        raise yaml.YAMLError(
-            f"YAML anchor/alias 개수 과다 ({_MAX_YAML_REFS} 초과). bomb 방어로 거부."
-        )
 
 
 def _is_present(value: Any) -> bool:

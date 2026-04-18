@@ -1034,6 +1034,7 @@ class TestCLI:
     def test_cli_skipped_flag_passed_through(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
     ) -> None:
+        """CSV 형식으로 --skipped 전달."""
         import sys
 
         dep = _minimal_deployment(
@@ -1052,9 +1053,7 @@ class TestCLI:
                 "validate_k8s.py",
                 "--json",
                 "--skipped",
-                "kubectl_dry_run",
-                "container_build",
-                "--",
+                "kubectl_dry_run,container_build",
                 str(mf),
             ],
         )
@@ -1063,3 +1062,154 @@ class TestCLI:
         data = json.loads(captured.out)
         assert "kubectl_dry_run" in data["skipped"]
         assert "container_build" in data["skipped"]
+
+    def test_cli_skipped_empty_string(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """--skipped "" (빈 문자열) → skipped 목록이 비어있어야 함."""
+        import sys
+
+        dep = _minimal_deployment(
+            image="myregistry.io/app:v1.0.0@sha256:abc123def456abc123def456abc123def456abc123def456abc123def456abc1",
+            resources={
+                "requests": {"cpu": "200m", "memory": "128Mi"},
+                "limits": {"cpu": "500m", "memory": "512Mi"},
+            },
+        )
+        mf = _write_file(tmp_path, dep)
+        from scripts.validate_k8s import main
+        monkeypatch.setattr(
+            sys,
+            "argv",
+            ["validate_k8s.py", "--json", "--skipped", "", str(mf)],
+        )
+        main()
+        captured = capsys.readouterr()
+        data = json.loads(captured.out)
+        assert data["skipped"] == []
+
+
+# ─── Important 2: int() 캐스팅 예외 방어 ────────────────────────────────────
+
+
+class TestIntCastDefense:
+    """SEC-007/SEC-008: 비정수 runAsUser/fsGroup 입력 → FAIL 반환."""
+
+    def test_rule_sec007_string_runasuser_returns_fail(self, tmp_path: Path) -> None:
+        """runAsUser에 문자열 → FAIL (ValueError 전파 금지)."""
+        doc = _minimal_deployment(run_as_user=None)
+        # container securityContext에 문자열 값 삽입
+        doc["spec"]["template"]["spec"]["containers"][0]["securityContext"]["runAsUser"] = "abc"
+        mf = _write_file(tmp_path, doc)
+        report = _validator().validate([mf])
+        assert "SEC-007" in [r.rule_id for r in report.results if r.level == "FAIL"]
+        fail_results = [r for r in report.results if r.rule_id == "SEC-007" and r.level == "FAIL"]
+        assert any("정수가 아님" in r.message_ko for r in fail_results)
+
+    def test_rule_sec008_list_fsgroup_returns_fail(self, tmp_path: Path) -> None:
+        """fsGroup에 리스트 → FAIL (TypeError 전파 금지)."""
+        doc = _minimal_deployment(fs_group=None)
+        doc["spec"]["template"]["spec"]["securityContext"]["fsGroup"] = [1, 2, 3]
+        mf = _write_file(tmp_path, doc)
+        report = _validator().validate([mf])
+        assert "SEC-008" in [r.rule_id for r in report.results if r.level == "FAIL"]
+        fail_results = [r for r in report.results if r.rule_id == "SEC-008" and r.level == "FAIL"]
+        assert any("정수가 아님" in r.message_ko for r in fail_results)
+
+    def test_rule_svc002_string_targetport_handled(self, tmp_path: Path) -> None:
+        """targetPort에 int 대신 문자열 숫자 → 이름 매칭으로 처리 (TypeError 없음)."""
+        dep = _minimal_deployment(
+            container_ports=[{"name": "http", "containerPort": 8080}]
+        )
+        svc = _minimal_service(target_port="http")
+        mf = _write_file(tmp_path, dep, svc)
+        # 예외 없이 동작해야 함
+        report = _validator().validate([mf])
+        assert isinstance(report, ValidationReport)
+
+
+# ─── Important 3: None-chain 방어 (_as_dict 헬퍼) ──────────────────────────
+
+
+class TestNoneChainDefense:
+    """spec: null 또는 중간 값 null → AttributeError 없이 정상 처리."""
+
+    def test_spec_null_manifest_no_attribute_error(self, tmp_path: Path) -> None:
+        """spec: null인 Deployment → PARSE-ERR 없이 규칙 결과 반환."""
+        yaml_content = """\
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: null-spec
+spec: null
+"""
+        mf = tmp_path / "null_spec.yaml"
+        mf.write_text(yaml_content)
+        report = _validator().validate([mf])
+        # PARSE-ERR가 아니라 규칙 결과가 있어야 함 (pod_spec이 {}로 처리됨)
+        assert report.exit_code in (0, 1, 2)
+        assert not any(r.rule_id == "PARSE-ERR" for r in report.results)
+
+    def test_spec_template_spec_null_manifest(self, tmp_path: Path) -> None:
+        """spec.template.spec: null인 Deployment → AttributeError 없이 처리."""
+        yaml_content = """\
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: null-template-spec
+spec:
+  template:
+    spec: null
+"""
+        mf = tmp_path / "null_template_spec.yaml"
+        mf.write_text(yaml_content)
+        report = _validator().validate([mf])
+        assert report.exit_code in (0, 1, 2)
+        assert not any(r.rule_id == "PARSE-ERR" for r in report.results)
+
+
+# ─── Important 4: exception 구체화 + Important 5: path.name만 노출 ─────────
+
+
+class TestExceptionNarrowing:
+    """_safe_collect_file exception narrowing + 경로 노출 방어."""
+
+    def test_permission_error_raises_malformed_with_filename(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """PermissionError → MalformedManifestError (파일명만 포함, 절대경로 없음)."""
+        mf = tmp_path / "manifest.yaml"
+        mf.write_text("kind: Deployment\n")
+
+        def raise_permission_error(path: Path, **kwargs: object) -> str:
+            raise PermissionError(f"Permission denied: {path}")
+
+        monkeypatch.setattr(
+            "scripts.validate_k8s.read_text_limited", raise_permission_error
+        )
+        report = _validator().validate([mf])
+        assert any(r.rule_id == "PARSE-ERR" for r in report.results)
+        fail = next(r for r in report.results if r.rule_id == "PARSE-ERR")
+        # 파일명(manifest.yaml)은 포함, 절대 경로는 포함되면 안 됨
+        assert "manifest.yaml" in fail.message_ko
+        assert str(tmp_path) not in fail.message_ko
+
+    def test_unicode_decode_error_raises_malformed(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """UnicodeDecodeError → MalformedManifestError."""
+        mf = tmp_path / "bad_encoding.yaml"
+        mf.write_bytes(b"\xff\xfe invalid utf-8")
+
+        report = _validator().validate([mf])
+        assert any(r.rule_id == "PARSE-ERR" for r in report.results)
+
+    def test_yaml_bomb_17_anchors_parse_err(self, tmp_path: Path) -> None:
+        """17개 anchor/alias 포함 manifest → PARSE-ERR FAIL."""
+        # 17개 anchor 포함 YAML 생성
+        anchors = "\n".join([f"key{i}: &anchor{i} value{i}" for i in range(17)])
+        yaml_content = f"kind: Deployment\nmetadata:\n  name: bomb\n{anchors}\n"
+        mf = tmp_path / "bomb.yaml"
+        mf.write_text(yaml_content)
+        report = _validator().validate([mf])
+        assert any(r.rule_id == "PARSE-ERR" for r in report.results)
