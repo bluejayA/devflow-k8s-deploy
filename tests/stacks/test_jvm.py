@@ -15,6 +15,8 @@
 import os
 from pathlib import Path
 
+import pytest
+
 # ──────────────────────────────────────────────────────────────────────────────
 # Fixtures: 프로젝트 디렉토리 생성 헬퍼 (tmp_path 기반)
 # ──────────────────────────────────────────────────────────────────────────────
@@ -817,3 +819,222 @@ class TestPortEdgeCases:
         )
         port = JvmStackModule()._detect_port(tmp_path)
         assert port == 65535
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# 12. Spec Minor 1: _detect_build_system 우선순위 정합
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+class TestDetectBuildSystemPriority:
+    def test_gradle_kts_wins_over_pom_xml(self, tmp_path: Path) -> None:
+        """build.gradle.kts + pom.xml 혼재 → build_system == 'gradle' (gradle.kts 우선)."""
+        from scripts.stacks.jvm import JvmStackModule
+
+        _write(
+            tmp_path / "build.gradle.kts",
+            'plugins { id("org.springframework.boot") version "3.2.0" }\n',
+        )
+        _write(
+            tmp_path / "pom.xml",
+            """<?xml version="1.0" encoding="UTF-8"?>
+<project>
+    <modelVersion>4.0.0</modelVersion>
+    <parent>
+        <groupId>org.springframework.boot</groupId>
+        <artifactId>spring-boot-starter-parent</artifactId>
+        <version>2.7.18</version>
+    </parent>
+    <groupId>com.example</groupId>
+    <artifactId>demo</artifactId>
+    <version>0.0.1-SNAPSHOT</version>
+</project>
+""",
+        )
+        result = JvmStackModule().detect(tmp_path)
+        assert result is not None
+        assert result.build_system == "gradle"
+
+    def test_gradle_groovy_wins_over_pom_xml(self, tmp_path: Path) -> None:
+        """build.gradle + pom.xml 혼재 → build_system == 'gradle' (gradle 우선)."""
+        from scripts.stacks.jvm import JvmStackModule
+
+        _write(
+            tmp_path / "build.gradle",
+            "plugins { id 'org.springframework.boot' version '3.2.0' }\n",
+        )
+        _write(
+            tmp_path / "pom.xml",
+            """<?xml version="1.0" encoding="UTF-8"?>
+<project>
+    <modelVersion>4.0.0</modelVersion>
+    <parent>
+        <groupId>org.springframework.boot</groupId>
+        <artifactId>spring-boot-starter-parent</artifactId>
+        <version>2.7.18</version>
+    </parent>
+    <groupId>com.example</groupId>
+    <artifactId>demo</artifactId>
+    <version>0.0.1-SNAPSHOT</version>
+</project>
+""",
+        )
+        result = JvmStackModule().detect(tmp_path)
+        assert result is not None
+        assert result.build_system == "gradle"
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# 13. Quality Minor 2: read_text_limited max_mb float 지원
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+class TestReadTextLimitedFloat:
+    def test_max_mb_float_below_limit_reads_ok(self, tmp_path: Path) -> None:
+        """max_mb=0.1 (100KB) 미만 파일 → 정상 읽기."""
+        from scripts._shared.fileio import read_text_limited
+
+        small_file = tmp_path / "small.txt"
+        small_file.write_text("hello", encoding="utf-8")
+
+        content = read_text_limited(small_file, max_mb=0.1)
+        assert content == "hello"
+
+    def test_max_mb_float_exceeds_limit_raises(self, tmp_path: Path) -> None:
+        """max_mb=0.001 (약 1KB 초과 파일) → ValueError."""
+        from scripts._shared.fileio import read_text_limited
+
+        big_file = tmp_path / "medium.txt"
+        big_file.write_bytes(b"x" * 2000)  # 2KB
+
+        with pytest.raises(ValueError, match="초과"):
+            read_text_limited(big_file, max_mb=0.001)
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# 14. Quality Minor 5: _include_has_health 대소문자/공백 정규화
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+class TestIncludeHasHealthNormalization:
+    def test_include_health_uppercase_detected(self, tmp_path: Path) -> None:
+        """include: 'HEALTH' (대문자) → actuator 감지."""
+        from scripts.stacks.jvm import JvmStackModule
+
+        _write(
+            tmp_path / "build.gradle.kts",
+            """
+plugins {
+    id("org.springframework.boot") version "2.7.18"
+}
+dependencies {
+    implementation("org.springframework.boot:spring-boot-starter-actuator")
+}
+""",
+        )
+        _write(
+            tmp_path / "src/main/resources/application.yml",
+            """
+management:
+  endpoints:
+    web:
+      exposure:
+        include: " HEALTH "
+server:
+  port: 8080
+""",
+        )
+        detect_result = JvmStackModule().detect(tmp_path)
+        assert detect_result is not None
+        assert detect_result.actuator_enabled is True
+
+    def test_include_list_with_mixed_case_and_spaces(self, tmp_path: Path) -> None:
+        """include list에 ' Health ' (공백+혼합대소문자) → actuator 감지."""
+        from scripts.stacks.jvm import JvmStackModule
+
+        _write(
+            tmp_path / "build.gradle.kts",
+            """
+plugins {
+    id("org.springframework.boot") version "3.2.0"
+}
+dependencies {
+    implementation("org.springframework.boot:spring-boot-starter-actuator")
+}
+""",
+        )
+        _write(
+            tmp_path / "src/main/resources/application.yml",
+            """
+management:
+  endpoints:
+    web:
+      exposure:
+        include:
+          - " Health "
+          - info
+server:
+  port: 8080
+""",
+        )
+        detect_result = JvmStackModule().detect(tmp_path)
+        assert detect_result is not None
+        assert detect_result.actuator_enabled is True
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# 15. Security Minor 7: _properties_exposes_health ISO-8859-1 fallback
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+class TestPropertiesHealthISO88591:
+    def test_iso8859_properties_exposes_health_detected(self, tmp_path: Path) -> None:
+        """ISO-8859-1 인코딩 application.properties + management.endpoints.include=health → 감지."""
+        from scripts.stacks.jvm import JvmStackModule
+
+        _write(
+            tmp_path / "build.gradle.kts",
+            """
+plugins {
+    id("org.springframework.boot") version "3.2.0"
+}
+dependencies {
+    implementation("org.springframework.boot:spring-boot-starter-actuator")
+}
+""",
+        )
+        resources_dir = tmp_path / "src" / "main" / "resources"
+        resources_dir.mkdir(parents=True)
+        props_file = resources_dir / "application.properties"
+        # ISO-8859-1로 한글 주석 + management 설정 작성
+        content = (
+            "# \xc1\xa4\xb8\xae (ISO-8859-1 comment)\n"
+            "management.endpoints.web.exposure.include=health\n"
+            "server.port=8080\n"
+        )
+        props_file.write_bytes(content.encode("iso-8859-1"))
+
+        detect_result = JvmStackModule().detect(tmp_path)
+        assert detect_result is not None
+        assert detect_result.actuator_enabled is True
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# 16. Security Minor 8: ValueError propagation from read_text_limited
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+class TestValueErrorPropagation:
+    def test_oversized_build_gradle_kts_raises_jvm_detection_error(
+        self, tmp_path: Path
+    ) -> None:
+        """build.gradle.kts가 5MB 초과(ValueError) → JvmDetectionError로 승격."""
+        from scripts._shared.errors import JvmDetectionError
+        from scripts.stacks.jvm import JvmStackModule
+
+        # 6MB 파일 생성 → read_text_limited가 ValueError → JvmDetectionError 변환 검증
+        large_file = tmp_path / "build.gradle.kts"
+        large_file.write_bytes(b"x" * (6 * 1024 * 1024))  # 6MB
+
+        with pytest.raises(JvmDetectionError, match="파싱 실패"):
+            JvmStackModule().detect(tmp_path)

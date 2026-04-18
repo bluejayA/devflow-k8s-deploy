@@ -11,14 +11,14 @@ MAX_FILE_MB = 5
 
 def read_text_limited(
     path: Path,
-    max_mb: int = MAX_FILE_MB,
+    max_mb: int | float = MAX_FILE_MB,
     encoding: str = "utf-8",
 ) -> str:
     """파일 크기 상한 검증 후 텍스트 읽기. 초과 시 ValueError.
 
     Args:
         path: 읽을 파일 경로
-        max_mb: 최대 허용 크기 (MB). 기본 5.
+        max_mb: 최대 허용 크기 (MB). int 또는 float 허용. 기본 5.
         encoding: 인코딩. 기본 utf-8.
 
     Returns:
@@ -26,7 +26,7 @@ def read_text_limited(
 
     Raises:
         ValueError: 파일 크기가 max_mb 초과.
-        OSError: 파일 읽기 실패.
+        OSError: 파일 없음 / 권한 부족 시 stat 단계 또는 read 단계에서 발생.
         UnicodeDecodeError: 인코딩 변환 실패.
     """
     size_bytes = path.stat().st_size

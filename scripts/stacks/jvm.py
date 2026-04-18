@@ -223,10 +223,18 @@ class JvmStackModule:
 
     @staticmethod
     def _detect_build_system(build_files: list[Path]) -> Literal["gradle", "maven"]:
-        """빌드 파일 목록에서 gradle 또는 maven 판별."""
-        for build_file in build_files:
-            if build_file.name == "pom.xml":
-                return "maven"
+        """빌드 파일 목록에서 gradle 또는 maven 판별.
+
+        _find_build_files가 이미 우선순위대로 정렬(build.gradle.kts → build.gradle → pom.xml)
+        하므로 첫 번째 파일 이름으로 판단한다.
+        """
+        if not build_files:
+            return "gradle"
+        first = build_files[0]
+        if first.name.startswith("build.gradle"):
+            return "gradle"
+        if first.name == "pom.xml":
+            return "maven"
         return "gradle"
 
     # ── 내부 헬퍼: 프레임워크/버전 감지 ──────────────────────────────────────
@@ -236,50 +244,38 @@ class JvmStackModule:
     ) -> tuple[str, str | None]:
         """build 파일들로부터 framework + version 반환.
 
+        각 빌드 파일을 한 번만 읽어 Spring Boot / Ktor / Micronaut 순서로 검사한다.
+        Ktor는 pom.xml 기반 빌드 파일에서 탐색하지 않는다 (Gradle 기반 프레임워크).
+
         Raises:
             JvmDetectionError: Gradle 빌드 파일 읽기 실패 시.
         """
-        # Spring Boot 우선
+        # Spring Boot 우선 (버전 추출 포함)
         boot_version = self._detect_boot_version(build_files)
         if boot_version:
             return ("spring-boot", boot_version)
 
-        # Spring Boot 버전 없어도 spring-boot 문자열이 있으면 spring-boot
+        # 각 파일을 한 번만 읽어 spring-boot / ktor / micronaut 체크
         for build_file in build_files:
+            is_pom = build_file.name == "pom.xml"
             try:
                 content = read_text_limited(build_file)
-            except (OSError, UnicodeDecodeError) as exc:
-                if build_file.name != "pom.xml":
+            except (OSError, UnicodeDecodeError, ValueError) as exc:
+                if not is_pom:
                     raise JvmDetectionError(
                         f"Gradle 빌드 파일 파싱 실패: {build_file.name}: {exc}"
                     ) from exc
                 continue
+
+            # Spring Boot (버전 없이 문자열만 존재)
             if "spring-boot" in content.lower() or "springframework.boot" in content:
                 return ("spring-boot", None)
 
-        # Ktor
-        for build_file in build_files:
-            if build_file.name == "pom.xml":
-                continue
-            try:
-                content = read_text_limited(build_file)
-            except (OSError, UnicodeDecodeError) as exc:
-                raise JvmDetectionError(
-                    f"Gradle 빌드 파일 파싱 실패: {build_file.name}: {exc}"
-                ) from exc
-            if _KTOR_RE.search(content):
+            # Ktor (pom.xml은 skip — Gradle 기반 프레임워크)
+            if not is_pom and _KTOR_RE.search(content):
                 return ("ktor", None)
 
-        # Micronaut
-        for build_file in build_files:
-            try:
-                content = read_text_limited(build_file)
-            except (OSError, UnicodeDecodeError) as exc:
-                if build_file.name != "pom.xml":
-                    raise JvmDetectionError(
-                        f"Gradle 빌드 파일 파싱 실패: {build_file.name}: {exc}"
-                    ) from exc
-                continue
+            # Micronaut
             if _MICRONAUT_RE.search(content):
                 return ("micronaut", None)
 
@@ -292,12 +288,12 @@ class JvmStackModule:
         Maven:  spring-boot-starter-parent <version>
 
         Raises:
-            JvmDetectionError: Gradle 빌드 파일 읽기 실패 시.
+            JvmDetectionError: Gradle 빌드 파일 읽기 실패 시 (ValueError 포함).
         """
         for build_file in build_files:
             try:
                 content = read_text_limited(build_file)
-            except (OSError, UnicodeDecodeError) as exc:
+            except (OSError, UnicodeDecodeError, ValueError) as exc:
                 if build_file.name != "pom.xml":
                     raise JvmDetectionError(
                         f"Gradle 빌드 파일 파싱 실패: {build_file.name}: {exc}"
@@ -476,18 +472,32 @@ class JvmStackModule:
         return False
 
     def _file_exposes_health(self, config_file: Path) -> bool:
-        """단일 설정 파일에서 management.endpoints.web.exposure.include에 health/* 포함."""
-        try:
-            content = read_text_limited(config_file)
-        except (OSError, UnicodeDecodeError):
-            return False
+        """단일 설정 파일에서 management.endpoints.web.exposure.include에 health/* 포함.
 
+        .properties 파일은 UTF-8 읽기 실패 시 ISO-8859-1로 재시도한다
+        (Spring Boot 관례, _read_port_from_properties와 동일 패턴).
+        """
         suffix = config_file.suffix.lower()
 
         if suffix in (".yml", ".yaml"):
+            try:
+                content = read_text_limited(config_file)
+            except (OSError, UnicodeDecodeError, ValueError):
+                return False
             return self._yaml_exposes_health(content)
+
         if suffix == ".properties":
+            try:
+                content = read_text_limited(config_file)
+            except UnicodeDecodeError:
+                try:
+                    content = read_text_limited(config_file, encoding="iso-8859-1")
+                except (OSError, UnicodeDecodeError, ValueError):
+                    return False
+            except (OSError, ValueError):
+                return False
             return self._properties_exposes_health(content)
+
         return False
 
     @staticmethod
@@ -526,13 +536,17 @@ class JvmStackModule:
 
     @staticmethod
     def _include_has_health(include: object) -> bool:
-        """include 값에 'health', '*' 중 하나가 있는지 확인."""
+        """include 값에 'health', '*' 중 하나가 있는지 확인.
+
+        list 원소 및 문자열 토큰 모두 strip().lower()로 정규화하여
+        'HEALTH', ' Health ' 등의 대소문자/공백 변형도 인식한다.
+        """
         if include is None:
             return False
         if isinstance(include, list):
-            return any(str(v).strip() in ("health", "*") for v in include)
+            return any(str(v).strip().lower() in ("health", "*") for v in include)
         text = str(include)
-        tokens = [t.strip() for t in text.split(",")]
+        tokens = [t.strip().lower() for t in text.split(",")]
         return "health" in tokens or "*" in tokens
 
     # ── 내부 헬퍼: probe_plan 보조 ────────────────────────────────────────────

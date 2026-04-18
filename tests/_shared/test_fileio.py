@@ -54,14 +54,24 @@ class TestReadTextLimited:
             read_text_limited(bad_file, encoding="utf-8")
 
     def test_iso8859_encoding(self, tmp_path: Path) -> None:
-        """ISO-8859-1 인코딩 파일 → encoding 인자로 정상 읽기."""
+        """ISO-8859-1 인코딩 파일 → encoding 인자로 정상 읽기 (café 전체 포함)."""
         from scripts._shared.fileio import read_text_limited
 
         f = tmp_path / "latin.txt"
         f.write_bytes("café".encode("iso-8859-1"))
 
         content = read_text_limited(f, encoding="iso-8859-1")
-        assert "caf" in content
+        assert "café" in content
+
+    def test_max_mb_accepts_float(self, tmp_path: Path) -> None:
+        """max_mb에 float 값(0.5) 전달 → 정상 동작."""
+        from scripts._shared.fileio import read_text_limited
+
+        f = tmp_path / "small.txt"
+        f.write_text("hello", encoding="utf-8")
+
+        content = read_text_limited(f, max_mb=0.5)
+        assert content == "hello"
 
 
 class TestIsWithin:
@@ -98,3 +108,20 @@ class TestIsWithin:
         from scripts._shared.fileio import is_within
 
         assert is_within(tmp_path, tmp_path) is True
+
+    def test_internal_symlink_is_within(self, tmp_path: Path) -> None:
+        """root 내부 파일에 대한 symlink → is_within True (내부 symlink 정상 케이스)."""
+        import os
+
+        from scripts._shared.fileio import is_within
+
+        real_file = tmp_path / "real.txt"
+        real_file.write_text("content", encoding="utf-8")
+
+        link = tmp_path / "link.txt"
+        try:
+            os.symlink(real_file, link)
+        except PermissionError:
+            pytest.skip("symlink 생성 권한 없음")
+
+        assert is_within(tmp_path, link) is True
