@@ -260,3 +260,109 @@ class TestRenderManifest:
         # 연속 빈 라인이 1개로 줄어야 함
         assert "\n\n\n" not in result
         assert result.endswith("\n")
+
+
+# ---------------------------------------------------------------------------
+# 8. _normalize — CRLF/CR 라인 종결자 정규화
+# ---------------------------------------------------------------------------
+
+
+class TestNormalizeCRLF:
+    def test_crlf_input_is_normalized_to_lf(self, tmp_path: Path) -> None:
+        """CRLF 입력은 LF로 정규화된다."""
+        renderer = _make_renderer(tmp_path)
+        result = renderer._normalize("line1\r\nline2\r\nline3")
+        assert result == "line1\nline2\nline3\n"
+
+    def test_cr_only_input_is_normalized_to_lf(self, tmp_path: Path) -> None:
+        """CR 전용 입력도 LF로 정규화된다."""
+        renderer = _make_renderer(tmp_path)
+        result = renderer._normalize("line1\rline2")
+        assert result == "line1\nline2\n"
+
+
+# ---------------------------------------------------------------------------
+# 9. Identifier 검증 — stack/kind 화이트리스트
+# ---------------------------------------------------------------------------
+
+
+class TestIdentifierValidation:
+    def test_valid_stack_passes(self, tmp_path: Path) -> None:
+        """유효한 stack 식별자는 검증을 통과한다."""
+        _write_template(tmp_path, "dockerfile/jvm.tmpl", "FROM {{ base }}\n")
+        _write_template(tmp_path, "dockerfile/go.tmpl", "FROM {{ base }}\n")
+        _write_template(tmp_path, "dockerfile/my-stack-1.tmpl", "FROM {{ base }}\n")
+        renderer = _make_renderer(tmp_path)
+
+        # ValueError가 발생하지 않으면 통과
+        renderer.render_dockerfile("jvm", {"base": "eclipse-temurin:21"})
+        renderer.render_dockerfile("go", {"base": "golang:1.22"})
+        renderer.render_dockerfile("my-stack-1", {"base": "alpine:3.18"})
+
+    def test_uppercase_stack_rejected(self, tmp_path: Path) -> None:
+        """대문자 포함 stack은 ValueError."""
+        renderer = _make_renderer(tmp_path)
+        with pytest.raises(ValueError, match="잘못된 stack 식별자"):
+            renderer.render_dockerfile("JVM", {})
+
+    def test_path_traversal_stack_rejected(self, tmp_path: Path) -> None:
+        """경로 탐색 시도 stack은 ValueError."""
+        renderer = _make_renderer(tmp_path)
+        with pytest.raises(ValueError, match="잘못된 stack 식별자"):
+            renderer.render_dockerfile("../secrets", {})
+
+    def test_empty_stack_rejected(self, tmp_path: Path) -> None:
+        """빈 문자열 stack은 ValueError."""
+        renderer = _make_renderer(tmp_path)
+        with pytest.raises(ValueError, match="잘못된 stack 식별자"):
+            renderer.render_dockerfile("", {})
+
+    def test_invalid_kind_rejected(self, tmp_path: Path) -> None:
+        """대문자 포함 kind는 ValueError (manifest_renderer용)."""
+        renderer = _make_renderer(tmp_path)
+        with pytest.raises(ValueError, match="잘못된 kind 식별자"):
+            renderer.render_manifest("Deployment", {})
+
+
+# ---------------------------------------------------------------------------
+# 10. Sanitization 책임 경계 — 렌더러는 context 값을 literally 치환한다
+# ---------------------------------------------------------------------------
+
+
+class TestSanitizationBoundary:
+    def test_newline_in_context_breaks_yaml_without_quoting(self, tmp_path: Path) -> None:
+        """인용 없는 YAML 템플릿에 개행 포함 값 주입 시 구조가 그대로 출력된다.
+
+        렌더러는 sanitize하지 않는다 — 이 동작을 차단하지 않음을 명시적으로 문서화.
+        """
+        _write_template(tmp_path, "manifest/injection.tmpl", "name: {{ value }}\n")
+        renderer = _make_renderer(tmp_path)
+
+        result = renderer.render_manifest(
+            "injection", {"value": "foo\nprivileged: true"}
+        )
+
+        # 렌더러는 개행을 그대로 치환 — "privileged: true"가 결과에 포함됨
+        assert "privileged: true" in result
+
+    def test_tojson_filter_prevents_injection(self, tmp_path: Path) -> None:
+        """tojson 필터를 사용한 템플릿은 개행을 이스케이프해 YAML 독립 라인 주입을 방지한다.
+
+        tojson은 개행을 \\n 이스케이프 시퀀스로 직렬화하므로,
+        "privileged: true"가 독립 YAML 키로 파싱되지 않는다.
+        (문자열 내 substring으로는 존재하지만, YAML 구조로는 분리되지 않음)
+        """
+        _write_template(
+            tmp_path, "manifest/safe.tmpl", "name: {{ value | tojson }}\n"
+        )
+        renderer = _make_renderer(tmp_path)
+
+        result = renderer.render_manifest(
+            "safe", {"value": "foo\nprivileged: true"}
+        )
+
+        # tojson은 개행을 \n(이스케이프 시퀀스)으로 직렬화 — 물리적 줄바꿈이 없음
+        assert "\\n" in result
+        # YAML로 파싱했을 때 "privileged"가 독립 키가 되지 않아야 함
+        parsed = yaml.safe_load(result)
+        assert "privileged" not in parsed
