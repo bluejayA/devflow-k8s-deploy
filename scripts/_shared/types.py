@@ -13,11 +13,22 @@ T = TypeVar("T")
 
 @dataclass(frozen=True)
 class ResolvedConfig:
-    """ConfigLoader.load() 결과."""
+    """ConfigLoader.load() 결과.
+
+    Attributes:
+        raw: 병합된 dict (3계층 deep merge 결과)
+        source_map: 최상위 키 → 출처 레이어 ('project_config'/'org_config'/'builtin_default')
+        warnings: 로드/파싱 과정의 한국어 경고 목록
+        layer_raws: 각 계층의 병합 전 원본 dict.
+            키: 'project_config' / 'org_config' / 'builtin_default'.
+            resolve_namespace 등 계층별 우선순위 조회에 사용.
+            v0.1.0 private 성격 — 외부 소비 시 구조 변경될 수 있음.
+    """
 
     raw: dict[str, Any]  # 병합된 dict
     source_map: dict[str, str]  # 키 경로 → 출처 레이어
     warnings: list[str] = field(default_factory=list)
+    layer_raws: dict[str, dict[str, Any]] = field(default_factory=dict)  # 계층별 원본 dict
 
 
 @dataclass(frozen=True)

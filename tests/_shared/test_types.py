@@ -152,6 +152,28 @@ def test_stack_detect_result_new_fields() -> None:
     assert result2.actuator_enabled is True
 
 
+def test_resolved_config_layer_raws_default_empty_dict() -> None:
+    """ResolvedConfig.layer_raws 신규 필드: 기본값 빈 dict."""
+    from scripts._shared.types import ResolvedConfig
+
+    cfg = ResolvedConfig(raw={"a": 1}, source_map={"a": "project"})
+    assert cfg.layer_raws == {}  # default_factory=dict
+
+
+def test_resolved_config_layer_raws_explicit() -> None:
+    """ResolvedConfig.layer_raws 명시 설정 — project_config/org_config/builtin_default 키."""
+    from scripts._shared.types import ResolvedConfig
+
+    layer_raws = {
+        "project_config": {"namespace": "proj-ns"},
+        "org_config": {"stack": "jvm"},
+        "builtin_default": {"build": {"engine": "skip"}},
+    }
+    cfg = ResolvedConfig(raw={"a": 1}, source_map={}, layer_raws=layer_raws)
+    assert cfg.layer_raws["project_config"]["namespace"] == "proj-ns"
+    assert cfg.layer_raws["org_config"]["stack"] == "jvm"
+
+
 def test_prompt_callback_type_alias() -> None:
     """PromptCallback: TypeAlias로 Callable 타입 지정."""
     from scripts._shared.types import PromptCallback, PromptRequest
