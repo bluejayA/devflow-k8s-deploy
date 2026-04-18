@@ -1038,3 +1038,75 @@ class TestValueErrorPropagation:
 
         with pytest.raises(JvmDetectionError, match="파싱 실패"):
             JvmStackModule().detect(tmp_path)
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# 17. Security Minor 8 (완성): ValueError catch 대칭 — _detect_actuator /
+#     _read_port_from_yaml / _read_port_from_properties
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+class TestValueErrorCatchSymmetry:
+    """5MB 초과 파일이 각 헬퍼에서 graceful하게 처리(raw ValueError 전파 X)되는지 검증."""
+
+    def test_detect_actuator_oversized_build_file_returns_false(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """_detect_actuator: 초과 build 파일에서 ValueError → continue → False 반환."""
+        from unittest.mock import patch
+
+        from scripts.stacks.jvm import JvmStackModule
+
+        _write(
+            tmp_path / "build.gradle.kts",
+            "dependencies {"
+            ' implementation("org.springframework.boot:spring-boot-starter-actuator")'
+            " }\n",
+        )
+
+        # read_text_limited가 ValueError를 raise하도록 monkeypatch
+        with patch(
+            "scripts.stacks.jvm.read_text_limited",
+            side_effect=ValueError("파일 크기 초과"),
+        ):
+            result = JvmStackModule()._detect_actuator(tmp_path, "3.2.0")
+
+        assert result is False
+
+    def test_read_port_from_yaml_oversized_returns_none(
+        self, tmp_path: Path
+    ) -> None:
+        """_read_port_from_yaml: ValueError → None 반환 (raw 전파 X)."""
+        from unittest.mock import patch
+
+        from scripts.stacks.jvm import JvmStackModule
+
+        yml_file = tmp_path / "application.yml"
+        yml_file.write_text("server:\n  port: 9090\n", encoding="utf-8")
+
+        with patch(
+            "scripts.stacks.jvm.read_text_limited",
+            side_effect=ValueError("파일 크기 초과"),
+        ):
+            port = JvmStackModule._read_port_from_yaml(yml_file)
+
+        assert port is None
+
+    def test_read_port_from_properties_oversized_returns_none(
+        self, tmp_path: Path
+    ) -> None:
+        """_read_port_from_properties: ValueError → None 반환 (raw 전파 X)."""
+        from unittest.mock import patch
+
+        from scripts.stacks.jvm import JvmStackModule
+
+        props_file = tmp_path / "application.properties"
+        props_file.write_text("server.port=9090\n", encoding="utf-8")
+
+        with patch(
+            "scripts.stacks.jvm.read_text_limited",
+            side_effect=ValueError("파일 크기 초과"),
+        ):
+            port = JvmStackModule._read_port_from_properties(props_file)
+
+        assert port is None

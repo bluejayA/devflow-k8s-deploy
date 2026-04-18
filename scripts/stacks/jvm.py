@@ -330,7 +330,7 @@ class JvmStackModule:
         for build_file in build_files:
             try:
                 content = read_text_limited(build_file)
-            except (OSError, UnicodeDecodeError):
+            except (OSError, UnicodeDecodeError, ValueError):
                 continue
             if build_file.name == "pom.xml":
                 if self._maven_has_actuator(content):
@@ -601,7 +601,7 @@ class JvmStackModule:
         try:
             content = read_text_limited(yml_file)
             data = yaml.safe_load(content)
-        except (OSError, UnicodeDecodeError, yaml.YAMLError):
+        except (OSError, UnicodeDecodeError, ValueError, yaml.YAMLError):
             return None
 
         if not isinstance(data, dict):
@@ -634,9 +634,9 @@ class JvmStackModule:
         except UnicodeDecodeError:
             try:
                 content = read_text_limited(props_file, encoding="iso-8859-1")
-            except (OSError, UnicodeDecodeError):
+            except (OSError, UnicodeDecodeError, ValueError):
                 return None
-        except OSError:
+        except (OSError, ValueError):
             return None
 
         for line in content.splitlines():
