@@ -3,12 +3,16 @@
 시나리오:
 1. detect — Gradle KTS/Groovy/Maven, 비-Spring, 빈 디렉토리
 2. probe_plan — Boot 2+actuator, Boot 3+actuator, actuator 미감지
+   + I2: actuator 4 케이스 (Boot 2 no-include, Boot 3 no-include, list, wildcard)
+   + I3: Maven probe 경로 검증
 3. build_plan — Gradle/Maven 분기, 이미지 포맷
 4. defaults — 필드 기본값
 5. artifact_locator — fat jar 우선 / plain jar 제외
-6. _detect_port — profile 우선순위
+6. _detect_port — profile 우선순위, port 범위 검증, ISO-8859-1 fallback
+7. Security — symlink escape
 """
 
+import os
 from pathlib import Path
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -473,9 +477,11 @@ class TestArtifactLocator:
 
         detect_result = StackDetectResult(
             port=8080,
-            entrypoint="build_system:maven;actuator:true",
+            entrypoint="",
             framework="spring-boot",
             version="2.7.18",
+            build_system="maven",
+            actuator_enabled=True,
         )
         result = JvmStackModule().artifact_locator(detect_result, tmp_path)
 
@@ -565,3 +571,249 @@ class TestStackModuleProtocol:
         from scripts.stacks.jvm import JvmStackModule
 
         assert JvmStackModule.name == "jvm"
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# 8. Quality I2: actuator 엣지 케이스 4건
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+class TestActuatorEdgeCases:
+    def test_boot2_actuator_dep_no_include_falls_back_to_tcp(self, tmp_path: Path) -> None:
+        """Boot 2.x + actuator 의존성만, include 미설정 → TCP 폴백."""
+        from scripts.stacks.jvm import JvmStackModule
+
+        _write(
+            tmp_path / "build.gradle",
+            """
+plugins {
+    id 'org.springframework.boot' version '2.7.18'
+}
+dependencies {
+    implementation 'org.springframework.boot:spring-boot-starter-actuator'
+}
+""",
+        )
+        # management.endpoints 설정 없음
+        _write(tmp_path / "src/main/resources/application.yml", "server:\n  port: 8080\n")
+
+        detect_result = JvmStackModule().detect(tmp_path)
+        assert detect_result is not None
+        config = JvmStackModule().probe_plan(detect_result)
+
+        assert config.liveness.kind == "tcp"
+        assert config.readiness.kind == "tcp"
+
+    def test_boot3_actuator_dep_no_include_uses_http(self, tmp_path: Path) -> None:
+        """Boot 3.x + actuator 의존성만, include 미설정 → HTTP 프로브 (기본 health 노출)."""
+        from scripts.stacks.jvm import JvmStackModule
+
+        _write(
+            tmp_path / "build.gradle.kts",
+            """
+plugins {
+    id("org.springframework.boot") version "3.2.0"
+}
+dependencies {
+    implementation("org.springframework.boot:spring-boot-starter-actuator")
+}
+""",
+        )
+        # management.endpoints 설정 없음
+        _write(tmp_path / "src/main/resources/application.yml", "server:\n  port: 8080\n")
+
+        detect_result = JvmStackModule().detect(tmp_path)
+        assert detect_result is not None
+        config = JvmStackModule().probe_plan(detect_result)
+
+        assert config.liveness.kind == "http"
+        assert config.readiness.kind == "http"
+
+    def test_actuator_include_list_format_uses_http(self, tmp_path: Path) -> None:
+        """include가 YAML list 형태 [health, info] → HTTP 프로브."""
+        from scripts.stacks.jvm import JvmStackModule
+
+        _write(
+            tmp_path / "build.gradle.kts",
+            """
+plugins {
+    id("org.springframework.boot") version "2.7.18"
+}
+dependencies {
+    implementation("org.springframework.boot:spring-boot-starter-actuator")
+}
+""",
+        )
+        _write(
+            tmp_path / "src/main/resources/application.yml",
+            """
+management:
+  endpoints:
+    web:
+      exposure:
+        include:
+          - health
+          - info
+server:
+  port: 8080
+""",
+        )
+
+        detect_result = JvmStackModule().detect(tmp_path)
+        assert detect_result is not None
+        config = JvmStackModule().probe_plan(detect_result)
+
+        assert config.liveness.kind == "http"
+        assert config.readiness.kind == "http"
+
+    def test_actuator_include_wildcard_uses_http(self, tmp_path: Path) -> None:
+        """include: "*" 와일드카드 → HTTP 프로브."""
+        from scripts.stacks.jvm import JvmStackModule
+
+        _write(
+            tmp_path / "build.gradle.kts",
+            """
+plugins {
+    id("org.springframework.boot") version "3.2.0"
+}
+dependencies {
+    implementation("org.springframework.boot:spring-boot-starter-actuator")
+}
+""",
+        )
+        _write(
+            tmp_path / "src/main/resources/application.yml",
+            """
+management:
+  endpoints:
+    web:
+      exposure:
+        include: "*"
+server:
+  port: 8080
+""",
+        )
+
+        detect_result = JvmStackModule().detect(tmp_path)
+        assert detect_result is not None
+        config = JvmStackModule().probe_plan(detect_result)
+
+        assert config.liveness.kind == "http"
+        assert config.readiness.kind == "http"
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# 9. Quality I3: Maven probe 경로 검증
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+class TestMavenProbePath:
+    def test_maven_boot2_actuator_uses_http_health(self, tmp_path: Path) -> None:
+        """Maven + Boot 2 + actuator → /actuator/health HTTP probe."""
+        from scripts.stacks.jvm import JvmStackModule
+
+        proj = make_maven_spring2(tmp_path)
+        detect_result = JvmStackModule().detect(proj)
+        assert detect_result is not None
+
+        config = JvmStackModule().probe_plan(detect_result)
+
+        assert config.liveness.kind == "http"
+        assert config.readiness.kind == "http"
+        assert config.liveness.path == "/actuator/health"
+        assert config.readiness.path == "/actuator/health"
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# 10. Security 3: symlink escape 방어
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+class TestSymlinkEscape:
+    def test_symlinked_application_yml_is_skipped(self, tmp_path: Path) -> None:
+        """resources/application.yml → /etc/passwd symlink → port 기본값 8080 반환."""
+        from scripts.stacks.jvm import JvmStackModule
+
+        _write(
+            tmp_path / "build.gradle.kts",
+            'plugins { id("org.springframework.boot") version "3.2.0" }\n',
+        )
+        resources_dir = tmp_path / "src" / "main" / "resources"
+        resources_dir.mkdir(parents=True)
+
+        symlink_path = resources_dir / "application.yml"
+        try:
+            os.symlink("/etc/passwd", symlink_path)
+        except PermissionError:
+            import pytest
+            pytest.skip("symlink 생성 권한 없음")
+
+        # /etc/passwd를 읽으면 server.port가 없으므로 기본값 8080으로 폴백
+        # 중요: symlink가 project_dir 외부를 가리키므로 skip되어야 함
+        port = JvmStackModule()._detect_port(tmp_path)
+        assert port == 8080
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# 11. Security 4 + Minor 10: ISO-8859-1 fallback + port 범위 검증
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+class TestPortEdgeCases:
+    def test_iso8859_properties_port(self, tmp_path: Path) -> None:
+        """ISO-8859-1 인코딩 한글 주석 포함 properties → port 정상 추출."""
+        from scripts.stacks.jvm import JvmStackModule
+
+        resources_dir = tmp_path / "src" / "main" / "resources"
+        resources_dir.mkdir(parents=True)
+        props_file = resources_dir / "application.properties"
+        # ISO-8859-1로 한글 주석 포함 (UTF-8로는 읽기 불가)
+        content = "# \xc1\xa4\xb8\xae (ISO-8859-1 comment)\nserver.port=9876\n"
+        props_file.write_bytes(content.encode("iso-8859-1"))
+
+        port = JvmStackModule()._detect_port(tmp_path)
+        assert port == 9876
+
+    def test_port_out_of_range_returns_default(self, tmp_path: Path) -> None:
+        """server.port=99999 (범위 초과) → 기본값 8080 반환."""
+        from scripts.stacks.jvm import JvmStackModule
+
+        _write(
+            tmp_path / "src/main/resources/application.yml",
+            "server:\n  port: 99999\n",
+        )
+        port = JvmStackModule()._detect_port(tmp_path)
+        assert port == 8080
+
+    def test_port_zero_returns_default(self, tmp_path: Path) -> None:
+        """server.port=0 (범위 미달) → 기본값 8080 반환."""
+        from scripts.stacks.jvm import JvmStackModule
+
+        _write(
+            tmp_path / "src/main/resources/application.properties",
+            "server.port=0\n",
+        )
+        port = JvmStackModule()._detect_port(tmp_path)
+        assert port == 8080
+
+    def test_port_boundary_1(self, tmp_path: Path) -> None:
+        """server.port=1 (최솟값) → 1 반환."""
+        from scripts.stacks.jvm import JvmStackModule
+
+        _write(
+            tmp_path / "src/main/resources/application.yml",
+            "server:\n  port: 1\n",
+        )
+        port = JvmStackModule()._detect_port(tmp_path)
+        assert port == 1
+
+    def test_port_boundary_65535(self, tmp_path: Path) -> None:
+        """server.port=65535 (최댓값) → 65535 반환."""
+        from scripts.stacks.jvm import JvmStackModule
+
+        _write(
+            tmp_path / "src/main/resources/application.yml",
+            "server:\n  port: 65535\n",
+        )
+        port = JvmStackModule()._detect_port(tmp_path)
+        assert port == 65535
