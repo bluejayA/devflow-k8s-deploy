@@ -18,7 +18,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from scripts._shared.errors import MultiModuleAbort, UnknownStackError
+from scripts._shared.errors import MultiModuleAbort, UnknownStackError, UnsupportedStackError
 from scripts._shared.types import (
     AnalysisResult,
     BuildPlan,
@@ -845,3 +845,303 @@ class TestMultiModuleHint:
             )
             with pytest.raises(MultiModuleAbort):
                 analyzer._select_module(modules, gaps)
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# 9. Critical: Path Traversal 방어
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+class TestPathTraversalDefense:
+    def test_path_traversal_dotdot_in_module_name_is_skipped(
+        self, tmp_path: Path
+    ) -> None:
+        """'../secrets' 같은 모듈 이름은 skip — project_root 밖 경로 방어."""
+        _write(
+            tmp_path / "settings.gradle",
+            "include '..', '../secrets'\n",
+        )
+        _write(tmp_path / "build.gradle", "plugins { id 'java' }\n")
+
+        analyzer = ProjectAnalyzer(
+            config_loader=_make_config_loader_auto(),
+            stack_registry={"jvm": JvmStackModule()},
+        )
+        # _project_root 설정을 위해 analyze() 대신 직접 _build_module_info_list 호출
+        # (analyze()는 UnknownStack 등으로 중단될 수 있으므로)
+        analyzer._project_root = tmp_path.resolve()
+        result = analyzer._build_module_info_list(tmp_path, ["../secrets", ".."])
+        analyzer._project_root = None
+
+        # 경로 탈출 모듈은 모두 제거됨
+        assert result == []
+
+    def test_path_traversal_absolute_path_module_name_is_skipped(
+        self, tmp_path: Path
+    ) -> None:
+        """/etc/passwd 같은 절대경로 모듈 이름은 skip."""
+        analyzer = ProjectAnalyzer(
+            config_loader=_make_config_loader_auto(),
+            stack_registry={"jvm": JvmStackModule()},
+        )
+        analyzer._project_root = tmp_path.resolve()
+        result = analyzer._build_module_info_list(tmp_path, ["/etc/passwd", "/tmp"])
+        analyzer._project_root = None
+
+        assert result == []
+
+    def test_path_traversal_nul_char_module_name_is_skipped(
+        self, tmp_path: Path
+    ) -> None:
+        """NUL 문자 포함 모듈 이름은 skip."""
+        analyzer = ProjectAnalyzer(
+            config_loader=_make_config_loader_auto(),
+            stack_registry={"jvm": JvmStackModule()},
+        )
+        analyzer._project_root = tmp_path.resolve()
+        result = analyzer._build_module_info_list(tmp_path, ["api\x00evil", "core"])
+        analyzer._project_root = None
+
+        # NUL 포함 이름은 skip, 유효한 'core'는 유지
+        names = [m.name for m in result]
+        assert "api\x00evil" not in names
+        assert "core" in names
+
+    def test_path_traversal_max_modules_truncated(self, tmp_path: Path) -> None:
+        """모듈 수가 _MAX_MODULES 초과 시 truncate."""
+        from scripts.project_analyzer import _MAX_MODULES
+
+        many_names = [f"module-{i}" for i in range(_MAX_MODULES + 10)]
+        analyzer = ProjectAnalyzer(
+            config_loader=_make_config_loader_auto(),
+            stack_registry={"jvm": JvmStackModule()},
+        )
+        analyzer._project_root = tmp_path.resolve()
+        result = analyzer._build_module_info_list(tmp_path, many_names)
+        analyzer._project_root = None
+
+        assert len(result) <= _MAX_MODULES
+
+    def test_valid_module_names_are_accepted(self, tmp_path: Path) -> None:
+        """정상 모듈 이름(api, my-module, sub/module 등)은 통과."""
+        valid_names = ["api", "my-module", "sub.module", "module_a"]
+        analyzer = ProjectAnalyzer(
+            config_loader=_make_config_loader_auto(),
+            stack_registry={"jvm": JvmStackModule()},
+        )
+        analyzer._project_root = tmp_path.resolve()
+        result = analyzer._build_module_info_list(tmp_path, valid_names)
+        analyzer._project_root = None
+
+        assert len(result) == len(valid_names)
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# 10. UnsupportedStackError for forced_stack not in registry
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+class TestUnsupportedStackError:
+    def test_analyze_forced_stack_not_in_registry_raises_unsupported_stack_error(
+        self, tmp_path: Path
+    ) -> None:
+        """forced_stack이 registry에 없으면 UnsupportedStackError."""
+        _write(tmp_path / "build.gradle.kts", "plugins {}\n")
+
+        analyzer = ProjectAnalyzer(
+            config_loader=_make_config_loader_forced("python"),
+            stack_registry={"jvm": JvmStackModule()},
+        )
+        config = _make_resolved_config({"stack": "python"})
+
+        with pytest.raises(UnsupportedStackError, match="python"):
+            analyzer.analyze(tmp_path, config)
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# 11. prompt_callback 응답 검증
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+class TestPromptCallbackValidation:
+    def _make_modules(self, tmp_path: Path) -> list[ModuleInfo]:
+        return [
+            ModuleInfo(name="api", path=tmp_path / "api", is_likely_app=True),
+            ModuleInfo(name="core", path=tmp_path / "core", is_likely_app=False),
+        ]
+
+    def test_non_string_answer_raises_multi_module_abort(self, tmp_path: Path) -> None:
+        """callback이 str이 아닌 값 반환 → MultiModuleAbort."""
+        analyzer = ProjectAnalyzer(
+            config_loader=_make_config_loader_auto(),
+            stack_registry={"jvm": JvmStackModule()},
+            prompt_callback=MagicMock(return_value=123),
+        )
+        with pytest.raises(MultiModuleAbort, match="문자열이 아님"):
+            analyzer._select_module(self._make_modules(tmp_path), [])
+
+    def test_too_long_answer_raises_multi_module_abort(self, tmp_path: Path) -> None:
+        """256자 초과 응답 → MultiModuleAbort."""
+        analyzer = ProjectAnalyzer(
+            config_loader=_make_config_loader_auto(),
+            stack_registry={"jvm": JvmStackModule()},
+            prompt_callback=MagicMock(return_value="a" * 300),
+        )
+        with pytest.raises(MultiModuleAbort, match="너무 김"):
+            analyzer._select_module(self._make_modules(tmp_path), [])
+
+    def test_control_chars_stripped_from_answer(self, tmp_path: Path) -> None:
+        """ANSI escape 등 제어문자가 포함된 응답에서 모듈명 추출."""
+        # 제어문자 제거 후 'api' 남음 → api 모듈 선택
+        answer_with_ctrl = "ap\x1b[0mi"  # 'api' + ANSI reset
+        analyzer = ProjectAnalyzer(
+            config_loader=_make_config_loader_auto(),
+            stack_registry={"jvm": JvmStackModule()},
+            prompt_callback=MagicMock(return_value=answer_with_ctrl),
+        )
+        # 제어문자 제거 후 'api' 남음 → api 선택
+        result = analyzer._select_module(self._make_modules(tmp_path), [])
+        assert result.name == "api"
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# 12. multi-module statefulness — 루트 + 선택 모듈 양쪽 스캔
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+class TestStatefulnessMultiModule:
+    def test_statefulness_multi_module_jpa_in_root_detected(
+        self, tmp_path: Path
+    ) -> None:
+        """루트 build.gradle에 JPA, 모듈 디렉토리는 깨끗 → stateful(high) 감지."""
+        # 루트 빌드 파일: JPA 의존성
+        _write(
+            tmp_path / "build.gradle.kts",
+            """
+dependencies {
+    implementation("org.springframework.boot:spring-boot-starter-data-jpa")
+}
+""",
+        )
+        # 모듈 디렉토리: 빌드 파일 없음 (깨끗)
+        module_dir = tmp_path / "api-server"
+        module_dir.mkdir()
+
+        module_info = ModuleInfo(name="api-server", path=module_dir, is_likely_app=True)
+
+        analyzer = ProjectAnalyzer(
+            config_loader=_make_config_loader_auto(),
+            stack_registry={"jvm": JvmStackModule()},
+        )
+        # _project_root 설정 (analyze() 경유 없이 직접 호출)
+        analyzer._project_root = tmp_path.resolve()
+        signal = analyzer._detect_statefulness(tmp_path, module_info)
+        analyzer._project_root = None
+
+        assert signal.is_stateful is True
+        assert signal.confidence == "high"
+        assert any("jpa" in r.lower() or "JPA" in r for r in signal.reasons)
+
+    def test_statefulness_multi_module_yml_in_module_takes_priority(
+        self, tmp_path: Path
+    ) -> None:
+        """모듈에 application.yml(datasource 있음), 루트에 없음 → stateful(high)."""
+        _write(tmp_path / "build.gradle.kts", "dependencies {}\n")
+
+        module_dir = tmp_path / "web-api"
+        _write(
+            module_dir / "src/main/resources/application.yml",
+            """
+spring:
+  datasource:
+    url: jdbc:mysql://localhost:3306/mydb
+""",
+        )
+        module_info = ModuleInfo(name="web-api", path=module_dir, is_likely_app=True)
+
+        analyzer = ProjectAnalyzer(
+            config_loader=_make_config_loader_auto(),
+            stack_registry={"jvm": JvmStackModule()},
+        )
+        analyzer._project_root = tmp_path.resolve()
+        signal = analyzer._detect_statefulness(tmp_path, module_info)
+        analyzer._project_root = None
+
+        assert signal.is_stateful is True
+        assert signal.confidence == "high"
+
+    def test_statefulness_multi_module_stateless_when_no_signals_anywhere(
+        self, tmp_path: Path
+    ) -> None:
+        """루트 + 모듈 모두 시그널 없음 → stateless."""
+        _write(
+            tmp_path / "build.gradle.kts",
+            "dependencies { implementation('org.springframework.boot:spring-boot-starter-web') }\n",
+        )
+        module_dir = tmp_path / "web-api"
+        module_dir.mkdir()
+
+        module_info = ModuleInfo(name="web-api", path=module_dir, is_likely_app=True)
+
+        analyzer = ProjectAnalyzer(
+            config_loader=_make_config_loader_auto(),
+            stack_registry={"jvm": JvmStackModule()},
+        )
+        analyzer._project_root = tmp_path.resolve()
+        signal = analyzer._detect_statefulness(tmp_path, module_info)
+        analyzer._project_root = None
+
+        assert signal.is_stateful is False
+        assert signal.confidence == "high"
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# 13. is_within root 정정 — _read_build_file_text / _check_datasource_url
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+class TestIsWithinRootCorrection:
+    def test_read_build_file_text_uses_project_root_not_scan_dir(
+        self, tmp_path: Path
+    ) -> None:
+        """_read_build_file_text가 project_root 기준 is_within 검사를 수행한다."""
+        _write(
+            tmp_path / "build.gradle.kts",
+            "dependencies { implementation('spring-boot-starter-data-jpa') }\n",
+        )
+        analyzer = ProjectAnalyzer(
+            config_loader=_make_config_loader_auto(),
+            stack_registry={"jvm": JvmStackModule()},
+        )
+        analyzer._project_root = tmp_path.resolve()
+        text = analyzer._read_build_file_text(tmp_path)
+        analyzer._project_root = None
+
+        # 빌드 파일이 정상적으로 읽혔는지 확인
+        assert "spring-boot-starter-data-jpa" in text
+
+    def test_project_root_reset_after_analyze(self, tmp_path: Path) -> None:
+        """analyze() 완료 후 _project_root가 None으로 리셋된다."""
+        _spring_boot3_gradle(tmp_path)
+
+        analyzer = ProjectAnalyzer(
+            config_loader=_make_config_loader_auto(),
+            stack_registry={"jvm": JvmStackModule()},
+        )
+        config = _make_resolved_config()
+        analyzer.analyze(tmp_path, config)
+
+        assert analyzer._project_root is None
+
+    def test_project_root_reset_after_analyze_exception(self, tmp_path: Path) -> None:
+        """analyze()가 예외로 종료되어도 _project_root가 None으로 리셋된다."""
+        # 빈 디렉토리 → UnknownStackError 발생
+        analyzer = ProjectAnalyzer(
+            config_loader=_make_config_loader_auto(),
+            stack_registry={"jvm": JvmStackModule()},
+        )
+        config = _make_resolved_config()
+        with pytest.raises(UnknownStackError):
+            analyzer.analyze(tmp_path, config)
+
+        assert analyzer._project_root is None

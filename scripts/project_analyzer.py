@@ -9,14 +9,15 @@ multi-module 감지 + 비개발자 한국어 힌트 (F-39).
 from __future__ import annotations
 
 import re
+import unicodedata
 import xml.etree.ElementTree as StdET
 from pathlib import Path
 
 import yaml
 from defusedxml import ElementTree as ET
 
-from scripts._shared.errors import MultiModuleAbort, UnknownStackError
-from scripts._shared.fileio import is_within, read_text_limited
+from scripts._shared.errors import MultiModuleAbort, UnknownStackError, UnsupportedStackError
+from scripts._shared.fileio import check_yaml_refs, is_within, read_text_limited
 from scripts._shared.types import (
     AnalysisResult,
     ModuleInfo,
@@ -82,6 +83,14 @@ _DATASOURCE_URL_PATTERNS = [
 _LIKELY_APP_SUFFIXES = ("-api", "-web", "-server", "-app", "-service", "-gateway")
 _UNLIKELY_APP_SUFFIXES = ("-core", "-common", "-shared", "-lib", "-util", "-utils", "-model")
 
+# Path traversal 방어 — 모듈 이름 허용 문자셋 (NUL/제어문자/경로 탈출 차단)
+_MODULE_NAME_RE = re.compile(r"^[A-Za-z0-9_\-./]+$")
+# 모듈 수 상한 (ReDoS 방어 보조)
+_MAX_MODULES = 500
+
+# prompt_callback 응답 최대 길이
+_MAX_ANSWER_LEN = 256
+
 
 def _mvn_find(element: StdET.Element, tag: str) -> StdET.Element | None:
     """ET.Element에서 namespace 포함/미포함 두 가지 방식으로 child 탐색."""
@@ -103,6 +112,32 @@ def _is_likely_app_module(name: str) -> bool:
         if name_lower.endswith(suffix):
             return True
     # 기본: True (단일 이름이거나 패턴 불명확)
+    return True
+
+
+def _validate_module_name(name: str) -> bool:
+    """모듈 이름 유효성 검사 — path traversal / 제어문자 / 절대경로 방어.
+
+    Returns:
+        True이면 유효, False이면 거부.
+    """
+    # NUL 또는 제어문자 포함 거부
+    if any(ord(c) < 0x20 for c in name):
+        return False
+
+    # 절대경로 거부 (Unix '/', Windows 드라이브 'C:' 등)
+    if name.startswith("/") or (len(name) >= 2 and name[1] == ":"):
+        return False
+
+    # '..' 세그먼트 거부 (strip 후 경로 구분자 기준 분리)
+    segments = re.split(r"[/:\\]", name)
+    if any(seg.strip() == ".." for seg in segments):
+        return False
+
+    # 허용 문자셋 검사
+    if not _MODULE_NAME_RE.fullmatch(name):
+        return False
+
     return True
 
 
@@ -155,6 +190,8 @@ class ProjectAnalyzer:
         self._config_loader = config_loader
         self._stack_registry = stack_registry
         self._prompt_callback = prompt_callback
+        # analyze() 실행 중 설정되는 project_root (재사용 안전을 위해 종료 시 None 리셋)
+        self._project_root: Path | None = None
 
     # ── Public API ────────────────────────────────────────────────────────────
 
@@ -176,6 +213,15 @@ class ProjectAnalyzer:
             MultiModuleAbort: 사용자가 모듈 선택 취소.
             UnsupportedStackError: forced_stack이 지원되지 않는 스택.
         """
+        # is_within 검사에 사용할 project_root 저장
+        self._project_root = project_dir.resolve()
+        try:
+            return self._analyze_impl(project_dir, config)
+        finally:
+            self._project_root = None
+
+    def _analyze_impl(self, project_dir: Path, config: ResolvedConfig) -> AnalysisResult:
+        """analyze() 실제 구현 (project_root 설정 후 호출)."""
         gaps: list[str] = []
 
         # 1. stack 분기 결정
@@ -184,7 +230,12 @@ class ProjectAnalyzer:
         # 2. StackModule 선택
         if stack_decision.forced_stack is not None:
             stack_name = stack_decision.forced_stack
-            module = self._stack_registry[stack_name]
+            try:
+                module = self._stack_registry[stack_name]
+            except KeyError:
+                raise UnsupportedStackError(
+                    f"지원하지 않는 stack: '{stack_name}' (v0.1.0은 jvm만)"
+                ) from None
             detect_result = module.detect(project_dir)
             if detect_result is None:
                 # forced_stack이지만 감지 실패 → UnknownStackError
@@ -293,6 +344,17 @@ class ProjectAnalyzer:
         )
         answer = self._prompt_callback(request)
 
+        # ── 응답 검증 ──────────────────────────────────────────────────────
+        if not isinstance(answer, str):
+            raise MultiModuleAbort("사용자 응답이 문자열이 아님")
+        if len(answer) > _MAX_ANSWER_LEN:
+            raise MultiModuleAbort(f"사용자 응답이 너무 김 ({_MAX_ANSWER_LEN}자 초과)")
+        # BIDI/NUL/ANSI escape 등 제어문자 제거
+        answer = "".join(
+            c for c in answer
+            if c.isprintable() and not unicodedata.category(c).startswith("C")
+        )
+
         # 취소 확인
         if answer.strip().lower() in _CANCEL_KEYWORDS:
             raise MultiModuleAbort(
@@ -329,17 +391,31 @@ class ProjectAnalyzer:
         - MEDIUM만 있음 → is_stateful=True, confidence='medium'
         - 시그널 없음 → is_stateful=False, confidence='high'
 
+        ## 휴리스틱 한계
+        이 메서드는 빌드 파일 텍스트 **전체**에서 의존성 패턴을 단순 문자열 검색한다.
+        따라서 다음 false positive가 가능:
+        - 주석 처리된 의존성 (`// implementation("spring-boot-starter-data-jpa")`)
+        - 변수명/문자열 리터럴에 키워드 포함 (`description = "not using mybatis"`)
+        - 파생 artifact 이름 (`mybatis-generator`, `not-hibernate`)
+
+        v0.1.0은 **보수적 과탐지**를 허용한다 — 실제 stateful인데 stateless로 판정되는
+        false negative보다 그 반대가 안전하기 때문(사용자에게 경고 + rationale 기록).
+        v0.2+에서 AST 파싱 기반 정밀화 예정.
+
         Returns:
             StatefulnessSignal(is_stateful, confidence, reasons)
         """
-        # 분석 대상 디렉토리: 모듈 경로 또는 project_dir
-        target_dir = module.path if module is not None else project_dir
-
         high_reasons: list[str] = []
         medium_reasons: list[str] = []
 
-        # 빌드 파일 텍스트 수집
-        build_text = self._read_build_file_text(target_dir)
+        if module is not None:
+            # multi-module: project_root와 module.path 양쪽에서 빌드 파일 수집
+            root_build_text = self._read_build_file_text(project_dir)
+            module_build_text = self._read_build_file_text(module.path)
+            build_text = root_build_text + "\n" + module_build_text
+        else:
+            # single-module: project_dir만
+            build_text = self._read_build_file_text(project_dir)
 
         # HIGH 시그널: 빌드 파일 의존성
         for pattern, reason_ko in _HIGH_STATEFUL_PATTERNS:
@@ -352,7 +428,13 @@ class ProjectAnalyzer:
                 medium_reasons.append(reason_ko)
 
         # HIGH 시그널: application.yml/properties datasource URL
-        datasource_reasons = self._check_datasource_url(target_dir)
+        # multi-module: module.path 우선, 없으면 project_dir 확인
+        if module is not None:
+            datasource_reasons = self._check_datasource_url(module.path)
+            if not datasource_reasons:
+                datasource_reasons = self._check_datasource_url(project_dir)
+        else:
+            datasource_reasons = self._check_datasource_url(project_dir)
         high_reasons.extend(datasource_reasons)
 
         # 판정
@@ -419,6 +501,10 @@ class ProjectAnalyzer:
         Gradle Groovy: include 'api', 'core'
         Gradle KTS:   include("api", "core")
 
+        2단계 파싱:
+        1. include 구문 라인/블록 범위를 찾음
+        2. 범위 내에서 제한된 문자셋으로 이름만 추출 (NUL/제어문자/경로 구분자 일부 차단)
+
         Returns:
             ModuleInfo 리스트.
         """
@@ -437,11 +523,11 @@ class ProjectAnalyzer:
         module_names: list[str] = []
         for match in include_pattern.finditer(content):
             args_str = match.group(1)
-            # 각 인용된 이름 추출
-            names = re.findall(r"""["']([^"']+)["']""", args_str)
+            # 허용 문자셋 제한: NUL/제어문자 차단, 경로 구분자 일부 차단
+            # 단, ':' prefix (Kotlin DSL) 처리를 위해 ':'는 별도 처리
+            names = re.findall(r"""["']([^"':\\/\x00-\x1f]+)["']""", args_str)
             for name in names:
-                # ':' prefix 제거 (Kotlin DSL: include(":api"))
-                clean_name = name.lstrip(":")
+                clean_name = name.strip()
                 if clean_name:
                     module_names.append(clean_name)
 
@@ -471,7 +557,9 @@ class ProjectAnalyzer:
 
         module_names: list[str] = []
         for child in modules_elem:
-            # <module>텍스트</module> — namespace 무관
+            # <module>텍스트</module> 태그만 처리 — namespace 무관
+            if not child.tag.endswith("}module") and child.tag != "module":
+                continue
             if child.text:
                 name = child.text.strip()
                 if name:
@@ -488,14 +576,34 @@ class ProjectAnalyzer:
         """모듈 이름 리스트 → ModuleInfo 리스트 생성.
 
         모듈 디렉토리가 없는 경우에도 경로를 포함해 반환 (가상 모듈 지원).
+
+        보안:
+        - 모듈 수 상한 (_MAX_MODULES) 초과 시 truncate + gap 기록 (ReDoS 방어)
+        - 각 이름에 대해 path traversal / 제어문자 / 절대경로 검증
+        - 검증 실패 시 해당 모듈 skip (gaps는 호출부에서 관리하지 않으므로 무시)
+        - module_path가 project_dir 밖을 가리키면 skip
         """
         result: list[ModuleInfo] = []
-        for name in module_names:
+
+        # 모듈 수 상한 적용
+        names_to_process = module_names[:_MAX_MODULES]
+
+        for name in names_to_process:
+            # 이름 유효성 검사
+            if not _validate_module_name(name):
+                continue
+
             # 경로 구분자로 슬래시 허용 (Gradle: ':api:sub' → 'api/sub')
             path_parts = name.replace(":", "/").split("/")
             module_path = project_dir
             for part in path_parts:
                 module_path = module_path / part
+
+            # project_root 밖을 가리키면 skip (path traversal 방어)
+            # self._project_root가 None인 경우 (직접 호출 등) project_dir 기준 사용
+            root_for_check = self._project_root if self._project_root is not None else project_dir
+            if not is_within(root_for_check, module_path):
+                continue
 
             result.append(
                 ModuleInfo(
@@ -508,20 +616,23 @@ class ProjectAnalyzer:
 
     # ── 내부 헬퍼: 상태성 감지 ────────────────────────────────────────────────
 
-    def _read_build_file_text(self, project_dir: Path) -> str:
+    def _read_build_file_text(self, scan_dir: Path) -> str:
         """build.gradle(.kts) 또는 pom.xml 텍스트 읽기.
 
         여러 빌드 파일이 있으면 모두 합쳐서 반환.
+        is_within 검사는 self._project_root 기준으로 수행 (Important 1 수정).
         """
         build_file_names = [
             "build.gradle.kts",
             "build.gradle",
             "pom.xml",
         ]
+        # project_root가 설정되지 않은 경우 scan_dir 자체를 root로 fallback
+        root_for_check = self._project_root if self._project_root is not None else scan_dir
         texts: list[str] = []
         for name in build_file_names:
-            path = project_dir / name
-            if path.exists() and is_within(project_dir, path):
+            path = scan_dir / name
+            if path.exists() and is_within(root_for_check, path):
                 try:
                     text = read_text_limited(path)
                     texts.append(text)
@@ -529,14 +640,17 @@ class ProjectAnalyzer:
                     pass
         return "\n".join(texts)
 
-    def _check_datasource_url(self, project_dir: Path) -> list[str]:
+    def _check_datasource_url(self, scan_dir: Path) -> list[str]:
         """application.yml/properties에서 datasource URL 시그널 확인.
+
+        is_within 검사는 self._project_root 기준으로 수행.
 
         Returns:
             HIGH 시그널 사유 목록 (한국어).
         """
+        root_for_check = self._project_root if self._project_root is not None else scan_dir
         reasons: list[str] = []
-        resources_dir = project_dir / "src" / "main" / "resources"
+        resources_dir = scan_dir / "src" / "main" / "resources"
         if not resources_dir.exists():
             return []
 
@@ -545,7 +659,7 @@ class ProjectAnalyzer:
             resources_dir / "application.yml",
             resources_dir / "application.yaml",
         ]:
-            if yml_file.exists() and is_within(project_dir, yml_file):
+            if yml_file.exists() and is_within(root_for_check, yml_file):
                 found = self._yaml_has_datasource(yml_file)
                 if found:
                     reasons.append(f"application YAML에 datasource URL 설정 감지 ({yml_file.name})")
@@ -554,7 +668,7 @@ class ProjectAnalyzer:
         if not reasons:
             # profile 파일도 검사
             for yml_file in sorted(resources_dir.glob("application-*.yml")):
-                if not is_within(project_dir, yml_file):
+                if not is_within(root_for_check, yml_file):
                     continue
                 if self._yaml_has_datasource(yml_file):
                     reasons.append(f"application YAML에 datasource URL 설정 감지 ({yml_file.name})")
@@ -563,16 +677,20 @@ class ProjectAnalyzer:
         # properties 파일 검사
         if not reasons:
             props_file = resources_dir / "application.properties"
-            if props_file.exists() and is_within(project_dir, props_file):
+            if props_file.exists() and is_within(root_for_check, props_file):
                 if self._properties_has_datasource(props_file):
                     reasons.append("application.properties에 datasource URL 설정 감지")
 
         return reasons
 
     def _yaml_has_datasource(self, yml_file: Path) -> bool:
-        """YAML 파일에서 datasource URL 존재 여부."""
+        """YAML 파일에서 datasource URL 존재 여부.
+
+        YAML bomb 방어: check_yaml_refs()로 anchor/alias 개수 사전 검사.
+        """
         try:
             content = read_text_limited(yml_file)
+            check_yaml_refs(content)  # YAML bomb 방어
             data = yaml.safe_load(content)
         except (OSError, ValueError, UnicodeDecodeError, yaml.YAMLError):
             return False
@@ -623,4 +741,3 @@ class ProjectAnalyzer:
                     if value.strip():
                         return True
         return False
-
