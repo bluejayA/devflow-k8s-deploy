@@ -147,8 +147,9 @@ def test_validate_missing_tag_raises(generator: DockerfileGenerator) -> None:
 
 
 def test_validate_digest_pinning_allowed(generator: DockerfileGenerator) -> None:
-    # @sha256: 형식은 태그 없어도 통과
-    generator._validate_image_tag("alpine@sha256:abc123def456")  # no raise
+    # @sha256:<64 hex> 형식은 태그 없어도 통과
+    digest = "a" * 64
+    generator._validate_image_tag(f"alpine@sha256:{digest}")  # no raise
 
 
 # ---------------------------------------------------------------------------
@@ -359,3 +360,123 @@ def test_generate_user_before_entrypoint(
     assert non_empty_before[0].startswith("USER appuser"), (
         f"ENTRYPOINT 직전 비어있지 않은 라인이 USER appuser가 아님: {non_empty_before[0]!r}"
     )
+
+
+# ---------------------------------------------------------------------------
+# 17. _validate_image_tag — 개행 포함 이미지 참조 거부 (Important 1: 인젝션 차단)
+# ---------------------------------------------------------------------------
+
+
+def test_validate_image_tag_rejects_newline(generator: DockerfileGenerator) -> None:
+    with pytest.raises(InvalidImageError):
+        generator._validate_image_tag("alpine:3.19\nUSER root\n")
+
+
+# ---------------------------------------------------------------------------
+# 18. _validate_image_tag — latest+digest 우회 시도 거부 (Important 1)
+# ---------------------------------------------------------------------------
+
+
+def test_validate_image_tag_rejects_latest_with_digest_bypass(
+    generator: DockerfileGenerator,
+) -> None:
+    # "alpine:latest@sha256:<64 hex>" — digest 존재해도 latest 태그 명시 거부
+    digest = "a" * 64
+    with pytest.raises(InvalidImageError, match="latest"):
+        generator._validate_image_tag(f"alpine:latest@sha256:{digest}")
+
+
+# ---------------------------------------------------------------------------
+# 19. _validate_image_tag — 태그+digest 조합 허용 (Important 1)
+# ---------------------------------------------------------------------------
+
+
+def test_validate_image_tag_accepts_tag_with_digest(
+    generator: DockerfileGenerator,
+) -> None:
+    digest = "a" * 64
+    # no raise
+    generator._validate_image_tag(f"eclipse-temurin:21-jdk-alpine@sha256:{digest}")
+
+
+# ---------------------------------------------------------------------------
+# 20. _validate_image_tag — 짧은 digest 거부 (Important 1: 64 hex 미달)
+# ---------------------------------------------------------------------------
+
+
+def test_validate_image_tag_rejects_short_digest(
+    generator: DockerfileGenerator,
+) -> None:
+    with pytest.raises(InvalidImageError):
+        generator._validate_image_tag("alpine@sha256:abc123")
+
+
+# ---------------------------------------------------------------------------
+# 21. generate — build_cmd에 개행 포함 시 거부 (Important 2)
+# ---------------------------------------------------------------------------
+
+
+def test_generate_rejects_build_cmd_with_newline(
+    generator: DockerfileGenerator,
+    user_inputs: UserInputs,
+    resource_defaults: ResourceDefaults,
+) -> None:
+    bad_plan = BuildPlan(
+        builder_image="eclipse-temurin:21-jdk-alpine",
+        runner_image="eclipse-temurin:21-jre-alpine",
+        build_cmd="gradle bootJar\nRUN evil",
+        artifact_path="build/libs/app.jar",
+    )
+    with pytest.raises(InvalidImageError):
+        generator.generate(bad_plan, user_inputs, resource_defaults)
+
+
+# ---------------------------------------------------------------------------
+# 22. generate — artifact_path에 개행 포함 시 거부 (Important 2 / 4)
+# ---------------------------------------------------------------------------
+
+
+def test_generate_rejects_artifact_path_with_newline(
+    generator: DockerfileGenerator,
+    user_inputs: UserInputs,
+    resource_defaults: ResourceDefaults,
+) -> None:
+    bad_plan = BuildPlan(
+        builder_image="eclipse-temurin:21-jdk-alpine",
+        runner_image="eclipse-temurin:21-jre-alpine",
+        build_cmd="./gradlew bootJar --no-daemon",
+        artifact_path="build/libs/*.jar\nEXPOSE 22",
+    )
+    with pytest.raises(InvalidImageError):
+        generator.generate(bad_plan, user_inputs, resource_defaults)
+
+
+# ---------------------------------------------------------------------------
+# 23. _detect_build_system — 토큰 분해: gradle 후 maven 주석어가 와도 gradle 반환 (Important 3)
+# ---------------------------------------------------------------------------
+
+
+def test_detect_build_system_ignores_comment_tokens(
+    generator: DockerfileGenerator,
+    user_inputs: UserInputs,
+    resource_defaults: ResourceDefaults,
+) -> None:
+    """'gradle wrapper # using maven-style' 같은 문구는 gradle로 판정해야 함."""
+    from scripts.dockerfile_generator import _detect_build_system
+
+    result = _detect_build_system("gradle wrapper # using maven-style")
+    assert result == "gradle"
+
+
+# ---------------------------------------------------------------------------
+# 24. _detect_build_system — ./mvnw → maven (Important 3)
+# ---------------------------------------------------------------------------
+
+
+def test_detect_build_system_mvnw(
+    generator: DockerfileGenerator,
+) -> None:
+    from scripts.dockerfile_generator import _detect_build_system
+
+    result = _detect_build_system("./mvnw package -DskipTests")
+    assert result == "maven"
