@@ -937,6 +937,86 @@ class TestPathTraversalDefense:
 
 
 # ──────────────────────────────────────────────────────────────────────────────
+# 9-b. Kotlin DSL colon-prefix 모듈 이름 지원
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+class TestColonPrefixModuleNames:
+    def test_multi_module_kotlin_dsl_colon_prefix_detected(
+        self, tmp_path: Path
+    ) -> None:
+        """settings.gradle.kts include(":api", ":core", ":common") → 3개 감지, 이름은 콜론 없이."""
+        _write(
+            tmp_path / "settings.gradle.kts",
+            'include(":api", ":core", ":common")\n',
+        )
+        _write(
+            tmp_path / "build.gradle.kts",
+            'plugins { id("org.springframework.boot") version "3.2.0" }\n',
+        )
+
+        analyzer = ProjectAnalyzer(
+            config_loader=_make_config_loader_auto(),
+            stack_registry={"jvm": JvmStackModule()},
+        )
+        modules = analyzer._detect_multi_modules(tmp_path, "jvm")
+
+        assert len(modules) == 3
+        names = [m.name for m in modules]
+        assert "api" in names
+        assert "core" in names
+        assert "common" in names
+        # 콜론이 이름에 남으면 안 됨
+        for name in names:
+            assert not name.startswith(":")
+
+    def test_multi_module_groovy_colon_prefix_detected(
+        self, tmp_path: Path
+    ) -> None:
+        """settings.gradle Groovy 에 include ':api', ':core' → 2개 감지, 이름은 콜론 없이."""
+        _write(
+            tmp_path / "settings.gradle",
+            "include ':api', ':core'\n",
+        )
+        _write(tmp_path / "build.gradle", "plugins { id 'java' }\n")
+
+        analyzer = ProjectAnalyzer(
+            config_loader=_make_config_loader_auto(),
+            stack_registry={"jvm": JvmStackModule()},
+        )
+        modules = analyzer._detect_multi_modules(tmp_path, "jvm")
+
+        assert len(modules) == 2
+        names = [m.name for m in modules]
+        assert "api" in names
+        assert "core" in names
+        for name in names:
+            assert not name.startswith(":")
+
+    def test_nested_colon_module_name_rejected(
+        self, tmp_path: Path
+    ) -> None:
+        """include(":foo:bar") — 중첩 모듈은 v0.1.0 미지원 → 거부(빈 결과)."""
+        _write(
+            tmp_path / "settings.gradle.kts",
+            'include(":foo:bar")\n',
+        )
+        _write(
+            tmp_path / "build.gradle.kts",
+            'plugins { id("org.springframework.boot") version "3.2.0" }\n',
+        )
+
+        analyzer = ProjectAnalyzer(
+            config_loader=_make_config_loader_auto(),
+            stack_registry={"jvm": JvmStackModule()},
+        )
+        modules = analyzer._detect_multi_modules(tmp_path, "jvm")
+
+        # 중첩 모듈은 거부 → 빈 결과
+        assert modules == []
+
+
+# ──────────────────────────────────────────────────────────────────────────────
 # 10. UnsupportedStackError for forced_stack not in registry
 # ──────────────────────────────────────────────────────────────────────────────
 

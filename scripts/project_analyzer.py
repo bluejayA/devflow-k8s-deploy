@@ -115,30 +115,51 @@ def _is_likely_app_module(name: str) -> bool:
     return True
 
 
-def _validate_module_name(name: str) -> bool:
-    """모듈 이름 유효성 검사 — path traversal / 제어문자 / 절대경로 방어.
+def _validate_module_name(name: str) -> str | None:
+    """모듈 이름 유효성 검사 + Gradle Kotlin DSL 콜론 prefix 정규화.
+
+    Gradle Kotlin DSL 관례: ":api" → "api" (선행 콜론 제거).
+    중첩 모듈 ("foo:bar") 은 v0.1.0 미지원 → None 반환.
 
     Returns:
-        True이면 유효, False이면 거부.
+        정규화된 이름 (str) 이면 유효, None 이면 거부.
     """
     # NUL 또는 제어문자 포함 거부
     if any(ord(c) < 0x20 for c in name):
-        return False
+        return None
 
-    # 절대경로 거부 (Unix '/', Windows 드라이브 'C:' 등)
-    if name.startswith("/") or (len(name) >= 2 and name[1] == ":"):
-        return False
+    # 절대경로 거부 (Unix '/')
+    if name.startswith("/"):
+        return None
 
-    # '..' 세그먼트 거부 (strip 후 경로 구분자 기준 분리)
-    segments = re.split(r"[/:\\]", name)
+    # Gradle Kotlin DSL 관례: 선행 ':' 제거 (":api" → "api")
+    normalized = name.lstrip(":")
+
+    # lstrip 후 빈 문자열이면 거부 (예: ":::")
+    if not normalized:
+        return None
+
+    # 중첩 모듈 거부 — 앞 콜론 제거 후에도 ':'가 남아있으면 v0.1.0 미지원
+    # 예: ":foo:bar" → "foo:bar" → 콜론 포함 → 거부
+    if ":" in normalized:
+        return None
+
+    # Windows 드라이브 문자 거부 ('C:' 형태)
+    # 이 시점엔 콜론은 없으므로, ':' 로 시작하는 케이스는 이미 위에서 처리됨
+    # 하지만 normalize 전 원본이 "C:" 형태일 수 있으므로 확인
+    if len(name.lstrip(":")) >= 2 and name.lstrip(":")[1] == ":":
+        return None
+
+    # '..' 세그먼트 거부
+    segments = re.split(r"[/\\]", normalized)
     if any(seg.strip() == ".." for seg in segments):
-        return False
+        return None
 
     # 허용 문자셋 검사
-    if not _MODULE_NAME_RE.fullmatch(name):
-        return False
+    if not _MODULE_NAME_RE.fullmatch(normalized):
+        return None
 
-    return True
+    return normalized
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -523,9 +544,9 @@ class ProjectAnalyzer:
         module_names: list[str] = []
         for match in include_pattern.finditer(content):
             args_str = match.group(1)
-            # 허용 문자셋 제한: NUL/제어문자 차단, 경로 구분자 일부 차단
-            # 단, ':' prefix (Kotlin DSL) 처리를 위해 ':'는 별도 처리
-            names = re.findall(r"""["']([^"':\\/\x00-\x1f]+)["']""", args_str)
+            # 허용 문자셋 제한: NUL/제어문자 차단, 경로 구분자(백슬래시) 차단
+            # ':'는 허용 — Kotlin DSL ":api" 패턴 지원 (_validate_module_name에서 처리)
+            names = re.findall(r"""["']([^"'\\/\x00-\x1f]+)["']""", args_str)
             for name in names:
                 clean_name = name.strip()
                 if clean_name:
@@ -588,13 +609,14 @@ class ProjectAnalyzer:
         # 모듈 수 상한 적용
         names_to_process = module_names[:_MAX_MODULES]
 
-        for name in names_to_process:
-            # 이름 유효성 검사
-            if not _validate_module_name(name):
+        for raw_name in names_to_process:
+            # 이름 유효성 검사 + Kotlin DSL 콜론 prefix 정규화
+            normalized_name = _validate_module_name(raw_name)
+            if normalized_name is None:
                 continue
 
-            # 경로 구분자로 슬래시 허용 (Gradle: ':api:sub' → 'api/sub')
-            path_parts = name.replace(":", "/").split("/")
+            # 경로 구분자로 슬래시 허용 (Gradle path → 디렉토리 경로)
+            path_parts = normalized_name.split("/")
             module_path = project_dir
             for part in path_parts:
                 module_path = module_path / part
@@ -607,9 +629,9 @@ class ProjectAnalyzer:
 
             result.append(
                 ModuleInfo(
-                    name=name,
+                    name=normalized_name,
                     path=module_path,
-                    is_likely_app=_is_likely_app_module(name.split("/")[-1]),
+                    is_likely_app=_is_likely_app_module(normalized_name.split("/")[-1]),
                 )
             )
         return result
