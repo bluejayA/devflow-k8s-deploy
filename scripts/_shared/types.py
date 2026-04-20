@@ -286,6 +286,7 @@ class PackagingResult:
     final_dir: Path
     files_written: list[str]
     troubleshoot_written: bool
+    final_path: Path | None = None  # AtomicWriter.commit() 결과 — SkillPipeline이 채움
 
 
 @dataclass(frozen=True)
@@ -322,3 +323,24 @@ class PromptRequest:
 PromptCallback = Callable[["PromptRequest"], str]
 """SkillPipeline에서 ProjectAnalyzer/AtomicWriter에 주입.
 None이면 자동 모드 (테스트성)."""
+
+
+# ─── 메시지 정책 (NFR-17) ───
+
+
+class MessagePolicy:
+    """NFR-17 한국어+원어 병기 포맷터."""
+
+    @staticmethod
+    def format_question(ko_text: str, original: str | None = None) -> str:
+        """사용자 질문 메시지. 한국어 우선, 원어 괄호."""
+        if original:
+            return f"{ko_text} ({original})"
+        return ko_text
+
+    @staticmethod
+    def format_error(ko_summary: str, en_detail: str | None = None) -> str:
+        """에러 메시지. 한국어 요약 + 영문 상세."""
+        if en_detail:
+            return f"{ko_summary}\n(영문) {en_detail}"
+        return ko_summary
