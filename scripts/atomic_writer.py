@@ -96,6 +96,9 @@ class AtomicWriter:
         # commit 호출 여부 플래그
         self._committed: bool = False
 
+        # bailout_commit 호출 여부 플래그 — True이면 __exit__ cleanup 스킵
+        self._bailed_out: bool = False
+
     # ─── context manager ──────────────────────────────────────────────────────
 
     def __enter__(self) -> AtomicWriter:
@@ -124,16 +127,18 @@ class AtomicWriter:
     ) -> None:
         """예외 없이 정상 종료: commit 미호출이면 cleanup.
         예외 발생: cleanup (output_dir 이전 상태 유지).
+        bailout_commit 호출됨: cleanup 스킵 (staging이 이미 rename됨).
         signal handler 이전 핸들러로 복구.
         """
         try:
             if exc_type is None:
                 # 정상 종료
-                if not self._committed:
+                if not self._committed and not self._bailed_out:
                     self.cleanup()
             else:
-                # 예외 발생 — staging_dir 정리
-                self.cleanup()
+                # 예외 발생 — bailout_commit이 이미 호출됐으면 cleanup 스킵
+                if not self._bailed_out:
+                    self.cleanup()
         finally:
             self._restore_signal_handlers()
 
@@ -163,6 +168,39 @@ class AtomicWriter:
         os.replace(self._staging_dir, final_path)
         self._committed = True
         return final_path
+
+    def bailout_commit(self) -> Path:
+        """BailOut 시 staging_dir 내용 보존 — ``{output_dir}-failed-{timestamp}/``로 이동.
+
+        호출 후 ``__exit__``는 cleanup을 스킵한다 (staging이 이미 rename됨).
+        timestamp 형식: ``"%Y-%m-%dT%H-%M"`` UTC.
+
+        동일 분 내 충돌 시 ``-2``, ``-3`` ... 카운터를 붙여 중복을 피한다.
+        100회 초과 충돌 시 ``OutputExistsAbort`` raise.
+
+        Returns:
+            실패 결과가 보존된 디렉토리 경로.
+
+        Raises:
+            OutputExistsAbort: 100회 초과 경로 충돌.
+        """
+        timestamp = datetime.now(tz=UTC).strftime("%Y-%m-%dT%H-%M")
+        base = self._output_dir.parent / f"{self._output_dir.name}-failed-{timestamp}"
+        candidate = base
+        counter = 2
+        while candidate.exists():
+            candidate = (
+                self._output_dir.parent
+                / f"{self._output_dir.name}-failed-{timestamp}-{counter}"
+            )
+            counter += 1
+            if counter > 100:
+                raise OutputExistsAbort(
+                    f"bailout suffix 경로 충돌 과다 (100회 초과): {base}"
+                )
+        os.replace(self._staging_dir, candidate)
+        self._bailed_out = True
+        return candidate
 
     def cleanup(self) -> None:
         """staging_dir 삭제. 실패해도 raise 안 함 (best effort)."""

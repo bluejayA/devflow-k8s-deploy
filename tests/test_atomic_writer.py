@@ -21,6 +21,9 @@ Tests:
 18.  [Important 1] __enter__ mkdir 실패 시 signal handler 원복
 19.  [Important 2] 잘못된 on_exists 값 → ValueError
 20.  [Important 5] suffix 동일 분 충돌 시 카운터 추가
+21.  bailout_commit: staging을 {output_dir}-failed-YYYY-MM-DDTHH-MM/ 으로 rename
+22.  bailout_commit 후 __exit__에서 cleanup 스킵 (이미 rename됨)
+23.  bailout_commit 동일 분 충돌 시 -2, -3 카운터 추가
 """
 
 from __future__ import annotations
@@ -472,3 +475,85 @@ def test_suffix_counter_on_same_minute_conflict(tmp_path: Path) -> None:
     # 원본과 충돌 경로는 그대로
     assert output_dir.exists()
     assert conflict_path.exists()
+
+
+# ─── Test 21: bailout_commit — staging을 failed suffix로 rename ──────────────
+
+
+def test_bailout_commit_renames_staging_to_failed_suffix(tmp_path: Path) -> None:
+    """bailout_commit() 호출 시 staging_dir이 {output_dir}-failed-YYYY-MM-DDTHH-MM/ 으로 이동."""
+    output_dir = tmp_path / "output"
+
+    with AtomicWriter(output_dir, on_exists="overwrite") as aw:
+        staging = aw.staging_dir
+        (staging / "manifest.yaml").write_text("kind: Deployment")
+        (staging / "troubleshoot.md").write_text("# 오류 발생\n한국어 요약...")
+
+        failed_path = aw.bailout_commit()
+
+    # 반환 경로가 {output_dir}-failed-YYYY-MM-DDTHH-MM 패턴인지 확인
+    failed_pattern = re.compile(r"^output-failed-\d{4}-\d{2}-\d{2}T\d{2}-\d{2}$")
+    assert failed_pattern.match(failed_path.name), (
+        f"failed 경로 형식이 틀림: {failed_path.name}"
+    )
+    # 파일이 새 경로에 존재해야 함
+    assert (failed_path / "manifest.yaml").exists(), "manifest.yaml이 보존되어야 함"
+    assert (failed_path / "troubleshoot.md").exists(), "troubleshoot.md가 보존되어야 함"
+    # 원본 staging_dir은 사라져야 함 (rename됨)
+    assert not staging.exists(), "staging_dir은 rename 후 사라져야 함"
+
+
+# ─── Test 22: bailout_commit 후 __exit__ cleanup 스킵 ────────────────────────
+
+
+def test_bailout_commit_skips_cleanup_on_exit(tmp_path: Path) -> None:
+    """bailout_commit() 호출 후 context 탈출 시 파일이 삭제되지 않는다."""
+    output_dir = tmp_path / "output"
+    failed_path_ref: Path | None = None
+
+    with pytest.raises(RuntimeError):
+        with AtomicWriter(output_dir, on_exists="overwrite") as aw:
+            (aw.staging_dir / "troubleshoot.md").write_text("오류 요약")
+            failed_path_ref = aw.bailout_commit()
+            # bailout_commit 후 BailOutError(여기서는 RuntimeError로 시뮬레이션) raise
+            raise RuntimeError("bail out simulated")
+
+    # failed_path_ref는 여전히 존재해야 함 (cleanup 스킵)
+    assert failed_path_ref is not None
+    assert failed_path_ref.exists(), "failed 디렉토리가 보존되어야 함"
+    assert (failed_path_ref / "troubleshoot.md").exists(), (
+        "troubleshoot.md가 보존되어야 함"
+    )
+
+
+# ─── Test 23: bailout_commit 동일 분 충돌 시 카운터 ─────────────────────────
+
+
+def test_bailout_commit_counter_on_collision(tmp_path: Path) -> None:
+    """bailout_commit 동일 분에 두 번 호출하면 -2 카운터가 붙는다."""
+    import unittest.mock as _mock
+    from datetime import UTC, datetime
+
+    output_dir = tmp_path / "output"
+    fixed_ts = datetime(2099, 6, 15, 9, 30, tzinfo=UTC)
+    ts_str = fixed_ts.strftime("%Y-%m-%dT%H-%M")
+
+    # 첫 번째 failed 경로를 미리 만들어 충돌 유도
+    first_failed = tmp_path / f"output-failed-{ts_str}"
+    first_failed.mkdir()
+
+    with _mock.patch("scripts.atomic_writer.datetime") as mock_dt:
+        mock_dt.now.return_value = fixed_ts
+
+        with AtomicWriter(output_dir, on_exists="overwrite") as aw:
+            (aw.staging_dir / "file.txt").write_text("data")
+            failed_path = aw.bailout_commit()
+
+    # -2 카운터가 붙어야 함
+    expected_name = f"output-failed-{ts_str}-2"
+    assert failed_path.name == expected_name, (
+        f"카운터 suffix가 붙어야 함: expected={expected_name}, actual={failed_path.name}"
+    )
+    assert (failed_path / "file.txt").exists(), "파일이 최종 경로에 있어야 함"
+    # 충돌 경로는 그대로
+    assert first_failed.exists()

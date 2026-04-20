@@ -366,29 +366,36 @@ class SkillPipeline:
             on_exists=on_exists,
             prompt_callback=self._prompt_callback,
         ) as writer:
-            # STEP 3
-            artifacts = self._generate_artifacts_step3(
-                writer.staging_dir, inputs, analysis, config
-            )
+            try:
+                # STEP 3
+                artifacts = self._generate_artifacts_step3(
+                    writer.staging_dir, inputs, analysis, config
+                )
 
-            # STEP 4
-            validation_outcome = self._validate_gate_step4(
-                writer.staging_dir, artifacts, analysis, config
-            )
+                # STEP 4
+                validation_outcome = self._validate_gate_step4(
+                    writer.staging_dir, artifacts, analysis, config
+                )
 
-            # STEP 5
-            result = self._package_step5(
-                writer.staging_dir, inputs, analysis, validation_outcome, config
-            )
+                # STEP 5
+                result = self._package_step5(
+                    writer.staging_dir, inputs, analysis, validation_outcome, config
+                )
 
-            final_path = writer.commit()
-            # F-42: validation exit code를 PackagingResult에 전파
-            validation_exit_code = validation_outcome.k8s_report.exit_code
-            return dataclasses.replace(
-                result,
-                final_path=final_path,
-                validation_exit_code=validation_exit_code,
-            )
+                final_path = writer.commit()
+                # F-42: validation exit code를 PackagingResult에 전파
+                validation_exit_code = validation_outcome.k8s_report.exit_code
+                return dataclasses.replace(
+                    result,
+                    final_path=final_path,
+                    validation_exit_code=validation_exit_code,
+                )
+            except BailOutError as exc:
+                # F-52: BailOut 시 staging_dir을 {output_dir}-failed-timestamp/ 로 보존
+                failed_path = writer.bailout_commit()
+                raise BailOutError(
+                    f"{exc}. 실패 결과 보존: {failed_path} (troubleshoot.md 확인)"
+                ) from exc
 
     # ─── STEP 1: 입력 수집 ───────────────────────────────────────────────────
 
@@ -909,10 +916,6 @@ Exit code:
         return _compute_cli_exit_code(result)
     except BailOutError as exc:
         print(f"\n[BAIL-OUT] {exc}", file=sys.stderr)
-        print(
-            f"troubleshoot.md 확인: {args.output_dir}/troubleshoot.md",
-            file=sys.stderr,
-        )
         return 1
     except UserAbort as exc:
         print(f"\n[사용자 중단] {exc}", file=sys.stderr)
