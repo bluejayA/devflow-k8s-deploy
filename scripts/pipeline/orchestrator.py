@@ -15,9 +15,11 @@ from __future__ import annotations
 import dataclasses
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Any, Literal, NoReturn, cast
 
-from scripts._shared.errors import BailOutError
+from scripts._shared.errors import BailOutError, InvalidImageError
+from scripts._shared.image_ref import validate_image_reference
+from scripts._shared.text_safety import reject_unsafe_chars
 from scripts._shared.types import (
     AnalysisResult,
     BailOutContext,
@@ -29,6 +31,7 @@ from scripts._shared.types import (
     PromptCallback,
     PromptRequest,
     ResolvedConfig,
+    RetryAttempt,
     UserInputs,
     ValidationOutcome,
 )
@@ -215,6 +218,31 @@ class PipelineDependencies:
     output_packager: OutputPackager
 
 
+# ─── Module-level helpers ─────────────────────────────────────────────────────
+
+
+def _safe_section(raw: dict[str, Any], key: str) -> dict[str, Any]:
+    """config.raw의 지정 섹션이 dict가 아니면 빈 dict 반환.
+
+    악성/오타 YAML에서 `output: foo` 같은 scalar 값이 들어와도
+    `.get().get()` chain이 AttributeError로 crash하지 않도록 방어.
+    """
+    val = raw.get(key)
+    return val if isinstance(val, dict) else {}
+
+
+def _coerce_literal_or_default(
+    value: str,
+    allowed: tuple[str, ...],
+    default: str,
+) -> str:
+    """화이트리스트 매칭 — 미매치 시 default.
+
+    개행/제어문자는 이미 caller가 검증했다고 가정.
+    """
+    return value if value in allowed else default
+
+
 # ─── _fix stubs (v0.1.0 — auto-fix는 v0.2+) ──────────────────────────────────
 
 
@@ -298,12 +326,15 @@ class SkillPipeline:
         analysis = self._analyze_project_step2(project_dir, config, inputs)
 
         # on_exists 설정 조회 (없으면 'prompt' 기본값)
-        on_exists_raw = config.raw.get("output", {}).get("on_exists", "prompt")
-        on_exists: Literal["prompt", "overwrite", "suffix"]
-        if on_exists_raw in ("prompt", "overwrite", "suffix"):
-            on_exists = on_exists_raw
-        else:
-            on_exists = "prompt"
+        on_exists_raw = _safe_section(config.raw, "output").get("on_exists", "prompt")
+        on_exists: Literal["prompt", "overwrite", "suffix"] = cast(
+            Literal["prompt", "overwrite", "suffix"],
+            _coerce_literal_or_default(
+                str(on_exists_raw),
+                ("prompt", "overwrite", "suffix"),
+                "prompt",
+            ),
+        )
 
         # STEP 3 + 4 + 5 (AtomicWriter 컨텍스트)
         with AtomicWriter(
@@ -344,23 +375,31 @@ class SkillPipeline:
         6개 term (F-02 매핑): app_name, port, exposure, namespace, output_dir, resource_hint
         """
         raw = config.raw
-        output_raw = raw.get("output", {})
-        app_raw = raw.get("app", {})
+        output_raw = _safe_section(raw, "output")
+        app_raw = _safe_section(raw, "app")
 
         if self._prompt_callback is None:
             # 자동 모드 — config/defaults에서 채움
             app_name = str(app_raw.get("name", project_dir.name))
             port = int(app_raw.get("port", 8080))
-            exposure_val = str(app_raw.get("exposure", "ClusterIP"))
-            if exposure_val not in ("ClusterIP", "NodePort", "LoadBalancer"):
-                exposure_val = "ClusterIP"
-            exposure: Literal["ClusterIP", "NodePort", "LoadBalancer"] = exposure_val  # type: ignore[assignment]
+            exposure_val = _coerce_literal_or_default(
+                str(app_raw.get("exposure", "ClusterIP")),
+                ("ClusterIP", "NodePort", "LoadBalancer"),
+                "ClusterIP",
+            )
+            exposure: Literal["ClusterIP", "NodePort", "LoadBalancer"] = cast(
+                Literal["ClusterIP", "NodePort", "LoadBalancer"], exposure_val
+            )
             namespace = str(raw.get("namespace", project_dir.name))
             output_dir_str = str(output_raw.get("dir", "k8s-output"))
-            resource_hint_val = str(app_raw.get("resource_hint", "medium"))
-            if resource_hint_val not in ("small", "medium", "large"):
-                resource_hint_val = "medium"
-            resource_hint: Literal["small", "medium", "large"] = resource_hint_val  # type: ignore[assignment]
+            resource_hint_val = _coerce_literal_or_default(
+                str(app_raw.get("resource_hint", "medium")),
+                ("small", "medium", "large"),
+                "medium",
+            )
+            resource_hint: Literal["small", "medium", "large"] = cast(
+                Literal["small", "medium", "large"], resource_hint_val
+            )
         else:
             # prompt 모드 — 사용자에게 물어봄
             app_name = self._prompt_field(
@@ -378,14 +417,16 @@ class SkillPipeline:
             except ValueError:
                 port = 8080
 
-            exposure_answer = self._prompt_field(
-                "exposure",
-                self._msg_policy.format_question("어디서 접속할 건가요?", "service type"),
-                default=str(app_raw.get("exposure", "ClusterIP")),
+            exposure_answer = _coerce_literal_or_default(
+                self._prompt_field(
+                    "exposure",
+                    self._msg_policy.format_question("어디서 접속할 건가요?", "service type"),
+                    default=str(app_raw.get("exposure", "ClusterIP")),
+                ),
+                ("ClusterIP", "NodePort", "LoadBalancer"),
+                "ClusterIP",
             )
-            if exposure_answer not in ("ClusterIP", "NodePort", "LoadBalancer"):
-                exposure_answer = "ClusterIP"
-            exposure = exposure_answer  # type: ignore[assignment]
+            exposure = cast(Literal["ClusterIP", "NodePort", "LoadBalancer"], exposure_answer)
 
             namespace = self._prompt_field(
                 "namespace",
@@ -397,16 +438,18 @@ class SkillPipeline:
                 self._msg_policy.format_question("생성 파일을 어디에 둘까요?", "output dir"),
                 default=str(output_raw.get("dir", "k8s-output")),
             )
-            resource_hint_answer = self._prompt_field(
-                "resource_hint",
-                self._msg_policy.format_question(
-                    "메모리/CPU는 어느 정도 필요해요?", "resource hint"
+            resource_hint_answer = _coerce_literal_or_default(
+                self._prompt_field(
+                    "resource_hint",
+                    self._msg_policy.format_question(
+                        "메모리/CPU는 어느 정도 필요해요?", "resource hint"
+                    ),
+                    default=str(app_raw.get("resource_hint", "medium")),
                 ),
-                default=str(app_raw.get("resource_hint", "medium")),
+                ("small", "medium", "large"),
+                "medium",
             )
-            if resource_hint_answer not in ("small", "medium", "large"):
-                resource_hint_answer = "medium"
-            resource_hint = resource_hint_answer  # type: ignore[assignment]
+            resource_hint = cast(Literal["small", "medium", "large"], resource_hint_answer)
 
         return UserInputs(
             app_name=app_name,
@@ -439,6 +482,18 @@ class SkillPipeline:
         )
         answer = self._prompt_callback(req)
 
+        # 타입 검증 — callback 구현 버그로 None/int 반환 시 안전 기본값
+        if not isinstance(answer, str):
+            return default
+        # 길이 상한 (DoS 방어)
+        if len(answer) > 256:
+            return default
+        # 제어문자 검증 — 개행/NUL 포함 시 거부 후 default
+        try:
+            reject_unsafe_chars(answer, f"prompt response for {help_term_id}")
+        except ValueError:
+            return default
+
         # "?" 도움말 분기 (F-02b)
         if answer == "?":
             entry = self._help_catalog.lookup(help_term_id)
@@ -450,9 +505,26 @@ class SkillPipeline:
                     help_term_id=help_term_id,
                 )
                 answer = self._prompt_callback(help_req)
+                # 도움말 응답도 동일하게 검증
+                if not isinstance(answer, str):
+                    return default
+                if len(answer) > 256:
+                    return default
+                try:
+                    reject_unsafe_chars(answer, f"help response for {help_term_id}")
+                except ValueError:
+                    return default
             else:
                 # 도움말 없으면 다시 물어봄
                 answer = self._prompt_callback(req)
+                if not isinstance(answer, str):
+                    return default
+                if len(answer) > 256:
+                    return default
+                try:
+                    reject_unsafe_chars(answer, f"retry response for {help_term_id}")
+                except ValueError:
+                    return default
 
         return answer if answer else default
 
@@ -514,6 +586,29 @@ class SkillPipeline:
 
     # ─── STEP 4: 검증 게이트 ─────────────────────────────────────────────────
 
+    def _raise_bailout(
+        self,
+        staging_dir: Path,
+        *,
+        step_name_ko: str,
+        component_ko: str,
+        ko_summary: str,
+        en_detail: str,
+        attempts_log: list[RetryAttempt[Any]],
+        message: str,
+    ) -> NoReturn:
+        """BailOutContext 구성 → troubleshoot.md 작성 → BailOutError 전파."""
+        ctx = BailOutContext(
+            step_number=4,
+            step_name_ko=step_name_ko,
+            component_ko=component_ko,
+            ko_summary=ko_summary,
+            en_detail=en_detail,
+            attempts_log=attempts_log,
+        )
+        self._deps.output_packager.write_troubleshoot(staging_dir, ctx)
+        raise BailOutError(message)
+
     def _validate_gate_step4(
         self,
         staging_dir: Path,
@@ -536,16 +631,15 @@ class SkillPipeline:
         )
 
         if k8s_result.bailout:
-            ctx = BailOutContext(
-                step_number=4,
+            self._raise_bailout(
+                staging_dir,
                 step_name_ko="STEP 4 정적 검증",
                 component_ko="K8s 검증기",
                 ko_summary="K8s 매니페스트 검증 3회 실패 — 수동 수정 필요",
                 en_detail="K8s manifest validation failed after 3 attempts",
                 attempts_log=k8s_result.attempts,
+                message="K8s manifest validation bailed out",
             )
-            self._deps.output_packager.write_troubleshoot(staging_dir, ctx)
-            raise BailOutError("K8s manifest validation bailed out")
 
         # kubectl dry-run
         dry_run_result = run_dry_run_loop(
@@ -555,23 +649,34 @@ class SkillPipeline:
         )
 
         if dry_run_result.bailout:
-            ctx = BailOutContext(
-                step_number=4,
+            self._raise_bailout(
+                staging_dir,
                 step_name_ko="STEP 4 dry-run 검증",
                 component_ko="kubectl 어댑터",
                 ko_summary="kubectl dry-run 3회 실패 — 수동 수정 필요",
                 en_detail="kubectl dry-run failed after 3 attempts",
                 attempts_log=dry_run_result.attempts,
+                message="kubectl dry-run bailed out",
             )
-            self._deps.output_packager.write_troubleshoot(staging_dir, ctx)
-            raise BailOutError("kubectl dry-run bailed out")
 
         # opt-in 빌드
-        build_engine = config.raw.get("build", {}).get("engine", "skip")
+        build_section = _safe_section(config.raw, "build")
+        build_engine = build_section.get("engine", "skip")
         build_result = None
         if build_engine != "skip":
-            # 기본 이미지 태그 — config에서 조회
-            image_tag = config.raw.get("build", {}).get("image_tag", "app:0.1.0")
+            # 기본 이미지 태그 — config에서 조회 후 검증
+            image_tag = str(build_section.get("image_tag", "app:0.1.0"))
+            try:
+                validate_image_reference(image_tag)
+            except InvalidImageError:
+                # 유효하지 않은 image_tag → build skip + warning
+                config.warnings.append(
+                    f"build.image_tag 검증 실패: {image_tag!r} — 빌드 건너뜀"
+                )
+                build_engine = "skip"
+
+        if build_engine != "skip":
+            image_tag = str(build_section.get("image_tag", "app:0.1.0"))
             build_result = run_build_loop(
                 self._deps.build_runner,
                 staging_dir,
@@ -583,16 +688,15 @@ class SkillPipeline:
             )
 
             if build_result.bailout:
-                ctx = BailOutContext(
-                    step_number=4,
+                self._raise_bailout(
+                    staging_dir,
                     step_name_ko="STEP 4 컨테이너 빌드",
                     component_ko="빌드 러너",
                     ko_summary="컨테이너 빌드 3회 실패 — 수동 수정 필요",
                     en_detail="Container build failed after 3 attempts",
                     attempts_log=build_result.attempts,
+                    message="Container build bailed out",
                 )
-                self._deps.output_packager.write_troubleshoot(staging_dir, ctx)
-                raise BailOutError("Container build bailed out")
 
         return collect_validation_outcome(k8s_result, dry_run_result, build_result)
 

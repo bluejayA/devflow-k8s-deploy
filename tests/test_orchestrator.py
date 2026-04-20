@@ -554,3 +554,119 @@ class TestStep1PromptPath:
 
         # prompt_spy는 절대 호출되지 않음 (전달되지 않으므로)
         prompt_spy.assert_not_called()
+
+
+# ─── Important 1: config.raw scalar 섹션 방어 ───────────────────────────────────
+
+
+class TestScalarConfigSection:
+    """config.raw의 섹션이 scalar(str/None 등)일 때 crash 없이 기본값 사용."""
+
+    def test_run_handles_scalar_output_section(self, tmp_path: Path) -> None:
+        """config.raw = {"output": "invalid"} → crash 없이 기본값 사용."""
+        deps, mocks = _make_deps(config_raw={"output": "invalid"})
+        pipeline = SkillPipeline(deps)
+
+        # AttributeError 없이 완료해야 한다
+        result = pipeline.run(tmp_path / "project", tmp_path / "output")
+        assert isinstance(result, PackagingResult)
+
+    def test_run_handles_scalar_build_section(self, tmp_path: Path) -> None:
+        """config.raw = {"build": "skip"} → build engine 기본값 skip 적용."""
+        deps, mocks = _make_deps(config_raw={"build": "skip"})
+        pipeline = SkillPipeline(deps)
+
+        result = pipeline.run(tmp_path / "project", tmp_path / "output")
+        assert isinstance(result, PackagingResult)
+        # build runner가 호출되지 않아야 한다 (engine=skip 기본값)
+        mocks["build_runner"].build.assert_not_called()
+
+    def test_run_handles_null_app_section(self, tmp_path: Path) -> None:
+        """config.raw = {"app": null} → 기본 app 값(project dir name) 사용."""
+        deps, mocks = _make_deps(config_raw={"app": None})
+        pipeline = SkillPipeline(deps)
+
+        result = pipeline.run(tmp_path / "project", tmp_path / "output")
+        assert isinstance(result, PackagingResult)
+
+
+# ─── Important 2: prompt_callback 응답 검증 ─────────────────────────────────────
+
+
+class TestPromptCallbackValidation:
+    """prompt_callback 반환 값이 비정상일 때 default fallback."""
+
+    def test_prompt_callback_none_response_falls_back_to_default(self, tmp_path: Path) -> None:
+        """callback이 None 반환 → default 값 사용 (TypeError 없이)."""
+        deps, mocks = _make_deps()
+
+        def bad_callback(req: PromptRequest) -> Any:  # type: ignore[return]
+            return None  # type: ignore[return-value]
+
+        pipeline = SkillPipeline(deps, prompt_callback=bad_callback)  # type: ignore[arg-type]
+        result = pipeline.run(tmp_path / "project", tmp_path / "output")
+        assert isinstance(result, PackagingResult)
+
+    def test_prompt_callback_non_string_response_falls_back(self, tmp_path: Path) -> None:
+        """callback이 int 반환 → default 값 사용."""
+        deps, mocks = _make_deps()
+
+        def int_callback(req: PromptRequest) -> Any:  # type: ignore[return]
+            return 12345
+
+        pipeline = SkillPipeline(deps, prompt_callback=int_callback)  # type: ignore[arg-type]
+        result = pipeline.run(tmp_path / "project", tmp_path / "output")
+        assert isinstance(result, PackagingResult)
+
+    def test_prompt_callback_newline_in_response_falls_back(self, tmp_path: Path) -> None:
+        """callback이 개행 포함 문자열 반환 → default 값 사용."""
+        deps, mocks = _make_deps()
+
+        def newline_callback(req: PromptRequest) -> str:
+            return "my-app\ninjected"
+
+        pipeline = SkillPipeline(deps, prompt_callback=newline_callback)
+        result = pipeline.run(tmp_path / "project", tmp_path / "output")
+        assert isinstance(result, PackagingResult)
+
+    def test_prompt_callback_oversized_response_falls_back(self, tmp_path: Path) -> None:
+        """callback이 256자 초과 문자열 반환 → default 값 사용."""
+        deps, mocks = _make_deps()
+
+        def huge_callback(req: PromptRequest) -> str:
+            return "a" * 257
+
+        pipeline = SkillPipeline(deps, prompt_callback=huge_callback)
+        result = pipeline.run(tmp_path / "project", tmp_path / "output")
+        assert isinstance(result, PackagingResult)
+
+
+# ─── Important 3: image_tag 검증 ────────────────────────────────────────────────
+
+
+class TestImageTagValidation:
+    """build.image_tag 검증 — 유효하지 않으면 build skip + warning."""
+
+    def test_run_invalid_image_tag_skips_build_with_warning(self, tmp_path: Path) -> None:
+        """image_tag='app:latest' → build skip + config.warnings에 경고 추가."""
+        deps, mocks = _make_deps(
+            config_raw={"build": {"engine": "auto", "image_tag": "app:latest"}},
+        )
+        pipeline = SkillPipeline(deps)
+
+        result = pipeline.run(tmp_path / "project", tmp_path / "output")
+
+        # build runner가 호출되지 않아야 한다 (invalid tag → skip)
+        mocks["build_runner"].build.assert_not_called()
+        assert isinstance(result, PackagingResult)
+
+    def test_run_valid_image_tag_proceeds_with_build(self, tmp_path: Path) -> None:
+        """image_tag='myapp:1.0.0' (유효) → build runner 호출."""
+        deps, mocks = _make_deps(
+            config_raw={"build": {"engine": "auto", "image_tag": "myapp:1.0.0"}},
+        )
+        pipeline = SkillPipeline(deps)
+
+        pipeline.run(tmp_path / "project", tmp_path / "output")
+
+        mocks["build_runner"].build.assert_called_once()
