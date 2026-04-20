@@ -3,9 +3,9 @@
 테스트 범주:
   - run_validation_loop: 성공/재시도 성공/3회 실패/exit_code=2/applied=False (5건)
   - run_dry_run_loop: 성공/degraded skip/3회 실패 (3건)
-  - run_build_loop: 성공/skip/재시도 성공 (3건)
+  - run_build_loop: 성공/skip/재시도 성공/dockerfile 캡처/dockerfile=None (5건)
   - collect_validation_outcome F-56 pass-through: 6건
-  총 17건
+  총 19건
 """
 
 from __future__ import annotations
@@ -292,6 +292,59 @@ class TestRunBuildLoop:
         assert result.final_result is ok_result
         assert build_runner.build.call_count == 2
         assert fix.call_count == 1
+
+    def test_captures_dockerfile_argument(self) -> None:
+        """케이스 12: dockerfile 인자가 lambda 클로저로 정확히 캡처되어 build에 전달되는지."""
+        build_runner = MagicMock()
+        build_runner.build.return_value = BuildResult(
+            success=True,
+            engine="docker",
+            image_ref="myapp:1.0",
+            skipped=False,
+            skip_reason_ko=None,
+        )
+
+        context_dir = Path("/tmp/ctx")
+        custom_dockerfile = Path("/tmp/ctx/custom.Dockerfile")
+        fix_attempt = MagicMock(return_value=_fix_applied())
+
+        run_build_loop(
+            build_runner,
+            context_dir,
+            "myapp:1.0",
+            fix_attempt,
+            dockerfile=custom_dockerfile,
+        )
+
+        build_runner.build.assert_called_once_with(
+            context_dir,
+            "myapp:1.0",
+            dockerfile=custom_dockerfile,
+        )
+
+    def test_default_dockerfile_none(self) -> None:
+        """케이스 13: dockerfile 인자 생략 시 build_runner.build에 dockerfile=None 전달."""
+        build_runner = MagicMock()
+        build_runner.build.return_value = BuildResult(
+            success=True,
+            engine="docker",
+            image_ref="myapp:1.0",
+            skipped=False,
+            skip_reason_ko=None,
+        )
+
+        run_build_loop(
+            build_runner,
+            Path("/tmp/ctx"),
+            "myapp:1.0",
+            MagicMock(return_value=_fix_applied()),
+        )
+
+        build_runner.build.assert_called_once_with(
+            Path("/tmp/ctx"),
+            "myapp:1.0",
+            dockerfile=None,
+        )
 
 
 # ─── collect_validation_outcome (F-56 pass-through) ───────────────────────────

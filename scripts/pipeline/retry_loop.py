@@ -21,18 +21,23 @@ from scripts._shared.types import (
     ValidationReport,
 )
 
-# bail-out 시 final_result=None인 경우 대신 쓸 빈 ValidationReport
-_EMPTY_REPORT = ValidationReport(
-    results=[],
-    counts={"pass": 0, "warn": 0, "fail": 0},
-    exit_code=1,
-    skipped=[],
-)
-
 if TYPE_CHECKING:
     from scripts.kubectl_dry_runner import KubectlDryRunner
     from scripts.pipeline.build_runner import BuildRunner
     from scripts.validate_k8s import K8sValidator
+
+
+def _empty_report() -> ValidationReport:
+    """빈 ValidationReport 생성 — bail-out 시 final_result=None의 fallback용.
+
+    매 호출마다 새 리스트/딕트 인스턴스 생성하여 공유 가변 상태 오염 방지.
+    """
+    return ValidationReport(
+        results=[],
+        counts={"pass": 0, "warn": 0, "fail": 0},
+        exit_code=1,
+        skipped=[],
+    )
 
 
 def run_validation_loop(
@@ -133,7 +138,7 @@ def collect_validation_outcome(
     )
 
     k8s_report: ValidationReport = (
-        validation.final_result if validation.final_result is not None else _EMPTY_REPORT
+        validation.final_result if validation.final_result is not None else _empty_report()
     )
 
     return ValidationOutcome(

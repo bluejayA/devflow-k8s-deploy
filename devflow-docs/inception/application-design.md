@@ -323,7 +323,7 @@ SkillPipeline    K8sValidator    KubectlDryRunner   _shared/retry.py
  |--retry_with_fix(                                         |
  |    operation=lambda: K8sValidator.validate(manifest_paths),
  |    fix_attempt=lambda r: _fix_k8s(r, staging_dir),       |
- |    success_predicate=lambda r: r.exit_code <= 2,         |
+ |    success_predicate=lambda r: r.exit_code != 1,         |
  |  )--------------------------------------------------->   |
  |                    |                                     |
  |    attempt 1:                                            |
@@ -498,7 +498,7 @@ step4_validate_gate(artifacts: GeneratedArtifacts, staging_dir: Path) -> Validat
     retry_with_fix(
       operation=lambda: K8sValidator.validate(artifacts.manifest_paths),
       fix_attempt=lambda result_or_err: _fix_k8s(result_or_err, staging_dir),
-      success_predicate=lambda r: r.exit_code <= 2,
+      success_predicate=lambda r: r.exit_code != 1,
     )
     retry_with_fix(
       operation=lambda: KubectlDryRunner.dry_run(staging_dir),
@@ -1271,7 +1271,7 @@ def retry_with_fix(
     fix_attempt: operation 결과(또는 예외)를 받아 수정 시도. FixOutcome 반환.
                  applied=False면 다음 attempt 안 함, 즉시 bailout.
     success_predicate: operation 결과가 성공인지 판정. 필수.
-                       예: lambda r: r.exit_code <= 2
+                       예: lambda r: r.exit_code != 1
                        (생략 불가 — 기본값 lambda r: True가 silent failure 일으킴)
     max_attempts: 기본 3 (F-50/F-51/F-54)
     step_name_ko, component_ko: troubleshoot.md 한국어 요약 생성용
@@ -1301,7 +1301,7 @@ def retry_with_fix(
 k8s_result = retry_with_fix(
     operation=lambda: validator.validate(artifacts.manifest_paths),
     fix_attempt=lambda r: _fix_k8s_failures(r, staging_dir),  # FixOutcome 반환
-    success_predicate=lambda r: r.exit_code <= 2,  # PASS 또는 soft-success
+    success_predicate=lambda r: r.exit_code != 1,  # PASS(0) 또는 soft-success(WARN=2), FAIL=1만 재시도
     step_name_ko="STEP 4 정적 검증",
     component_ko="K8s 검증기",
 )
@@ -1810,3 +1810,7 @@ PromptRequest(
   - **[메타]** SkillPipeline 서브유닛 매핑 — orchestrator/retry_loop/build_runner 3개 분해. `_shared/` 단일 unit 경계 명시
   - **[메타]** AtomicWriter.commit() prompt_callback 주입 방식 명시 (ProjectAnalyzer 패턴 일치)
   - **[메타]** F-09 reserved 명시 (requirements.md ID 인벤토리)
+- 2026-04-19 — **F-42 정합성 교정 (Unit 13 구현 리뷰 반영)**:
+  - §1 / §B의 `success_predicate=lambda r: r.exit_code <= 2` → `r.exit_code != 1`로 정정.
+  - F-42 exit code 정의(0=PASS, 1=FAIL, 2=WARN)상 `<= 2`는 항상 True로 retry 루프 무력화.
+  - `exit_code != 1`이 F-42 soft-success(WARN) 계약과 정합.
