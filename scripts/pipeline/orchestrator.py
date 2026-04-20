@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import dataclasses
 import os
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, NoReturn, cast
@@ -244,6 +245,28 @@ def _coerce_literal_or_default(
     return value if value in allowed else default
 
 
+def _sanitize_dns1123_label(name: str) -> str:
+    """임의 문자열 → DNS-1123 label 안전 변환.
+
+    변환 규칙:
+      1. 소문자 변환
+      2. 언더스코어(_) → 하이픈(-)
+      3. 영숫자/하이픈 외 문자 제거
+      4. 앞뒤 하이픈 제거
+      5. 63자 이하로 절단 (절단 후 하이픈 제거)
+      6. 빈 문자열이거나 시작/끝이 알파뉴메릭이 아니면 'devflow-app' fallback
+
+    project_dir.name 등을 DNS-1123 label로 정규화할 때 사용.
+    """
+    lowered = name.lower().replace("_", "-")
+    filtered = re.sub(r"[^a-z0-9-]", "", lowered)
+    stripped = filtered.strip("-")
+    cut = stripped[:63].rstrip("-")
+    if not cut or not cut[0].isalnum() or not cut[-1].isalnum():
+        return "devflow-app"
+    return cut
+
+
 # ─── _fix stubs (v0.1.0 — auto-fix는 v0.2+) ──────────────────────────────────
 
 
@@ -387,7 +410,14 @@ class SkillPipeline:
 
         if self._prompt_callback is None:
             # 자동 모드 — config/defaults에서 채움
-            app_name = str(app_raw.get("name", project_dir.name))
+
+            # app_name: None 방어 — app.name이 None이면 project_dir.name을 DNS-1123 정규화
+            app_name_raw = app_raw.get("name")
+            if not app_name_raw:
+                app_name = _sanitize_dns1123_label(project_dir.name)
+            else:
+                app_name = str(app_name_raw)
+
             port = int(app_raw.get("port", 8080))
             exposure_val = _coerce_literal_or_default(
                 str(app_raw.get("exposure", "ClusterIP")),
@@ -397,7 +427,13 @@ class SkillPipeline:
             exposure: Literal["ClusterIP", "NodePort", "LoadBalancer"] = cast(
                 Literal["ClusterIP", "NodePort", "LoadBalancer"], exposure_val
             )
-            namespace = str(raw.get("namespace", project_dir.name))
+
+            # namespace: resolve_namespace() 4단계 조회 — str(None)='None' 버그 방어
+            ns_result = self._deps.config_loader.resolve_namespace(
+                config, user_input=None, project_dir=project_dir
+            )
+            namespace = ns_result.value
+
             output_dir_str = str(output_raw.get("dir", "k8s-output"))
             resource_hint_val = _coerce_literal_or_default(
                 str(app_raw.get("resource_hint", "medium")),
@@ -435,11 +471,19 @@ class SkillPipeline:
             )
             exposure = cast(Literal["ClusterIP", "NodePort", "LoadBalancer"], exposure_answer)
 
-            namespace = self._prompt_field(
+            # namespace prompt: 기본값도 resolve_namespace() 4단계 조회 경유
+            _ns_default = self._deps.config_loader.resolve_namespace(
+                config, user_input=None, project_dir=project_dir
+            ).value
+            ns_answer = self._prompt_field(
                 "namespace",
                 self._msg_policy.format_question("네임스페이스는 뭘로 할까요?", "namespace"),
-                default=str(raw.get("namespace", project_dir.name)),
+                default=_ns_default,
             )
+            # user_input을 resolve_namespace에 전달해 4단계 로직 완성
+            namespace = self._deps.config_loader.resolve_namespace(
+                config, user_input=ns_answer or None, project_dir=project_dir
+            ).value
             output_dir_str = self._prompt_field(
                 "output_dir",
                 self._msg_policy.format_question("생성 파일을 어디에 둘까요?", "output dir"),
