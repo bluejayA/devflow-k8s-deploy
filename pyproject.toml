@@ -27,7 +27,7 @@ dev = [
 packages = ["scripts"]
 
 [tool.pytest.ini_options]
-testpaths = ["tests", "tests/integration"]
+testpaths = ["tests"]  # tests/integration은 자동 수집됨
 python_files = ["test_*.py"]
 python_classes = ["Test*"]
 python_functions = ["test_*"]
