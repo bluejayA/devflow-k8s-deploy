@@ -221,6 +221,9 @@ class BuildResult:
     engine: Literal["docker", "podman", "nerdctl"] | None
     skipped: bool
     skip_reason_ko: str | None
+    stdout: str | None = None  # 빌드 표준 출력 — Unit 13 retry_loop fix 근거
+    stderr: str | None = None  # 빌드 표준 에러 — OutputPackager troubleshoot
+    exit_code: int | None = None  # 프로세스 종료 코드 — auto-fix 조건 판단
 
 
 @dataclass

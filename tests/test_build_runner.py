@@ -5,6 +5,9 @@
   - build: skip/성공/실패/degraded/타임아웃/검증 (8건)
   - _build_command: allowlist 7요소, push 금지, shell=False spy (3건)
   - 한국어 메시지: skip_reason_ko (4건)
+  - F-102 timeout 주입 (3건)
+  - BuildResult stdout/stderr/exit_code 캡처 (3건)
+  - _build_command engine whitelist (2건)
 """
 
 from __future__ import annotations
@@ -365,3 +368,184 @@ class TestKoreanMessages:
 
         assert result.skip_reason_ko is not None
         assert str(_BUILD_TIMEOUT_SECONDS) in result.skip_reason_ko
+
+
+# ─── F-102 timeout 주입 ──────────────────────────────────────────────────
+
+
+class TestTimeoutInjection:
+    """BuildRunner.__init__ build_timeout_seconds 파라미터 검증."""
+
+    @pytest.fixture()
+    def tmp_ctx(self, tmp_path: Path) -> Path:
+        (tmp_path / "Dockerfile").write_text("FROM scratch\n")
+        return tmp_path
+
+    def test_timeout_custom_value(self, tmp_ctx: Path) -> None:
+        """TC-20: build_timeout_seconds=30 → subprocess.run에 timeout=30 전달."""
+        runner = BuildRunner(build_engine="docker", build_timeout_seconds=30)
+        fake_proc = MagicMock()
+        fake_proc.returncode = 0
+        fake_proc.stdout = ""
+        fake_proc.stderr = ""
+
+        with (
+            patch(
+                "scripts.pipeline.build_runner.shutil.which",
+                side_effect=_fake_which(["docker"]),
+            ),
+            patch(
+                "scripts.pipeline.build_runner.subprocess.run",
+                return_value=fake_proc,
+            ) as mock_run,
+        ):
+            runner.build(tmp_ctx, "myapp:1.0.0")
+
+        call_kwargs = mock_run.call_args.kwargs
+        assert call_kwargs.get("timeout") == 30
+
+    def test_timeout_zero_means_unlimited(self, tmp_ctx: Path) -> None:
+        """TC-21: build_timeout_seconds=0 → subprocess.run에 timeout=None 전달."""
+        runner = BuildRunner(build_engine="docker", build_timeout_seconds=0)
+        fake_proc = MagicMock()
+        fake_proc.returncode = 0
+        fake_proc.stdout = ""
+        fake_proc.stderr = ""
+
+        with (
+            patch(
+                "scripts.pipeline.build_runner.shutil.which",
+                side_effect=_fake_which(["docker"]),
+            ),
+            patch(
+                "scripts.pipeline.build_runner.subprocess.run",
+                return_value=fake_proc,
+            ) as mock_run,
+        ):
+            runner.build(tmp_ctx, "myapp:1.0.0")
+
+        call_kwargs = mock_run.call_args.kwargs
+        assert call_kwargs.get("timeout") is None
+
+    def test_timeout_negative_raises_value_error(self) -> None:
+        """TC-22: build_timeout_seconds=-1 → ValueError."""
+        with pytest.raises(ValueError, match="build_timeout_seconds"):
+            BuildRunner(build_engine="docker", build_timeout_seconds=-1)
+
+
+# ─── BuildResult stdout/stderr/exit_code 캡처 ──────────────────────────
+
+
+class TestBuildResultCapture:
+    """BuildResult stdout/stderr/exit_code 신규 필드 검증."""
+
+    @pytest.fixture()
+    def tmp_ctx(self, tmp_path: Path) -> Path:
+        (tmp_path / "Dockerfile").write_text("FROM scratch\n")
+        return tmp_path
+
+    def test_build_success_captures_stdout_stderr_exit_code(
+        self, tmp_ctx: Path
+    ) -> None:
+        """TC-23: 성공 시 stdout/stderr/exit_code 필드가 채워져야 한다."""
+        runner = _make_runner("docker")
+        fake_proc = MagicMock()
+        fake_proc.returncode = 0
+        fake_proc.stdout = "Successfully built abc123\n"
+        fake_proc.stderr = ""
+
+        with (
+            patch(
+                "scripts.pipeline.build_runner.shutil.which",
+                side_effect=_fake_which(["docker"]),
+            ),
+            patch(
+                "scripts.pipeline.build_runner.subprocess.run",
+                return_value=fake_proc,
+            ),
+        ):
+            result = runner.build(tmp_ctx, "myapp:1.0.0")
+
+        assert result.stdout == "Successfully built abc123\n"
+        assert result.stderr == ""
+        assert result.exit_code == 0
+
+    def test_build_failure_captures_stderr(self, tmp_ctx: Path) -> None:
+        """TC-24: 실패 시 stderr/exit_code가 채워져야 한다."""
+        runner = _make_runner("docker")
+        fake_proc = MagicMock()
+        fake_proc.returncode = 1
+        fake_proc.stdout = ""
+        fake_proc.stderr = "Error: no such file"
+
+        with (
+            patch(
+                "scripts.pipeline.build_runner.shutil.which",
+                side_effect=_fake_which(["docker"]),
+            ),
+            patch(
+                "scripts.pipeline.build_runner.subprocess.run",
+                return_value=fake_proc,
+            ),
+        ):
+            result = runner.build(tmp_ctx, "myapp:1.0.0")
+
+        assert result.success is False
+        assert result.stderr == "Error: no such file"
+        assert result.exit_code == 1
+
+    def test_timeout_captures_partial_output(self, tmp_ctx: Path) -> None:
+        """TC-25: TimeoutExpired에 stdout/stderr 있으면 BuildResult에 채워져야 한다."""
+        runner = _make_runner("docker")
+
+        exc = subprocess.TimeoutExpired(cmd=["docker", "build"], timeout=600)
+        exc.stdout = b"partial output"
+        exc.stderr = b"some error"
+
+        with (
+            patch(
+                "scripts.pipeline.build_runner.shutil.which",
+                side_effect=_fake_which(["docker"]),
+            ),
+            patch(
+                "scripts.pipeline.build_runner.subprocess.run",
+                side_effect=exc,
+            ),
+        ):
+            result = runner.build(tmp_ctx, "myapp:1.0.0")
+
+        assert result.success is False
+        assert result.stdout == "partial output"
+        assert result.stderr == "some error"
+        assert result.exit_code is None
+
+
+# ─── _build_command engine whitelist ────────────────────────────────────
+
+
+class TestBuildCommandWhitelist:
+    """_build_command engine whitelist assert 검증."""
+
+    @pytest.fixture()
+    def runner(self) -> BuildRunner:
+        return _make_runner("docker")
+
+    @pytest.fixture()
+    def tmp_ctx(self, tmp_path: Path) -> Path:
+        (tmp_path / "Dockerfile").write_text("FROM scratch\n")
+        return tmp_path
+
+    def test_build_command_rejects_unknown_engine(
+        self, runner: BuildRunner, tmp_ctx: Path
+    ) -> None:
+        """TC-26: 허용되지 않은 엔진으로 _build_command 호출 시 ValueError."""
+        with pytest.raises(ValueError, match="허용되지 않은 엔진"):
+            runner._build_command("evil-engine", tmp_ctx, "myapp:1.0.0", tmp_ctx / "Dockerfile")  # type: ignore[arg-type]
+
+    def test_build_command_length_invariant(
+        self, runner: BuildRunner, tmp_ctx: Path
+    ) -> None:
+        """TC-27: _build_command 결과는 정확히 7 요소."""
+        dockerfile = tmp_ctx / "Dockerfile"
+        cmd = runner._build_command("docker", tmp_ctx, "myapp:1.0.0", dockerfile)
+        assert len(cmd) == 7

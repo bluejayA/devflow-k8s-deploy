@@ -9,7 +9,7 @@
 기능 기준:
   - F-53: build.engine=skip(기본)이면 즉시 skipped=True 반환
   - F-57: auto 모드 — docker → podman → nerdctl 순으로 shutil.which 감지
-  - F-55: 명시 엔진 — 해당 엔진만 사용, 미설치 시 degraded
+  - F-57: 명시 엔진 — 해당 엔진만 사용, 미설치 시 degraded
   - F-58: 미감지 시 경고 후 degraded (skipped=True, 한국어 사유)
   - F-102: 빌드 타임아웃 600초 기본. 초과 시 실패(success=False)로 변환
 """
@@ -19,15 +19,17 @@ from __future__ import annotations
 import shutil
 import subprocess
 from pathlib import Path
-from typing import Literal, cast
+from typing import Literal
 
+from scripts._shared.fileio import is_within
 from scripts._shared.image_ref import validate_image_reference
 from scripts._shared.types import BuildResult
 
 # 빌드 엔진 자동 감지 우선순위 (F-57)
-_AUTO_ENGINE_ORDER: list[str] = ["docker", "podman", "nerdctl"]
+RealEngine = Literal["docker", "podman", "nerdctl"]
+_AUTO_ENGINE_ORDER: tuple[RealEngine, ...] = ("docker", "podman", "nerdctl")
 
-# 빌드 타임아웃 기본값 (F-102)
+# 빌드 타임아웃 기본값 (F-102) — 참조/문서용 상수; __init__ 기본값 출처
 _BUILD_TIMEOUT_SECONDS = 600
 
 # 한국어 skip 메시지 (F-58)
@@ -58,7 +60,12 @@ class BuildRunner:
       - push 금지 (docker push / podman push 등 절대 호출 안 함)
     """
 
-    def __init__(self, build_engine: BuildEngineMode) -> None:
+    def __init__(
+        self,
+        build_engine: BuildEngineMode,
+        *,
+        build_timeout_seconds: int = _BUILD_TIMEOUT_SECONDS,
+    ) -> None:
         """BuildRunner 초기화.
 
         Args:
@@ -66,10 +73,17 @@ class BuildRunner:
                 'skip' — 빌드 비활성화 (기본값).
                 'auto' — docker → podman → nerdctl 순 자동 감지.
                 'docker' / 'podman' / 'nerdctl' — 해당 엔진만 사용.
+            build_timeout_seconds: subprocess 타임아웃 (초). 기본 600 (F-102).
+                0 이면 무제한. 음수 불가.
         """
+        if build_timeout_seconds < 0:
+            raise ValueError(
+                f"build_timeout_seconds는 0 이상이어야 함: {build_timeout_seconds}"
+            )
         self._build_engine: BuildEngineMode = build_engine
+        self._build_timeout_seconds = build_timeout_seconds
 
-    def detect_engine(self) -> str | None:
+    def detect_engine(self) -> RealEngine | None:
         """빌드 엔진 감지.
 
         build_engine=skip이면 None.
@@ -83,14 +97,14 @@ class BuildRunner:
             return None
 
         if self._build_engine == "auto":
-            for engine in _AUTO_ENGINE_ORDER:
-                if shutil.which(engine) is not None:
-                    return engine
+            for candidate in _AUTO_ENGINE_ORDER:
+                if shutil.which(candidate) is not None:
+                    return candidate
             return None
 
-        # 명시 엔진 — 해당 엔진만 확인
-        engine = self._build_engine
-        return engine if shutil.which(engine) is not None else None
+        # 명시 엔진 (BuildEngineMode에서 skip/auto 제외 = RealEngine으로 좁혀짐)
+        explicit: RealEngine = self._build_engine
+        return explicit if shutil.which(explicit) is not None else None
 
     def build(
         self,
@@ -107,7 +121,7 @@ class BuildRunner:
           - cmd: [engine, "build", "-t", image_tag, "-f", str(dockerfile or "Dockerfile"),
                  str(context_dir)]
           - shell=False, argv list
-          - timeout: 600초 (F-102, build.build_timeout_seconds 기본)
+          - timeout: build_timeout_seconds 초 (F-102, 0=무제한)
 
         Args:
             context_dir: 컨테이너 빌드 컨텍스트 디렉토리. 존재해야 함.
@@ -121,6 +135,9 @@ class BuildRunner:
                 image_ref=str|None,
                 skipped=bool,
                 skip_reason_ko=str|None,
+                stdout=str|None,
+                stderr=str|None,
+                exit_code=int|None,
             )
 
         Raises:
@@ -144,17 +161,14 @@ class BuildRunner:
             raise ValueError(f"context_dir이 유효한 디렉토리가 아님: {context_dir}")
 
         if dockerfile is not None:
-            dockerfile = dockerfile.resolve()
-            if not dockerfile.is_file():
-                raise ValueError(f"dockerfile이 유효한 파일이 아님: {dockerfile}")
-            # context_dir 내부 확인
-            try:
-                dockerfile.relative_to(context_dir)
-            except ValueError as exc:
+            if not dockerfile.resolve().is_file():
+                raise ValueError(f"dockerfile이 유효한 파일이 아님: {dockerfile.resolve()}")
+            # context_dir 내부 확인 (symlink escape 방어 포함)
+            if not is_within(context_dir, dockerfile):
                 raise ValueError(
-                    f"dockerfile이 context_dir 밖에 있음: {dockerfile} "
-                    f"(context_dir={context_dir})"
-                ) from exc
+                    f"dockerfile이 context_dir 밖을 가리킴: {dockerfile.name}"
+                )
+            dockerfile = dockerfile.resolve()
         else:
             dockerfile = context_dir / "Dockerfile"
 
@@ -177,6 +191,7 @@ class BuildRunner:
 
         # 빌드 실행
         cmd = self._build_command(engine, context_dir, image_tag, dockerfile)
+        timeout_arg = None if self._build_timeout_seconds == 0 else self._build_timeout_seconds
         try:
             proc = subprocess.run(
                 cmd,
@@ -184,29 +199,35 @@ class BuildRunner:
                 text=True,
                 errors="replace",
                 shell=False,
-                timeout=_BUILD_TIMEOUT_SECONDS,
+                timeout=timeout_arg,
+                check=False,
             )
-        except subprocess.TimeoutExpired:
+        except subprocess.TimeoutExpired as exc:
             return BuildResult(
                 success=False,
-                engine=cast(Literal["docker", "podman", "nerdctl"], engine),
+                engine=engine,
                 image_ref=None,
                 skipped=False,
-                skip_reason_ko=f"빌드 타임아웃 ({_BUILD_TIMEOUT_SECONDS}초 초과)",
+                skip_reason_ko=f"빌드 타임아웃 ({self._build_timeout_seconds}초 초과)",
+                stdout=exc.stdout.decode("utf-8", errors="replace") if exc.stdout else None,
+                stderr=exc.stderr.decode("utf-8", errors="replace") if exc.stderr else None,
+                exit_code=None,
             )
 
-        success = proc.returncode == 0
         return BuildResult(
-            success=success,
-            engine=cast(Literal["docker", "podman", "nerdctl"], engine),
-            image_ref=image_tag if success else None,
+            success=(proc.returncode == 0),
+            engine=engine,
+            image_ref=image_tag if proc.returncode == 0 else None,
             skipped=False,
             skip_reason_ko=None,
+            stdout=proc.stdout,
+            stderr=proc.stderr,
+            exit_code=proc.returncode,
         )
 
     def _build_command(
         self,
-        engine: str,
+        engine: RealEngine,
         context_dir: Path,
         image_tag: str,
         dockerfile: Path,
@@ -218,7 +239,10 @@ class BuildRunner:
 
         push/pull 관련 인자 절대 추가 금지 (NFR-SEC-05).
         """
-        return [
+        # Defense-in-depth: 호출자가 Literal 타입을 우회해도 런타임에서 차단
+        if engine not in _AUTO_ENGINE_ORDER:
+            raise ValueError(f"허용되지 않은 엔진: {engine!r}")
+        cmd: list[str] = [
             engine,
             "build",
             "-t",
@@ -227,3 +251,5 @@ class BuildRunner:
             str(dockerfile),
             str(context_dir),
         ]
+        assert len(cmd) == 7, f"cmd는 정확히 7 요소여야 함: {cmd}"
+        return cmd
