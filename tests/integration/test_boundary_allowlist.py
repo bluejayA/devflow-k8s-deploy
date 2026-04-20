@@ -5,7 +5,7 @@ kubectl_dry_runner / build_runner의 실행 argv를 기록하고 다음을 검�
 
 1. shell=True 금지
 2. argv는 list (str/tuple 아님)
-3. 인젝션 토큰 부재 (;, &&, ||, |, `, $(, ${, >, <, >>, <<)
+3. 인젝션 토큰 부재 (;, &&, ||, |, `, $(, ${, >, <, >>, <<, \\n, \\r, \\x00)
 4. 정확한 토큰 위치 (argv[0]은 실행 파일명, 나머지 인자는 고정 순서)
 
 실패 조건:
@@ -15,18 +15,19 @@ kubectl_dry_runner / build_runner의 실행 argv를 기록하고 다음을 검�
 - argv를 str로 바꿈
 
 픽스처 자체 검증 테스트도 포함 (픽스처가 실제로 금지 케이스를 잡는지).
+
+subprocess_spy 픽스처는 tests/integration/conftest.py에서 autouse로 주입됨.
 """
 
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
-from unittest.mock import MagicMock
 
 import pytest
 
 from scripts.kubectl_dry_runner import KubectlDryRunner
 from scripts.pipeline.build_runner import BuildRunner
+from tests.integration.conftest import SubprocessSpy
 
 # 인젝션 토큰 블랙리스트
 _INJECTION_TOKENS = (
@@ -41,41 +42,10 @@ _INJECTION_TOKENS = (
     "<",
     ">>",
     "<<",  # redirection
+    "\n",
+    "\r",
+    "\x00",  # 개행/NUL 인젝션
 )
-
-
-class _SubprocessSpy:
-    """subprocess.run spy — argv/kwargs를 기록."""
-
-    def __init__(self) -> None:
-        self.calls: list[dict[str, Any]] = []
-
-    def __call__(self, *args: Any, **kwargs: Any) -> MagicMock:
-        # args[0]이 cmd
-        cmd = args[0] if args else kwargs.get("args")
-        self.calls.append(
-            {
-                "cmd": cmd,
-                "shell": kwargs.get("shell", False),
-                "kwargs": kwargs,
-            }
-        )
-        # 정상 실행 simulate
-        result = MagicMock()
-        result.returncode = 0
-        result.stdout = ""
-        result.stderr = ""
-        return result
-
-
-@pytest.fixture
-def subprocess_spy(monkeypatch: pytest.MonkeyPatch) -> _SubprocessSpy:
-    """subprocess.run을 패치하여 spy로 교체."""
-    spy = _SubprocessSpy()
-    # 각 호출 지점의 참조 모두 패치
-    monkeypatch.setattr("scripts.kubectl_dry_runner.subprocess.run", spy)
-    monkeypatch.setattr("scripts.pipeline.build_runner.subprocess.run", spy)
-    return spy
 
 
 def _assert_safe_cmd(cmd: object, shell: bool) -> None:
@@ -104,7 +74,7 @@ def _assert_safe_cmd(cmd: object, shell: bool) -> None:
 class TestKubectlDryRunnerAllowlist:
     def test_dry_run_uses_list_argv(
         self,
-        subprocess_spy: _SubprocessSpy,
+        subprocess_spy: SubprocessSpy,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
@@ -127,7 +97,7 @@ class TestKubectlDryRunnerAllowlist:
 
     def test_dry_run_argv_exactly_five_elements(
         self,
-        subprocess_spy: _SubprocessSpy,
+        subprocess_spy: SubprocessSpy,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
@@ -148,7 +118,7 @@ class TestKubectlDryRunnerAllowlist:
 
     def test_dry_run_includes_dry_run_client(
         self,
-        subprocess_spy: _SubprocessSpy,
+        subprocess_spy: SubprocessSpy,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
@@ -169,7 +139,7 @@ class TestKubectlDryRunnerAllowlist:
 
     def test_dry_run_argv_position_kubectl_is_first(
         self,
-        subprocess_spy: _SubprocessSpy,
+        subprocess_spy: SubprocessSpy,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
@@ -190,7 +160,7 @@ class TestKubectlDryRunnerAllowlist:
 
     def test_dry_run_excludes_force_flag(
         self,
-        subprocess_spy: _SubprocessSpy,
+        subprocess_spy: SubprocessSpy,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
@@ -212,7 +182,7 @@ class TestKubectlDryRunnerAllowlist:
 
     def test_dry_run_excludes_server_side_flag(
         self,
-        subprocess_spy: _SubprocessSpy,
+        subprocess_spy: SubprocessSpy,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
@@ -233,7 +203,7 @@ class TestKubectlDryRunnerAllowlist:
 
     def test_dry_run_excludes_delete_and_create_verbs(
         self,
-        subprocess_spy: _SubprocessSpy,
+        subprocess_spy: SubprocessSpy,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
@@ -254,6 +224,34 @@ class TestKubectlDryRunnerAllowlist:
         assert "create" not in cmd
         assert "apply" in cmd
 
+    def test_dry_run_excludes_dangerous_verbs(
+        self,
+        subprocess_spy: SubprocessSpy,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """kubectl apply 외 금지 verb(replace/rollout/scale/edit/patch/delete/create)가 argv에 없음.
+
+        NFR-SEC-05 원문 금지 verb 7종 전수 검증 (allowlist의 스펙 준수도).
+        """
+        manifest_dir = tmp_path / "manifests"
+        manifest_dir.mkdir()
+
+        monkeypatch.setattr(
+            "scripts.kubectl_dry_runner.shutil.which",
+            lambda _x: "/usr/bin/kubectl",
+        )
+
+        runner = KubectlDryRunner()
+        runner.dry_run(manifest_dir)
+
+        cmd = subprocess_spy.calls[0]["cmd"]
+        forbidden_verbs = {"replace", "rollout", "scale", "edit", "patch", "delete", "create"}
+        for verb in forbidden_verbs:
+            assert verb not in cmd, f"금지 verb '{verb}' 포함: {cmd}"
+        # allowlist 확인: cmd[1]은 "apply"만
+        assert cmd[1] == "apply"
+
 
 # ============================================================
 # BuildRunner 테스트
@@ -263,7 +261,7 @@ class TestKubectlDryRunnerAllowlist:
 class TestBuildRunnerAllowlist:
     def test_build_uses_list_argv_docker(
         self,
-        subprocess_spy: _SubprocessSpy,
+        subprocess_spy: SubprocessSpy,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
@@ -285,7 +283,7 @@ class TestBuildRunnerAllowlist:
 
     def test_build_argv_exactly_seven_elements(
         self,
-        subprocess_spy: _SubprocessSpy,
+        subprocess_spy: SubprocessSpy,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
@@ -306,7 +304,7 @@ class TestBuildRunnerAllowlist:
 
     def test_build_excludes_push(
         self,
-        subprocess_spy: _SubprocessSpy,
+        subprocess_spy: SubprocessSpy,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
@@ -333,7 +331,7 @@ class TestBuildRunnerAllowlist:
 
     def test_build_excludes_pull(
         self,
-        subprocess_spy: _SubprocessSpy,
+        subprocess_spy: SubprocessSpy,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
@@ -355,7 +353,7 @@ class TestBuildRunnerAllowlist:
 
     def test_build_argv_position_engine_is_first(
         self,
-        subprocess_spy: _SubprocessSpy,
+        subprocess_spy: SubprocessSpy,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
@@ -377,7 +375,7 @@ class TestBuildRunnerAllowlist:
 
     def test_build_podman_uses_list_argv(
         self,
-        subprocess_spy: _SubprocessSpy,
+        subprocess_spy: SubprocessSpy,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
@@ -400,7 +398,7 @@ class TestBuildRunnerAllowlist:
 
     def test_build_nerdctl_uses_list_argv(
         self,
-        subprocess_spy: _SubprocessSpy,
+        subprocess_spy: SubprocessSpy,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
@@ -423,7 +421,7 @@ class TestBuildRunnerAllowlist:
 
     def test_build_skip_mode_does_not_call_subprocess(
         self,
-        subprocess_spy: _SubprocessSpy,
+        subprocess_spy: SubprocessSpy,
         tmp_path: Path,
     ) -> None:
         """skip 모드에서는 subprocess.run을 전혀 호출하지 않음."""
@@ -438,7 +436,7 @@ class TestBuildRunnerAllowlist:
 
     def test_build_auto_engine_all_seven_elements(
         self,
-        subprocess_spy: _SubprocessSpy,
+        subprocess_spy: SubprocessSpy,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
@@ -535,3 +533,18 @@ class TestFixtureSelfCheck:
             ["docker", "build", "-t", "myapp:1.0", "-f", "/tmp/Dockerfile", "/tmp/ctx"],
             shell=False,
         )
+
+    def test_assert_safe_cmd_rejects_newline(self) -> None:
+        """개행(\\n) 인젝션 토큰 거부."""
+        with pytest.raises(AssertionError):
+            _assert_safe_cmd(["echo", "a\nrm -rf /"], shell=False)
+
+    def test_assert_safe_cmd_rejects_carriage_return(self) -> None:
+        """캐리지 리턴(\\r) 인젝션 토큰 거부."""
+        with pytest.raises(AssertionError):
+            _assert_safe_cmd(["echo", "a\revil"], shell=False)
+
+    def test_assert_safe_cmd_rejects_null_byte(self) -> None:
+        """NUL 바이트(\\x00) 인젝션 토큰 거부."""
+        with pytest.raises(AssertionError):
+            _assert_safe_cmd(["echo", "a\x00evil"], shell=False)
