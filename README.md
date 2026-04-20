@@ -127,7 +127,9 @@ app:
   module: api       # multi-module 시 대상 모듈명 (예: order-api)
 
 image:
-  repository: myregistry.io/my-api
+  # 'registry.example.com'은 예시용 도메인입니다 (RFC 2606).
+  # 실제 사용 시 자신의 레지스트리 호스트(예: Docker Hub, Harbor, ECR)로 교체하세요.
+  repository: registry.example.com/my-api
   tag: 1.0.0        # "latest" 사용 불가
 
 namespace: my-team
@@ -138,7 +140,7 @@ output:
 
 build:
   engine: skip       # skip (기본, opt-in) / auto / docker / podman / nerdctl
-  image_tag: myregistry.io/my-api:1.0.0   # engine != skip 시 필수
+  image_tag: registry.example.com/my-api:1.0.0   # engine != skip 시 필수
   build_timeout_seconds: 600              # 0 = 무제한
 
 resources:
@@ -157,10 +159,16 @@ service:
 
 ### 3계층 설정 우선순위 (F-60)
 
+**프로젝트 > 조직 > 내장 기본값** (앞이 우선, 뒤를 덮어씀)
+
+- 프로젝트 `.devflow-k8s-deploy.yml` 값이 존재하면 조직/내장 값을 덮어씁니다.
+- 조직 `~/.claude/devflow-k8s-deploy.yml` 값이 존재하면 내장 기본값을 덮어씁니다.
+- 내장 기본값은 프로젝트/조직 설정이 없는 항목에만 적용됩니다.
+
 ```
-프로젝트 .devflow-k8s-deploy.yml
-  > 조직 ~/.claude/devflow-k8s-deploy.yml
-  > 스킬 내장 기본값
+프로젝트 .devflow-k8s-deploy.yml   ← 최우선 (프로젝트가 조직을 덮어씀)
+  > 조직 ~/.claude/devflow-k8s-deploy.yml  ← (조직이 내장을 덮어씀)
+  > 스킬 내장 기본값                ← 최하위 fallback
 ```
 
 ---
@@ -176,7 +184,8 @@ service:
 
 > **중요 (CI 통합 시)**: `set -e` 환경에서 exit code 2는 실패가 아닙니다. 아래와 같이 처리하세요:
 > ```bash
-> python -m scripts.pipeline.orchestrator --project-dir . --output-dir k8s-output/
+> python ${CLAUDE_PLUGIN_ROOT}/scripts/pipeline/orchestrator.py \
+>   --project-dir . --output-dir k8s-output/
 > EXIT=$?
 > [ $EXIT -le 2 ] || exit $EXIT   # 0, 1, 2만 정상 범위
 > ```
@@ -186,26 +195,40 @@ service:
 ## CI 통합 패턴
 
 ```bash
-# 실행
-python -m scripts.pipeline.orchestrator \
+#!/bin/bash
+set -uo pipefail  # -e는 의도적으로 빼서 exit code 2(WARN)를 직접 처리
+
+# 'registry.example.com'은 예시용 도메인입니다 (RFC 2606).
+# 실제 사용 시 자신의 레지스트리 호스트(예: Docker Hub, Harbor, ECR)로 교체하세요.
+export CLAUDE_PLUGIN_ROOT=/path/to/devflow-k8s-deploy
+
+python ${CLAUDE_PLUGIN_ROOT}/scripts/pipeline/orchestrator.py \
   --project-dir . \
   --output-dir k8s-output/
-
-# exit code 확인
 EXIT=$?
-if [ $EXIT -eq 0 ]; then
-  echo "검증 PASS"
-elif [ $EXIT -eq 2 ]; then
-  echo "WARN 있음 (soft-success) — 경고 확인 권장"
-  jq '.validation.rules_warned' k8s-output/summary.json
-else
-  echo "검증 FAIL — k8s-output/troubleshoot.md 확인"
+
+# summary.json 존재 확인
+if [ ! -f k8s-output/summary.json ]; then
+  echo "ERROR: summary.json 미생성. 파이프라인 실패." >&2
   exit 1
 fi
 
+# Exit code 처리 (F-42)
+case $EXIT in
+  0) echo "PASS" ;;
+  1) echo "FAIL: summary.json 확인" >&2
+     jq '.validation' k8s-output/summary.json
+     exit 1 ;;
+  2) echo "WARN (soft-success): 검토 권장"
+     jq '.validation' k8s-output/summary.json
+     ;;
+  *) echo "ERROR: 예상치 못한 exit code $EXIT" >&2
+     exit $EXIT ;;
+esac
+
 # summary.json 파싱 (skipped 검증 확인)
-jq '.validation' k8s-output/summary.json
 # skipped: ["kubectl_dry_run"] → kubectl 미설치 환경에서 dry-run 생략됨
+jq '.validation.skipped' k8s-output/summary.json
 ```
 
 ---
@@ -264,7 +287,7 @@ uv run pytest tests/ -v
 
 1. **생성만, 실제 배포는 하지 않음** — `push` / `apply`(dry-run 외) / cluster API 호출 0건. 생성·검증 경계가 명확.
 2. **맥락 주석 필수** — 모든 보안 설정에 "왜 이 선택인지" 인라인 주석.
-3. **설정 3계층** — 스킬 내장 기본값 → 조직 커스텀 → 프로젝트 오버라이드.
+3. **설정 3계층** — **프로젝트 > 조직 > 내장 기본값** (앞이 우선, 뒤를 덮어씀). 프로젝트 설정이 조직 설정을 덮어쓰고, 조직 설정이 내장 기본값을 덮어씁니다.
 4. **AIDLC 비종속** — aidlc-devflow 플러그인 없이 단독 사용 가능.
 5. **한국어 우선** — 모든 사용자 대면 메시지 한국어 요약 + 원어 병기 (NFR-17).
 
