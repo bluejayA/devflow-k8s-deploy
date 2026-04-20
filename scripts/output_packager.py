@@ -5,6 +5,9 @@ rationale.md (결정 소스 매핑 + 스킵 검증 섹션) +
 troubleshoot.md (bail-out 시, 상단 한국어 1-2줄 요약 의무).
 
 F-06, F-52, F-56, F-80~F-83, F-101 구현.
+
+v1 스키마 필드 순서는 코드 dict 리터럴 선언 순서로 고정:
+  version → generated_at → stack → app → images → namespace → validation → files
 """
 
 from __future__ import annotations
@@ -14,7 +17,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from scripts._shared.image_ref import _IMAGE_REF_RE
+from scripts._shared.image_ref import _IMAGE_REF_RE, validate_image_reference
+from scripts._shared.text_safety import redact_sensitive, reject_unsafe_chars
 from scripts._shared.types import (
     AnalysisResult,
     BailOutContext,
@@ -26,9 +30,6 @@ from scripts._shared.types import (
 
 if TYPE_CHECKING:
     pass
-
-# Markdown/텍스트 컨텍스트 개행·제어문자 차단
-_UNSAFE_CHARS = ("\n", "\r", "\x00")
 
 # 스킵 사유 기본 메시지 (한국어)
 _SKIP_REASON_DEFAULT: dict[str, str] = {
@@ -74,6 +75,8 @@ def _utc_now_iso() -> str:
 def _validate_text_field(value: str, field_name: str) -> None:
     """Markdown/텍스트 컨텍스트에 삽입될 문자열에서 개행/NUL 차단.
 
+    scripts._shared.text_safety.reject_unsafe_chars에 위임.
+
     Args:
         value: 검증할 문자열.
         field_name: 오류 메시지에 포함될 필드명.
@@ -81,11 +84,7 @@ def _validate_text_field(value: str, field_name: str) -> None:
     Raises:
         ValueError: 개행 또는 NUL 문자가 포함된 경우.
     """
-    for ch in _UNSAFE_CHARS:
-        if ch in value:
-            raise ValueError(
-                f"텍스트 주입 방어: {field_name}에 개행 또는 제어문자 포함 금지: {value!r}"
-            )
+    reject_unsafe_chars(value, field_name, message_prefix="텍스트 주입 방어")
 
 
 def _parse_image_reference(image_reference: str) -> dict[str, Any]:
@@ -96,15 +95,18 @@ def _parse_image_reference(image_reference: str) -> dict[str, Any]:
       - ``repo:tag@sha256:<64hex>`` → {"repository": "repo", "tag": "tag", "digest": "sha256:..."}
       - ``repo@sha256:<64hex>`` → {"repository": "repo", "tag": null, "digest": "sha256:..."}
 
+    write_summary_json 진입부에서 validate_image_reference로 검증된 후 호출된다.
+    매칭 실패 경로는 dead code (validate 통과 시 항상 매칭).
+
     Args:
-        image_reference: OCI 이미지 참조 문자열.
+        image_reference: OCI 이미지 참조 문자열 (validate 통과 보장).
 
     Returns:
         repository/tag/digest 키를 가진 dict.
     """
     match = _IMAGE_REF_RE.fullmatch(image_reference)
     if not match:
-        # 파싱 실패 시 전체를 repository로 취급 (OutputPackager는 예외 비발생 원칙)
+        # dead code: validate_image_reference가 먼저 호출되므로 여기에 도달하지 않음
         return {"repository": image_reference, "tag": None, "digest": None}
 
     repo = match.group("repo")
@@ -146,14 +148,17 @@ class OutputPackager:
             validation: STEP 4 검증 결과.
             config_source_map: 설정 키 → 출처 레이어 맵 (rationale 용).
             image_reference: Dockerfile에 사용된 runner 이미지 참조.
-            validation_outcome: STEP 4 통합 결과 (skipped 목록 포함). None이면 빈 skipped.
+            validation_outcome: STEP 4 통합 결과 (skipped 목록 + skip_reasons 포함).
+                None이면 빈 dict.
 
         Returns:
             PackagingResult(final_dir, files_written, troubleshoot_written).
         """
         skipped: list[str] = []
+        skip_reasons: dict[str, str] = {}
         if validation_outcome is not None:
             skipped = list(validation_outcome.skipped)
+            skip_reasons = dict(validation_outcome.skip_reasons)
 
         generated_files: list[str] = [
             "Dockerfile",
@@ -184,6 +189,7 @@ class OutputPackager:
             validation=validation,
             config_source_map=config_source_map,
             skipped=skipped,
+            skip_reasons=skip_reasons,
         )
 
         return PackagingResult(
@@ -202,9 +208,13 @@ class OutputPackager:
         상단:
           # 막힌 지점
           STEP {n} ({한국어 단계명})에서 {component_ko} 실패: {ko_summary}
-          (영문) {en_detail}
+          (영문) {en_detail}  ← redact_sensitive 적용
 
         하단: 전체 시도 로그 (attempts_log).
+
+        민감정보 처리:
+          - en_detail, ko_summary, component_ko, step_name_ko → reject_unsafe_chars (개행 차단)
+          - en_detail, attempts_log[*].fix_outcome.summary_ko → redact_sensitive (토큰 등 치환)
 
         Args:
             staging_dir: 파일을 쓸 임시 디렉토리.
@@ -213,6 +223,14 @@ class OutputPackager:
         lines: list[str] = []
         total = len(bailout.attempts_log)
 
+        # ── 구조화 필드 개행 차단 (inject 방어) ────────────────────────
+        reject_unsafe_chars(bailout.step_name_ko, "step_name_ko", message_prefix="텍스트 주입 방어")
+        reject_unsafe_chars(bailout.component_ko, "component_ko", message_prefix="텍스트 주입 방어")
+        reject_unsafe_chars(bailout.ko_summary, "ko_summary", message_prefix="텍스트 주입 방어")
+
+        # ── 자유 텍스트 민감정보 치환 ──────────────────────────────────
+        en_detail_safe = redact_sensitive(bailout.en_detail)
+
         # ── 상단: 한국어 1-2줄 요약 (F-52) ──────────────────────────────
         lines.append("# 막힌 지점")
         lines.append("")
@@ -220,7 +238,7 @@ class OutputPackager:
             f"STEP {bailout.step_number} ({bailout.step_name_ko})에서 "
             f"{bailout.component_ko} 실패: {bailout.ko_summary}"
         )
-        lines.append(f"(영문) {bailout.en_detail}")
+        lines.append(f"(영문) {en_detail_safe}")
         lines.append("")
 
         # ── 시도 로그 ────────────────────────────────────────────────────
@@ -231,7 +249,8 @@ class OutputPackager:
             lines.append(f"### 시도 {n}/{total}")
             lines.append(f"- 결과: {'PASS' if attempt.success else 'FAIL'}")
             if attempt.fix_outcome is not None and attempt.fix_outcome.summary_ko:
-                lines.append(f"- 요약: {attempt.fix_outcome.summary_ko}")
+                summary_safe = redact_sensitive(attempt.fix_outcome.summary_ko)
+                lines.append(f"- 요약: {summary_safe}")
             elif not attempt.success:
                 if n == total:
                     lines.append("- 요약: bail-out")
@@ -239,11 +258,12 @@ class OutputPackager:
                     lines.append("- 요약: 수정 시도 실패")
             lines.append("")
 
-        # ── 권장 조치 ────────────────────────────────────────────────────
+        # ── 권장 조치 (F-52: 컴포넌트 힌트만 제공) ──────────────────────
         lines.append("## 권장 조치")
         lines.append("")
-        lines.append("1. application-design.md §8 Container securityContext 확인")
-        lines.append("2. 수동 manifest 편집 후 재시도")
+        lines.append("- 상세 원인은 위 \"시도 로그\" 확인")
+        lines.append(f"- 해당 컴포넌트: {bailout.component_ko}")
+        lines.append("- 수동 개입 후 재실행 필요")
         lines.append("")
 
         content = "\n".join(lines)
@@ -261,7 +281,10 @@ class OutputPackager:
     ) -> None:
         """summary.json v1 스키마 직렬화.
 
-        스키마:
+        진입부에서 validate_image_reference를 호출하여 image_reference를 검증한다.
+        이후 _parse_image_reference는 검증된 값만 처리한다.
+
+        스키마 (v1 필드 순서는 코드 dict 리터럴 선언 순서로 고정):
         {
           "version": "v1",
           "generated_at": "<UTC ISO8601 with Z>",
@@ -271,9 +294,9 @@ class OutputPackager:
           "namespace": str,
           "validation": {
             "pass": int, "warn": int, "fail": int,
-            "skipped": [str, ...]
+            "skipped": [str, ...]  ← sorted
           },
-          "files": [str, ...]
+          "files": [str, ...]  ← sorted
         }
 
         Args:
@@ -281,10 +304,15 @@ class OutputPackager:
             inputs: STEP 1 사용자 입력.
             analysis: STEP 2 분석 결과.
             validation: STEP 4 검증 결과.
-            image_reference: runner 이미지 참조.
-            skipped: 스킵된 검증 식별자 목록 (F-83).
-            files: 생성된 파일 이름 목록.
+            image_reference: runner 이미지 참조. validate_image_reference 통과 필수.
+            skipped: 스킵된 검증 식별자 목록 (F-83). 출력 시 sorted 적용.
+            files: 생성된 파일 이름 목록. 출력 시 sorted 적용.
+
+        Raises:
+            InvalidImageError: image_reference가 OCI 참조 규칙 위반 시.
         """
+        # Important 5: 진입부 검증 — 이후 _parse_image_reference는 검증된 값만 처리
+        validate_image_reference(image_reference)
         image_info = _parse_image_reference(image_reference)
 
         doc: dict[str, Any] = {
@@ -301,13 +329,13 @@ class OutputPackager:
                 "pass": validation.counts.get("pass", 0),
                 "warn": validation.counts.get("warn", 0),
                 "fail": validation.counts.get("fail", 0),
-                "skipped": list(skipped),
+                "skipped": sorted(skipped),
             },
-            "files": list(files),
+            "files": sorted(files),
         }
 
         path.write_text(
-            json.dumps(doc, ensure_ascii=False, indent=2, sort_keys=False),
+            json.dumps(doc, ensure_ascii=False, indent=2, sort_keys=False) + "\n",
             encoding="utf-8",
         )
 
@@ -319,6 +347,7 @@ class OutputPackager:
         validation: ValidationReport,
         config_source_map: dict[str, str],
         skipped: list[str],
+        skip_reasons: dict[str, str] | None = None,
     ) -> None:
         """rationale.md 생성 — 결정 근거 문서 (F-82 + 확장).
 
@@ -331,7 +360,7 @@ class OutputPackager:
           - 리소스 (defaults 출처)
           - 프로브 (ProbeConfig 분기 근거)
           - 검증 결과 요약 (PASS/WARN/FAIL 카운트)
-          - 스킵된 검증 (skipped + 사유, F-56)  ← 신규
+          - 스킵된 검증 (skipped + 사유, F-56)
           - 경고 목록
 
         Args:
@@ -341,7 +370,12 @@ class OutputPackager:
             validation: STEP 4 검증 결과.
             config_source_map: 설정 키 → 출처 레이어 맵.
             skipped: 스킵된 검증 식별자 목록 (F-56 pass-through).
+            skip_reasons: 스킵 식별자 → 런타임 구체 사유 맵 (F-56).
+                제공 시 _SKIP_REASON_DEFAULT 보다 우선. None이면 기본값만 사용.
         """
+        if skip_reasons is None:
+            skip_reasons = {}
+
         detect = analysis.detect_result
         build = analysis.build_plan
         probe = analysis.probe_config
@@ -355,6 +389,30 @@ class OutputPackager:
         # StatefulnessSignal.reasons 유효성 검사
         for i, reason in enumerate(sf.reasons):
             _validate_text_field(reason, f"statefulness.reasons[{i}]")
+
+        # 구조화 필드 방어적 재검증 (상류 검증됨, 방어적 적용)
+        _validate_text_field(inputs.app_name, "inputs.app_name")
+        _validate_text_field(inputs.namespace, "inputs.namespace")
+        _validate_text_field(detect.framework, "detect.framework")
+        if detect.version:
+            _validate_text_field(detect.version, "detect.version")
+        if detect.build_system:
+            _validate_text_field(detect.build_system, "detect.build_system")
+        _validate_text_field(build.builder_image, "build.builder_image")
+        _validate_text_field(build.runner_image, "build.runner_image")
+        _validate_text_field(defaults.cpu_request, "defaults.cpu_request")
+        _validate_text_field(defaults.cpu_limit, "defaults.cpu_limit")
+        _validate_text_field(defaults.memory_request, "defaults.memory_request")
+        _validate_text_field(defaults.memory_limit, "defaults.memory_limit")
+        if probe.liveness.path:
+            _validate_text_field(probe.liveness.path, "liveness.path")
+        if probe.readiness.path:
+            _validate_text_field(probe.readiness.path, "readiness.path")
+
+        # 검증 결과 필드
+        for i, result in enumerate(validation.results):
+            _validate_text_field(result.rule_id, f"validation.results[{i}].rule_id")
+            _validate_text_field(result.message_ko, f"validation.results[{i}].message_ko")
 
         generated_at = _utc_now_iso()
 
@@ -463,11 +521,15 @@ class OutputPackager:
         lines.append(f"- FAIL: {counts.get('fail', 0)}건")
         lines.append("")
 
-        # ── §9 스킵된 검증 (F-56 신규) ──────────────────────────────────
+        # ── §9 스킵된 검증 (F-56) ────────────────────────────────────────
         if skipped:
             lines.append("## 스킵된 검증")
             for skip_id in skipped:
-                reason = _SKIP_REASON_DEFAULT.get(skip_id, f"{skip_id}: 사유 미기록")
+                # 런타임 skip_reasons 우선, 없으면 기본값 fallback
+                reason = skip_reasons.get(
+                    skip_id,
+                    _SKIP_REASON_DEFAULT.get(skip_id, f"{skip_id}: 사유 미기록"),
+                )
                 lines.append(f"- {skip_id}: {reason}")
             lines.append("")
 

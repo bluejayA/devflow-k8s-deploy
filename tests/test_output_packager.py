@@ -290,7 +290,8 @@ class TestWriteSummaryJson:
                 files=[],
             )
         data = json.loads(path.read_text())
-        assert data["validation"]["skipped"] == ["kubectl_dry_run", "container_build"]
+        # Important 6: sorted 적용 — 알파벳 순 정렬
+        assert data["validation"]["skipped"] == sorted(["kubectl_dry_run", "container_build"])
 
     # 5. image digest pinning 분리 (repo:tag@sha256:... → digest 필드)
     def test_image_digest_pinning_parsed(
@@ -754,3 +755,521 @@ class TestWrite:
         data1 = (staging1 / "summary.json").read_bytes()
         data2 = (staging2 / "summary.json").read_bytes()
         assert data1 == data2
+
+
+# ---------------------------------------------------------------------------
+# Critical 1: troubleshoot redact 테스트
+# ---------------------------------------------------------------------------
+
+
+class TestTroubleshootRedact:
+    """write_troubleshoot — 민감정보 redact 테스트 (Critical 1)."""
+
+    @pytest.fixture()
+    def staging_dir(self, tmp_path: Path) -> Path:
+        d = tmp_path / "staging"
+        d.mkdir()
+        return d
+
+    # 20. en_detail Bearer 토큰 → [REDACTED]
+    def test_troubleshoot_redacts_bearer_token(
+        self,
+        packager: OutputPackager,
+        staging_dir: Path,
+    ) -> None:
+        bailout = BailOutContext(
+            step_number=4,
+            step_name_ko="검증",
+            component_ko="K8s 검증기",
+            ko_summary="검증 실패",
+            en_detail="error: Bearer ABCDEFGHIJKLMNOPQRSTUVWXYZ12345 unauthorized",
+            attempts_log=[],
+        )
+        packager.write_troubleshoot(staging_dir=staging_dir, bailout=bailout)
+        content = (staging_dir / "troubleshoot.md").read_text()
+        assert "[REDACTED]" in content
+        assert "ABCDEFGHIJKLMNOPQRSTUVWXYZ12345" not in content
+
+    # 21. en_detail kubeconfig 경로 → [REDACTED]
+    def test_troubleshoot_redacts_kubeconfig_path(
+        self,
+        packager: OutputPackager,
+        staging_dir: Path,
+    ) -> None:
+        bailout = BailOutContext(
+            step_number=4,
+            step_name_ko="검증",
+            component_ko="K8s 검증기",
+            ko_summary="검증 실패",
+            en_detail="kubectl --kubeconfig=/home/user/.kube/config apply failed",
+            attempts_log=[],
+        )
+        packager.write_troubleshoot(staging_dir=staging_dir, bailout=bailout)
+        content = (staging_dir / "troubleshoot.md").read_text()
+        assert "[REDACTED]" in content
+        assert "/home/user/.kube/config" not in content
+
+    # 22. en_detail JWT → [REDACTED]
+    def test_troubleshoot_redacts_jwt(
+        self,
+        packager: OutputPackager,
+        staging_dir: Path,
+    ) -> None:
+        jwt = "eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiJ1c2VyIn0.signature_token"
+        bailout = BailOutContext(
+            step_number=4,
+            step_name_ko="검증",
+            component_ko="K8s 검증기",
+            ko_summary="검증 실패",
+            en_detail=f"token={jwt} rejected by server",
+            attempts_log=[],
+        )
+        packager.write_troubleshoot(staging_dir=staging_dir, bailout=bailout)
+        content = (staging_dir / "troubleshoot.md").read_text()
+        assert "[REDACTED]" in content
+        assert jwt not in content
+
+    # 23. attempts_log fix_outcome.summary_ko 민감정보 redact
+    def test_troubleshoot_redacts_fix_outcome_summary(
+        self,
+        packager: OutputPackager,
+        staging_dir: Path,
+    ) -> None:
+        from scripts._shared.types import FixOutcome
+
+        bailout = BailOutContext(
+            step_number=4,
+            step_name_ko="검증",
+            component_ko="K8s 검증기",
+            ko_summary="검증 실패",
+            en_detail="validation error",
+            attempts_log=[
+                RetryAttempt(
+                    attempt_number=1,
+                    result=None,
+                    error=None,
+                    success=False,
+                    fix_outcome=FixOutcome(
+                        applied=True,
+                        summary_ko="수정 시도: secret=my-secret-value 제거",
+                    ),
+                ),
+            ],
+        )
+        packager.write_troubleshoot(staging_dir=staging_dir, bailout=bailout)
+        content = (staging_dir / "troubleshoot.md").read_text()
+        assert "[REDACTED]" in content
+        assert "my-secret-value" not in content
+
+    # 24. 민감정보 없는 en_detail → 원문 그대로
+    def test_troubleshoot_clean_detail_unchanged(
+        self,
+        packager: OutputPackager,
+        staging_dir: Path,
+    ) -> None:
+        bailout = BailOutContext(
+            step_number=4,
+            step_name_ko="검증",
+            component_ko="K8s 검증기",
+            ko_summary="검증 실패",
+            en_detail="Container securityContext is missing readOnlyRootFilesystem",
+            attempts_log=[],
+        )
+        packager.write_troubleshoot(staging_dir=staging_dir, bailout=bailout)
+        content = (staging_dir / "troubleshoot.md").read_text()
+        assert "Container securityContext is missing readOnlyRootFilesystem" in content
+        assert "[REDACTED]" not in content
+
+
+# ---------------------------------------------------------------------------
+# Important 3: skip_reasons pass-through 테스트
+# ---------------------------------------------------------------------------
+
+
+class TestSkipReasonsPassthrough:
+    """write_rationale_md — skip_reasons 런타임 사유 pass-through 테스트 (F-56, Important 3)."""
+
+    @pytest.fixture()
+    def staging_dir(self, tmp_path: Path) -> Path:
+        d = tmp_path / "staging"
+        d.mkdir()
+        return d
+
+    # 25. 런타임 skip_reasons 제공 시 rationale.md에 해당 값 포함
+    def test_runtime_skip_reason_used_over_default(
+        self,
+        packager: OutputPackager,
+        staging_dir: Path,
+        user_inputs: UserInputs,
+        analysis_result: AnalysisResult,
+        validation_report: ValidationReport,
+        config_source_map: dict[str, str],
+    ) -> None:
+        custom_reason = "kubectl v1.28 미설치: PATH에 kubectl 없음 (런타임 감지)"
+        with patch("scripts.output_packager._utc_now_iso", return_value=FIXED_UTC):
+            packager.write_rationale_md(
+                path=staging_dir / "rationale.md",
+                inputs=user_inputs,
+                analysis=analysis_result,
+                validation=validation_report,
+                config_source_map=config_source_map,
+                skipped=["kubectl_dry_run"],
+                skip_reasons={"kubectl_dry_run": custom_reason},
+            )
+        content = (staging_dir / "rationale.md").read_text()
+        assert custom_reason in content
+        # 기본 사유는 사용되지 않아야 함
+        assert "설치되어 있지 않아" not in content
+
+    # 26. skip_reasons 없는 키 → 기본값 fallback
+    def test_default_reason_fallback_when_no_runtime_reason(
+        self,
+        packager: OutputPackager,
+        staging_dir: Path,
+        user_inputs: UserInputs,
+        analysis_result: AnalysisResult,
+        validation_report: ValidationReport,
+        config_source_map: dict[str, str],
+    ) -> None:
+        with patch("scripts.output_packager._utc_now_iso", return_value=FIXED_UTC):
+            packager.write_rationale_md(
+                path=staging_dir / "rationale.md",
+                inputs=user_inputs,
+                analysis=analysis_result,
+                validation=validation_report,
+                config_source_map=config_source_map,
+                skipped=["kubectl_dry_run"],
+                skip_reasons={},
+            )
+        content = (staging_dir / "rationale.md").read_text()
+        assert "kubectl_dry_run" in content
+        # 기본 사유가 포함되어야 함
+        assert "설치되어 있지 않아" in content
+
+    # 27. write()에서 validation_outcome.skip_reasons가 rationale.md에 반영
+    def test_write_passes_skip_reasons_to_rationale(
+        self,
+        packager: OutputPackager,
+        staging_dir: Path,
+        user_inputs: UserInputs,
+        analysis_result: AnalysisResult,
+        validation_report: ValidationReport,
+        config_source_map: dict[str, str],
+    ) -> None:
+        custom_reason = "빌드 엔진 도커 미설치: 런타임 감지"
+        outcome = ValidationOutcome(
+            k8s_report=validation_report,
+            dry_run=None,
+            build=None,
+            skipped=["container_build"],
+            skip_reasons={"container_build": custom_reason},
+            bailed=False,
+        )
+        with patch("scripts.output_packager._utc_now_iso", return_value=FIXED_UTC):
+            packager.write(
+                staging_dir=staging_dir,
+                inputs=user_inputs,
+                analysis=analysis_result,
+                validation=validation_report,
+                config_source_map=config_source_map,
+                image_reference="eclipse-temurin:21-jre-alpine",
+                validation_outcome=outcome,
+            )
+        content = (staging_dir / "rationale.md").read_text()
+        assert custom_reason in content
+
+
+# ---------------------------------------------------------------------------
+# Important 4: Markdown injection defense 테스트
+# ---------------------------------------------------------------------------
+
+
+class TestMarkdownInjectionDefense:
+    """write_rationale_md — 구조화 필드 개행 차단 테스트 (Important 4)."""
+
+    @pytest.fixture()
+    def staging_dir(self, tmp_path: Path) -> Path:
+        d = tmp_path / "staging"
+        d.mkdir()
+        return d
+
+    # 28. inputs.app_name 개행 → ValueError
+    def test_app_name_newline_raises(
+        self,
+        packager: OutputPackager,
+        staging_dir: Path,
+        analysis_result: AnalysisResult,
+        validation_report: ValidationReport,
+        config_source_map: dict[str, str],
+    ) -> None:
+        malicious_inputs = UserInputs(
+            app_name="my-app\nevil: injected",
+            port=8080,
+            exposure="ClusterIP",
+            namespace="my-team",
+            output_dir=Path("/tmp/k8s-output"),
+            resource_hint="medium",
+        )
+        with pytest.raises(ValueError, match="inputs.app_name"):
+            packager.write_rationale_md(
+                path=staging_dir / "rationale.md",
+                inputs=malicious_inputs,
+                analysis=analysis_result,
+                validation=validation_report,
+                config_source_map=config_source_map,
+                skipped=[],
+            )
+
+    # 29. inputs.namespace 개행 → ValueError
+    def test_namespace_newline_raises(
+        self,
+        packager: OutputPackager,
+        staging_dir: Path,
+        analysis_result: AnalysisResult,
+        validation_report: ValidationReport,
+        config_source_map: dict[str, str],
+    ) -> None:
+        malicious_inputs = UserInputs(
+            app_name="my-app",
+            port=8080,
+            exposure="ClusterIP",
+            namespace="my-team\nevil: injected",
+            output_dir=Path("/tmp/k8s-output"),
+            resource_hint="medium",
+        )
+        with pytest.raises(ValueError, match="inputs.namespace"):
+            packager.write_rationale_md(
+                path=staging_dir / "rationale.md",
+                inputs=malicious_inputs,
+                analysis=analysis_result,
+                validation=validation_report,
+                config_source_map=config_source_map,
+                skipped=[],
+            )
+
+    # 30. write_troubleshoot — component_ko 개행 → ValueError
+    def test_troubleshoot_component_ko_newline_raises(
+        self,
+        packager: OutputPackager,
+        staging_dir: Path,
+    ) -> None:
+        bailout = BailOutContext(
+            step_number=4,
+            step_name_ko="검증",
+            component_ko="K8s 검증기\nevil: injected",
+            ko_summary="검증 실패",
+            en_detail="some error",
+            attempts_log=[],
+        )
+        with pytest.raises(ValueError, match="component_ko"):
+            packager.write_troubleshoot(staging_dir=staging_dir, bailout=bailout)
+
+
+# ---------------------------------------------------------------------------
+# Important 5: image_reference 방어 검증 테스트
+# ---------------------------------------------------------------------------
+
+
+class TestImageReferenceValidation:
+    """write_summary_json — validate_image_reference 진입부 호출 테스트 (Important 5)."""
+
+    @pytest.fixture()
+    def staging_dir(self, tmp_path: Path) -> Path:
+        d = tmp_path / "staging"
+        d.mkdir()
+        return d
+
+    # 31. latest 태그 → InvalidImageError
+    def test_latest_image_raises_invalid_image_error(
+        self,
+        packager: OutputPackager,
+        staging_dir: Path,
+        user_inputs: UserInputs,
+        analysis_result: AnalysisResult,
+        validation_report: ValidationReport,
+    ) -> None:
+        from scripts._shared.errors import InvalidImageError
+
+        with pytest.raises(InvalidImageError, match="latest"):
+            packager.write_summary_json(
+                path=staging_dir / "summary.json",
+                inputs=user_inputs,
+                analysis=analysis_result,
+                validation=validation_report,
+                image_reference="eclipse-temurin:latest",
+                skipped=[],
+                files=[],
+            )
+
+    # 32. 태그 누락 이미지 → InvalidImageError
+    def test_image_without_tag_raises_invalid_image_error(
+        self,
+        packager: OutputPackager,
+        staging_dir: Path,
+        user_inputs: UserInputs,
+        analysis_result: AnalysisResult,
+        validation_report: ValidationReport,
+    ) -> None:
+        from scripts._shared.errors import InvalidImageError
+
+        with pytest.raises(InvalidImageError):
+            packager.write_summary_json(
+                path=staging_dir / "summary.json",
+                inputs=user_inputs,
+                analysis=analysis_result,
+                validation=validation_report,
+                image_reference="eclipse-temurin",
+                skipped=[],
+                files=[],
+            )
+
+
+# ---------------------------------------------------------------------------
+# Important 6: JSON 결정성 테스트
+# ---------------------------------------------------------------------------
+
+
+class TestJsonDeterminism:
+    """write_summary_json — JSON 결정성 테스트 (Important 6)."""
+
+    @pytest.fixture()
+    def staging_dir(self, tmp_path: Path) -> Path:
+        d = tmp_path / "staging"
+        d.mkdir()
+        return d
+
+    # 33. skipped 순서 다른 입력 → sorted 출력으로 동일
+    def test_skipped_sorted_regardless_of_input_order(
+        self,
+        packager: OutputPackager,
+        staging_dir: Path,
+        user_inputs: UserInputs,
+        analysis_result: AnalysisResult,
+        validation_report: ValidationReport,
+    ) -> None:
+        path1 = staging_dir / "summary1.json"
+        path2 = staging_dir / "summary2.json"
+        with patch("scripts.output_packager._utc_now_iso", return_value=FIXED_UTC):
+            packager.write_summary_json(
+                path=path1,
+                inputs=user_inputs,
+                analysis=analysis_result,
+                validation=validation_report,
+                image_reference="eclipse-temurin:21-jre-alpine",
+                skipped=["z_last", "a_first", "m_middle"],
+                files=["Dockerfile"],
+            )
+            packager.write_summary_json(
+                path=path2,
+                inputs=user_inputs,
+                analysis=analysis_result,
+                validation=validation_report,
+                image_reference="eclipse-temurin:21-jre-alpine",
+                skipped=["m_middle", "z_last", "a_first"],
+                files=["Dockerfile"],
+            )
+        data1 = json.loads(path1.read_text())
+        data2 = json.loads(path2.read_text())
+        assert data1["validation"]["skipped"] == data2["validation"]["skipped"]
+        assert data1["validation"]["skipped"] == ["a_first", "m_middle", "z_last"]
+
+    # 34. files 순서 다른 입력 → sorted 출력으로 동일
+    def test_files_sorted_regardless_of_input_order(
+        self,
+        packager: OutputPackager,
+        staging_dir: Path,
+        user_inputs: UserInputs,
+        analysis_result: AnalysisResult,
+        validation_report: ValidationReport,
+    ) -> None:
+        path = staging_dir / "summary.json"
+        files_shuffled = ["service.yaml", "Dockerfile", "deployment.yaml"]
+        files_sorted = sorted(files_shuffled)
+        with patch("scripts.output_packager._utc_now_iso", return_value=FIXED_UTC):
+            packager.write_summary_json(
+                path=path,
+                inputs=user_inputs,
+                analysis=analysis_result,
+                validation=validation_report,
+                image_reference="eclipse-temurin:21-jre-alpine",
+                skipped=[],
+                files=files_shuffled,
+            )
+        data = json.loads(path.read_text())
+        assert data["files"] == files_sorted
+
+    # 35. trailing newline 존재
+    def test_trailing_newline_present(
+        self,
+        packager: OutputPackager,
+        staging_dir: Path,
+        user_inputs: UserInputs,
+        analysis_result: AnalysisResult,
+        validation_report: ValidationReport,
+    ) -> None:
+        path = staging_dir / "summary.json"
+        with patch("scripts.output_packager._utc_now_iso", return_value=FIXED_UTC):
+            packager.write_summary_json(
+                path=path,
+                inputs=user_inputs,
+                analysis=analysis_result,
+                validation=validation_report,
+                image_reference="eclipse-temurin:21-jre-alpine",
+                skipped=[],
+                files=[],
+            )
+        raw = path.read_text()
+        assert raw.endswith("\n")
+
+
+# ---------------------------------------------------------------------------
+# Important 7: troubleshoot 권장 조치 간소화 테스트
+# ---------------------------------------------------------------------------
+
+
+class TestTroubleshootGuidanceSimplified:
+    """write_troubleshoot — 하드코딩 권장 조치 제거, 컴포넌트 힌트만 유지 테스트 (Important 7)."""
+
+    @pytest.fixture()
+    def staging_dir(self, tmp_path: Path) -> Path:
+        d = tmp_path / "staging"
+        d.mkdir()
+        return d
+
+    # 36. 하드코딩 "application-design.md §8" 문구 미존재
+    def test_hardcoded_guidance_removed(
+        self,
+        packager: OutputPackager,
+        staging_dir: Path,
+    ) -> None:
+        bailout = BailOutContext(
+            step_number=4,
+            step_name_ko="검증",
+            component_ko="K8s 검증기",
+            ko_summary="검증 실패",
+            en_detail="validation error",
+            attempts_log=[],
+        )
+        packager.write_troubleshoot(staging_dir=staging_dir, bailout=bailout)
+        content = (staging_dir / "troubleshoot.md").read_text()
+        assert "application-design.md §8" not in content
+        assert "수동 manifest 편집 후 재시도" not in content
+
+    # 37. component_ko 힌트가 권장 조치 섹션에 포함
+    def test_component_ko_hint_in_guidance(
+        self,
+        packager: OutputPackager,
+        staging_dir: Path,
+    ) -> None:
+        bailout = BailOutContext(
+            step_number=4,
+            step_name_ko="검증",
+            component_ko="K8s Dry-Run 검증기",
+            ko_summary="검증 실패",
+            en_detail="validation error",
+            attempts_log=[],
+        )
+        packager.write_troubleshoot(staging_dir=staging_dir, bailout=bailout)
+        content = (staging_dir / "troubleshoot.md").read_text()
+        assert "K8s Dry-Run 검증기" in content
+        assert "수동 개입 후 재실행 필요" in content
