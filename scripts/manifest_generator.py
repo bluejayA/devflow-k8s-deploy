@@ -11,6 +11,7 @@ from __future__ import annotations
 import re
 
 from scripts._shared.image_ref import validate_image_reference
+from scripts._shared.text_safety import reject_unsafe_chars
 from scripts._shared.types import (
     AnalysisResult,
     ProbeConfig,
@@ -24,9 +25,6 @@ from scripts.template_renderer import TemplateRenderer
 # 시작/끝은 알파뉴메릭, 중간에 하이픈 허용
 _DNS1123_LABEL_RE = re.compile(r"^[a-z0-9]([a-z0-9\-]{0,61}[a-z0-9])?$")
 
-# 개행/제어문자 차단 패턴 (YAML 인젝션 방어)
-_UNSAFE_CHARS = ("\n", "\r", "\x00")
-
 # 기본 replicas (v0.1.0 고정값, v0.2+에서 설정화 예정)
 _DEFAULT_REPLICAS = 2
 
@@ -37,6 +35,8 @@ _ALLOWED_EXPOSURES: frozenset[str] = frozenset({"ClusterIP", "NodePort", "LoadBa
 def _validate_manifest_field(value: str, field_name: str) -> None:
     """YAML 컨텍스트에 삽입될 문자열에서 개행/NUL 차단.
 
+    scripts._shared.text_safety.reject_unsafe_chars에 위임.
+
     Args:
         value: 검증할 문자열.
         field_name: 오류 메시지에 포함될 필드명.
@@ -44,11 +44,7 @@ def _validate_manifest_field(value: str, field_name: str) -> None:
     Raises:
         ValueError: 개행 또는 NUL 문자가 포함된 경우.
     """
-    for ch in _UNSAFE_CHARS:
-        if ch in value:
-            raise ValueError(
-                f"YAML 주입 방어: {field_name}에 개행 또는 제어문자 포함 금지: {value!r}"
-            )
+    reject_unsafe_chars(value, field_name, message_prefix="YAML 주입 방어")
 
 
 def _validate_dns1123_label(value: str, field_name: str) -> None:

@@ -10,15 +10,15 @@ from typing import Literal
 
 from scripts._shared.errors import InvalidImageError
 from scripts._shared.image_ref import validate_image_reference
+from scripts._shared.text_safety import reject_unsafe_chars
 from scripts._shared.types import BuildPlan, ResourceDefaults, UserInputs
 from scripts.template_renderer import TemplateRenderer
-
-# Dockerfile RUN/COPY에 주입될 수 있는 위험 문자
-_UNSAFE_COMMAND_CHARS = ("\n", "\r", "\x00")
 
 
 def _validate_command(value: str, field_name: str) -> None:
     """Dockerfile RUN/COPY에 주입되는 문자열에 개행/NUL 차단.
+
+    scripts._shared.text_safety.reject_unsafe_chars에 위임.
 
     Args:
         value: 검증할 문자열.
@@ -27,12 +27,12 @@ def _validate_command(value: str, field_name: str) -> None:
     Raises:
         InvalidImageError: 개행 또는 NUL 문자가 포함된 경우.
     """
-    for ch in _UNSAFE_COMMAND_CHARS:
-        if ch in value:
-            raise InvalidImageError(
-                f"Dockerfile 주입 방어: {field_name}에 개행 또는 제어문자 포함 금지: "
-                f"{value!r}"
-            )
+    reject_unsafe_chars(
+        value,
+        field_name,
+        exc_type=InvalidImageError,
+        message_prefix="Dockerfile 주입 방어",
+    )
 
 
 class DockerfileGenerator:
