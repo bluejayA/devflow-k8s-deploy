@@ -13,11 +13,12 @@ STEP 5: 패키징 + skipped 기록 (OutputPackager) with AtomicWriter commit
 from __future__ import annotations
 
 import dataclasses
+import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, NoReturn, cast
 
-from scripts._shared.errors import BailOutError, InvalidImageError
+from scripts._shared.errors import BailOutError, InvalidImageError, UserAbort
 from scripts._shared.image_ref import validate_image_reference
 from scripts._shared.text_safety import reject_unsafe_chars
 from scripts._shared.types import (
@@ -358,7 +359,13 @@ class SkillPipeline:
             )
 
             final_path = writer.commit()
-            return dataclasses.replace(result, final_path=final_path)
+            # F-42: validation exit code를 PackagingResult에 전파
+            validation_exit_code = validation_outcome.k8s_report.exit_code
+            return dataclasses.replace(
+                result,
+                final_path=final_path,
+                validation_exit_code=validation_exit_code,
+            )
 
     # ─── STEP 1: 입력 수집 ───────────────────────────────────────────────────
 
@@ -721,3 +728,157 @@ class SkillPipeline:
             image_reference=image_reference,
             validation_outcome=validation_outcome,
         )
+
+
+# ─── CLI 진입점 ────────────────────────────────────────────────────────────────
+
+
+def _build_default_dependencies(project_dir: Path) -> PipelineDependencies:
+    """실제 컴포넌트 인스턴스를 조립.
+
+    CLI에서 호출. 테스트에서는 MagicMock으로 교체.
+    """
+    from scripts._shared.defaults import load_builtin_defaults  # noqa: F401 — 사이드이펙트 없음
+    from scripts.config_loader import ConfigLoader
+    from scripts.dockerfile_generator import DockerfileGenerator
+    from scripts.kubectl_dry_runner import KubectlDryRunner
+    from scripts.manifest_generator import ManifestGenerator
+    from scripts.output_packager import OutputPackager
+    from scripts.pipeline.build_runner import BuildRunner
+    from scripts.project_analyzer import ProjectAnalyzer
+    from scripts.stacks.base import StackModule
+    from scripts.stacks.jvm import JvmStackModule
+    from scripts.template_renderer import TemplateRenderer
+    from scripts.validate_k8s import K8sValidator
+
+    config_loader = ConfigLoader()
+
+    # 플러그인 루트 기준 템플릿 루트 결정
+    plugin_root = Path(
+        os.environ.get("CLAUDE_PLUGIN_ROOT", str(Path(__file__).parent.parent.parent))
+    )
+    template_root = plugin_root / "templates"
+    template_renderer = TemplateRenderer(template_root)
+
+    # StackRegistry: v0.1.0은 JVM만
+    stack_registry: dict[str, StackModule] = {"jvm": JvmStackModule()}
+
+    # config 미리 로드하여 build engine/timeout 추출
+    config = config_loader.load(project_dir)
+    build_section = _safe_section(config.raw, "build")
+    build_engine = build_section.get("engine", "skip")
+    build_timeout = int(build_section.get("build_timeout_seconds", 600))
+
+    project_analyzer = ProjectAnalyzer(
+        config_loader=config_loader,
+        stack_registry=stack_registry,
+        prompt_callback=None,  # CLI는 자동 모드
+    )
+    dockerfile_generator = DockerfileGenerator(template_renderer)
+    manifest_generator = ManifestGenerator(template_renderer)
+    k8s_validator = K8sValidator()
+    kubectl_dry_runner = KubectlDryRunner()
+    # build_engine 화이트리스트 적용 — config validation이 없는 CLI 경로의 안전망
+    _allowed_engines = ("skip", "auto", "docker", "podman", "nerdctl")
+    safe_engine = build_engine if build_engine in _allowed_engines else "skip"
+    build_runner = BuildRunner(
+        build_engine=cast(
+            Literal["skip", "auto", "docker", "podman", "nerdctl"],
+            safe_engine,
+        ),
+        build_timeout_seconds=build_timeout,
+    )
+    output_packager = OutputPackager()
+
+    return PipelineDependencies(
+        config_loader=config_loader,
+        project_analyzer=project_analyzer,
+        dockerfile_generator=dockerfile_generator,
+        manifest_generator=manifest_generator,
+        k8s_validator=k8s_validator,
+        kubectl_dry_runner=kubectl_dry_runner,
+        build_runner=build_runner,
+        output_packager=output_packager,
+    )
+
+
+def _compute_cli_exit_code(result: PackagingResult) -> int:
+    """PackagingResult → F-42 exit code 변환.
+
+    우선순위: result.validation_exit_code → 0 (기본 성공).
+    """
+    if result.validation_exit_code is not None:
+        return result.validation_exit_code
+    return 0
+
+
+def main(argv: list[str] | None = None) -> int:
+    """CLI 엔트리포인트.
+
+    사용:
+      python ${CLAUDE_PLUGIN_ROOT}/scripts/pipeline/orchestrator.py \
+        --project-dir . --output-dir k8s-output/
+
+    Exit code (F-42):
+      0: 모든 검증 PASS
+      1: FAIL 존재 또는 BailOutError
+      2: FAIL 없음 + WARN (soft-success)
+      130: SIGINT / 사용자 중단
+    """
+    import argparse
+    import sys
+
+    parser = argparse.ArgumentParser(
+        prog="devflow-k8s-deploy",
+        description="devflow-k8s-deploy v0.1.0 — JVM 프로젝트를 k8s 배포 파일로 변환",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+예시:
+  python ${CLAUDE_PLUGIN_ROOT}/scripts/pipeline/orchestrator.py \\
+    --project-dir . --output-dir k8s-output/
+  python ${CLAUDE_PLUGIN_ROOT}/scripts/pipeline/orchestrator.py \\
+    --project-dir /path/to/spring-boot-app --output-dir deploy/
+
+Exit code:
+  0: PASS  /  1: FAIL  /  2: WARN (soft-success)
+  CI: if [ $? -le 2 ]; then continue; fi
+""",
+    )
+    parser.add_argument(
+        "--project-dir",
+        type=Path,
+        required=True,
+        help="분석할 JVM 프로젝트 루트 디렉토리",
+    )
+    parser.add_argument(
+        "--output-dir",
+        type=Path,
+        required=True,
+        help="생성된 Dockerfile + manifest 출력 디렉토리",
+    )
+    args = parser.parse_args(argv)
+
+    try:
+        deps = _build_default_dependencies(args.project_dir)
+        pipeline = SkillPipeline(deps)
+        result = pipeline.run(args.project_dir, args.output_dir)
+        return _compute_cli_exit_code(result)
+    except BailOutError as exc:
+        print(f"\n[BAIL-OUT] {exc}", file=sys.stderr)
+        print(
+            f"troubleshoot.md 확인: {args.output_dir}/troubleshoot.md",
+            file=sys.stderr,
+        )
+        return 1
+    except UserAbort as exc:
+        print(f"\n[사용자 중단] {exc}", file=sys.stderr)
+        return 130
+    except Exception as exc:  # noqa: BLE001 — 최상위 CLI 경계
+        print(f"\n[오류] {type(exc).__name__}: {exc}", file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    import sys
+
+    sys.exit(main())

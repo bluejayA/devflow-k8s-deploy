@@ -287,6 +287,7 @@ class PackagingResult:
     files_written: list[str]
     troubleshoot_written: bool
     final_path: Path | None = None  # AtomicWriter.commit() 결과 — SkillPipeline이 채움
+    validation_exit_code: int | None = None  # F-42 exit code (0/1/2). None이면 0으로 처리
 
 
 @dataclass(frozen=True)

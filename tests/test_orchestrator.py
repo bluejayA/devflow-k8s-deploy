@@ -14,7 +14,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import Any
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -42,6 +42,8 @@ from scripts.pipeline.orchestrator import (
     HelpCatalog,
     PipelineDependencies,
     SkillPipeline,
+    _compute_cli_exit_code,
+    main,
 )
 
 # ─── Fixtures / Helpers ────────────────────────────────────────────────────────
@@ -670,3 +672,79 @@ class TestImageTagValidation:
         pipeline.run(tmp_path / "project", tmp_path / "output")
 
         mocks["build_runner"].build.assert_called_once()
+
+
+# ─── CLI main 테스트 ─────────────────────────────────────────────────────────────
+
+
+class TestCliMain:
+    """CLI main() 함수 — argparse + exit code 검증."""
+
+    def test_cli_argparse_required_args(self) -> None:
+        """--project-dir / --output-dir 없이 호출 시 SystemExit(2)."""
+        with pytest.raises(SystemExit) as exc_info:
+            main([])
+        assert exc_info.value.code == 2
+
+    def test_cli_main_success(self, tmp_path: Path) -> None:
+        """정상 경로: main() 이 0을 반환하고 _build_default_dependencies가 monkeypatch로 교체됨."""
+        deps, _mocks = _make_deps()
+
+        # SkillPipeline.run의 반환값에 validation_exit_code=0 설정
+        packaging_result = PackagingResult(
+            final_dir=tmp_path / "output",
+            files_written=["summary.json", "rationale.md"],
+            troubleshoot_written=False,
+            final_path=tmp_path / "output",
+            validation_exit_code=0,
+        )
+
+        argv = [
+            "--project-dir", str(tmp_path / "project"),
+            "--output-dir", str(tmp_path / "output"),
+        ]
+        with patch(
+            "scripts.pipeline.orchestrator._build_default_dependencies",
+            return_value=deps,
+        ), patch.object(SkillPipeline, "run", return_value=packaging_result):
+            exit_code = main(argv)
+
+        assert exit_code == 0
+
+    def test_cli_main_bailout_returns_1(self, tmp_path: Path) -> None:
+        """BailOutError 발생 시 main()이 1을 반환."""
+        argv = [
+            "--project-dir", str(tmp_path / "project"),
+            "--output-dir", str(tmp_path / "output"),
+        ]
+        with patch(
+            "scripts.pipeline.orchestrator._build_default_dependencies",
+            side_effect=BailOutError("검증 실패"),
+        ):
+            exit_code = main(argv)
+
+        assert exit_code == 1
+
+
+class TestComputeCliExitCode:
+    """_compute_cli_exit_code 단위 테스트."""
+
+    def test_returns_validation_exit_code_when_set(self) -> None:
+        """validation_exit_code=2 → 2 반환."""
+        result = PackagingResult(
+            final_dir=Path("/tmp"),
+            files_written=[],
+            troubleshoot_written=False,
+            validation_exit_code=2,
+        )
+        assert _compute_cli_exit_code(result) == 2
+
+    def test_returns_0_when_validation_exit_code_is_none(self) -> None:
+        """validation_exit_code=None → 0 반환 (기본 성공)."""
+        result = PackagingResult(
+            final_dir=Path("/tmp"),
+            files_written=[],
+            troubleshoot_written=False,
+            validation_exit_code=None,
+        )
+        assert _compute_cli_exit_code(result) == 0
