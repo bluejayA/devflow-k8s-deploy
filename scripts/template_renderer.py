@@ -53,6 +53,8 @@ class TemplateRenderer:
             finalize=lambda x: x if x is not None else "",
             keep_trailing_newline=False,
             undefined=StrictUndefined,
+            trim_blocks=True,       # {% %} 블록 뒤 개행 자동 제거
+            lstrip_blocks=True,     # {% %} 블록 앞 공백/탭 자동 제거
         )
 
     def render_dockerfile(self, stack: str, context: dict[str, object]) -> str:

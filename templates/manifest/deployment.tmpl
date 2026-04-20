@@ -77,6 +77,10 @@ spec:
               mountPath: /var/log
       volumes:
         - name: tmp
-          emptyDir: {}
+          # DoS 방어 — 노드 디스크 소진 방지 (Tomcat work dir, JVM temp files)
+          emptyDir:
+            sizeLimit: 50Mi
         - name: var-log
-          emptyDir: {}
+          # DoS 방어 + Spring Boot 런타임 로그 경로
+          emptyDir:
+            sizeLimit: 100Mi
