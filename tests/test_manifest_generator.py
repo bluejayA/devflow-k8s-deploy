@@ -586,3 +586,285 @@ def test_generate_deployment_rejects_newline_in_image(
             user_inputs, analysis_result, resource_defaults, http_probe_config,
             image="myrepo/my-app:1.0.0\nENV EVIL=1",
         )
+
+
+# ---------------------------------------------------------------------------
+# Critical 1: generate_service / generate_serviceaccount 입력 검증
+# ---------------------------------------------------------------------------
+
+
+# 25. generate_service — app_name 개행 차단
+def test_generate_service_rejects_newline_in_app_name(
+    generator: ManifestGenerator,
+) -> None:
+    bad = UserInputs(
+        app_name="my-app\nevil",
+        port=8080,
+        exposure="ClusterIP",
+        namespace="dev",
+        output_dir=Path("/tmp/output"),
+        resource_hint="medium",
+    )
+    with pytest.raises(ValueError):
+        generator.generate_service(bad)
+
+
+# 26. generate_service — namespace DNS-1123 위반 차단
+def test_generate_service_rejects_invalid_namespace(
+    generator: ManifestGenerator,
+) -> None:
+    bad = UserInputs(
+        app_name="my-app",
+        port=8080,
+        exposure="ClusterIP",
+        namespace="Dev-NS",
+        output_dir=Path("/tmp/output"),
+        resource_hint="medium",
+    )
+    with pytest.raises(ValueError):
+        generator.generate_service(bad)
+
+
+# 27. generate_serviceaccount — app_name DNS-1123 위반 차단
+def test_generate_serviceaccount_rejects_invalid_app_name(
+    generator: ManifestGenerator,
+) -> None:
+    bad = UserInputs(
+        app_name="MyApp",
+        port=8080,
+        exposure="ClusterIP",
+        namespace="dev",
+        output_dir=Path("/tmp/output"),
+        resource_hint="medium",
+    )
+    with pytest.raises(ValueError):
+        generator.generate_serviceaccount(bad)
+
+
+# 28. generate_serviceaccount — namespace 개행 차단
+def test_generate_serviceaccount_rejects_newline_in_namespace(
+    generator: ManifestGenerator,
+) -> None:
+    bad = UserInputs(
+        app_name="my-app",
+        port=8080,
+        exposure="ClusterIP",
+        namespace="dev\nevil",
+        output_dir=Path("/tmp/output"),
+        resource_hint="medium",
+    )
+    with pytest.raises(ValueError):
+        generator.generate_serviceaccount(bad)
+
+
+# ---------------------------------------------------------------------------
+# Critical 2: exposure whitelist 런타임 검증
+# ---------------------------------------------------------------------------
+
+
+# 29. generate_service — 허용되지 않은 exposure 거부
+def test_generate_service_rejects_invalid_exposure(
+    generator: ManifestGenerator,
+) -> None:
+    bad = UserInputs(
+        app_name="my-app",
+        port=8080,
+        exposure="ClusterIP\n  externalIPs: [1.2.3.4]",  # type: ignore[arg-type]
+        namespace="dev",
+        output_dir=Path("/tmp/output"),
+        resource_hint="medium",
+    )
+    with pytest.raises(ValueError, match="exposure"):
+        generator.generate_service(bad)
+
+
+# 30. generate_service — 임의 문자열 exposure 거부
+def test_generate_service_rejects_arbitrary_exposure(
+    generator: ManifestGenerator,
+) -> None:
+    bad = UserInputs(
+        app_name="my-app",
+        port=8080,
+        exposure="ExternalName",  # type: ignore[arg-type]
+        namespace="dev",
+        output_dir=Path("/tmp/output"),
+        resource_hint="medium",
+    )
+    with pytest.raises(ValueError, match="exposure"):
+        generator.generate_service(bad)
+
+
+# 31. generate_service — LoadBalancer 허용
+def test_generate_service_allows_loadbalancer(
+    generator: ManifestGenerator,
+) -> None:
+    inputs = UserInputs(
+        app_name="my-app",
+        port=8080,
+        exposure="LoadBalancer",
+        namespace="dev",
+        output_dir=Path("/tmp/output"),
+        resource_hint="medium",
+    )
+    result = generator.generate_service(inputs)
+    doc = yaml.safe_load(result)
+    assert doc["spec"]["type"] == "LoadBalancer"
+
+
+# ---------------------------------------------------------------------------
+# Important 5: port 런타임 검증
+# ---------------------------------------------------------------------------
+
+
+# 32. generate_deployment — port=0 거부
+def test_generate_deployment_rejects_port_zero(
+    generator: ManifestGenerator,
+    analysis_result: AnalysisResult,
+    resource_defaults: ResourceDefaults,
+    http_probe_config: ProbeConfig,
+) -> None:
+    bad = UserInputs(
+        app_name="my-app",
+        port=0,
+        exposure="ClusterIP",
+        namespace="dev",
+        output_dir=Path("/tmp/output"),
+        resource_hint="medium",
+    )
+    with pytest.raises(ValueError, match="port"):
+        generator.generate_deployment(
+            bad, analysis_result, resource_defaults, http_probe_config,
+            image="myrepo/my-app:1.0.0",
+        )
+
+
+# 33. generate_deployment — port=65536 거부
+def test_generate_deployment_rejects_port_out_of_range(
+    generator: ManifestGenerator,
+    analysis_result: AnalysisResult,
+    resource_defaults: ResourceDefaults,
+    http_probe_config: ProbeConfig,
+) -> None:
+    bad = UserInputs(
+        app_name="my-app",
+        port=65536,
+        exposure="ClusterIP",
+        namespace="dev",
+        output_dir=Path("/tmp/output"),
+        resource_hint="medium",
+    )
+    with pytest.raises(ValueError, match="port"):
+        generator.generate_deployment(
+            bad, analysis_result, resource_defaults, http_probe_config,
+            image="myrepo/my-app:1.0.0",
+        )
+
+
+# 34. generate_service — port=0 거부
+def test_generate_service_rejects_port_zero(
+    generator: ManifestGenerator,
+) -> None:
+    bad = UserInputs(
+        app_name="my-app",
+        port=0,
+        exposure="ClusterIP",
+        namespace="dev",
+        output_dir=Path("/tmp/output"),
+        resource_hint="medium",
+    )
+    with pytest.raises(ValueError, match="port"):
+        generator.generate_service(bad)
+
+
+# 35. generate_service — port=65535 허용 (경계값)
+def test_generate_service_allows_max_port(
+    generator: ManifestGenerator,
+) -> None:
+    inputs = UserInputs(
+        app_name="my-app",
+        port=65535,
+        exposure="ClusterIP",
+        namespace="dev",
+        output_dir=Path("/tmp/output"),
+        resource_hint="medium",
+    )
+    result = generator.generate_service(inputs)
+    assert result  # no raise
+
+
+# ---------------------------------------------------------------------------
+# Important 6: probe.path 개행 검증
+# ---------------------------------------------------------------------------
+
+
+# 36. generate_deployment — liveness probe.path에 개행 포함 시 차단
+def test_generate_deployment_rejects_newline_in_probe_path(
+    generator: ManifestGenerator,
+    user_inputs: UserInputs,
+    analysis_result: AnalysisResult,
+    resource_defaults: ResourceDefaults,
+) -> None:
+    bad_probe = ProbeConfig(
+        liveness=ProbeSpec(kind="http", path="/health\nevil: true", port=8080),
+        readiness=ProbeSpec(kind="http", path="/actuator/health/readiness", port=8080),
+    )
+    with pytest.raises(ValueError, match="probe"):
+        generator.generate_deployment(
+            user_inputs, analysis_result, resource_defaults, bad_probe,
+            image="myrepo/my-app:1.0.0",
+        )
+
+
+# 37. generate_deployment — readiness probe.path에 개행 포함 시 차단
+def test_generate_deployment_rejects_newline_in_readiness_probe_path(
+    generator: ManifestGenerator,
+    user_inputs: UserInputs,
+    analysis_result: AnalysisResult,
+    resource_defaults: ResourceDefaults,
+) -> None:
+    bad_probe = ProbeConfig(
+        liveness=ProbeSpec(kind="http", path="/actuator/health/liveness", port=8080),
+        readiness=ProbeSpec(kind="http", path="/health\nevil: injected", port=8080),
+    )
+    with pytest.raises(ValueError, match="probe"):
+        generator.generate_deployment(
+            user_inputs, analysis_result, resource_defaults, bad_probe,
+            image="myrepo/my-app:1.0.0",
+        )
+
+
+# ---------------------------------------------------------------------------
+# Important 8: emptyDir sizeLimit 기본값
+# ---------------------------------------------------------------------------
+
+
+# 38. emptyDir volumes에 sizeLimit 있음
+def test_generate_deployment_emptydir_sizelimit(
+    generator: ManifestGenerator,
+    user_inputs: UserInputs,
+    analysis_result: AnalysisResult,
+    resource_defaults: ResourceDefaults,
+    http_probe_config: ProbeConfig,
+) -> None:
+    result = generator.generate_deployment(
+        user_inputs, analysis_result, resource_defaults, http_probe_config,
+        image="myrepo/my-app:1.0.0",
+    )
+    doc = yaml.safe_load(result)
+    pod_spec = doc["spec"]["template"]["spec"]
+    volumes_by_name = {v["name"]: v for v in pod_spec["volumes"]}
+
+    assert "tmp" in volumes_by_name
+    assert "var-log" in volumes_by_name
+
+    tmp_vol = volumes_by_name["tmp"]
+    varlog_vol = volumes_by_name["var-log"]
+
+    # DoS 방어 sizeLimit 존재 확인
+    assert "emptyDir" in tmp_vol
+    assert "sizeLimit" in tmp_vol["emptyDir"], "tmp emptyDir에 sizeLimit 없음"
+    assert tmp_vol["emptyDir"]["sizeLimit"] == "50Mi"
+
+    assert "emptyDir" in varlog_vol
+    assert "sizeLimit" in varlog_vol["emptyDir"], "var-log emptyDir에 sizeLimit 없음"
+    assert varlog_vol["emptyDir"]["sizeLimit"] == "100Mi"
