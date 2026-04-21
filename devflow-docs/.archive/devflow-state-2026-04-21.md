@@ -1,16 +1,19 @@
 # DevFlow State
 
 ## Current Phase
-complete
+finished
 
 ## Current Stage
-Finishing branch — PR 생성 완료, 머지 대기
+v0.1.0 Released — flow terminated (2026-04-21)
 
 ## Finishing Choice
-B (PR pending)
+B — PR #2 merged, v0.1.0 tagged + released
 
 ## PR URL
 https://github.com/bluejayA/devflow-k8s-deploy/pull/2
+
+## Release
+https://github.com/bluejayA/devflow-k8s-deploy/releases/tag/v0.1.0
 
 ## Approved Units (2026-04-17)
 **Source**: devflow-docs/inception/units.md (Standard depth)

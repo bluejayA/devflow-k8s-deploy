@@ -42,3 +42,5 @@
   - P3 (Important): UserInputs.output_dir 무시 (prompt 모드) → prompt 모드에서 inputs 우선, 자동 모드는 method arg → commit f9f95cf
   - 최종: 613 tests pass. aidlc-finishing-a-development-branch 대기.
 - 2026-04-21: **aidlc-finishing-a-development-branch 옵션 B 선택 (PR 생성)** — `git push -u origin feature/v0.1.0-construction` + `gh pr create --base main`. PR URL: https://github.com/bluejayA/devflow-k8s-deploy/pull/2. 워크트리 유지 (머지 전까지). state는 `complete` + `Finishing Choice: B (PR pending)` 상태로 보존 — 다음 재개 시 PR 머지 자동 확인 경로 활성.
+- 2026-04-21: **PR #2 머지 완료** (merge commit c718051 on main) → v0.1.0 annotated tag + push + GitHub Release 생성 (https://github.com/bluejayA/devflow-k8s-deploy/releases/tag/v0.1.0). README v0.1.0 Released 상태로 업데이트 (commit 34606bc).
+- 2026-04-21: **Flow finished — PR merged** — devflow-state/session-summary를 `devflow-docs/.archive/{name}-2026-04-21.md`로 이동 + state의 Current Phase `complete` → `finished` 반영. `-construction` worktree 제거 + `feature/v0.1.0-construction` 로컬 브랜치 삭제. main 단일 worktree로 복귀.
