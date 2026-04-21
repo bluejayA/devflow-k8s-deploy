@@ -53,6 +53,15 @@ from scripts._shared.types import (
 _DEFAULT_JDK_VERSION = 21
 _DEFAULT_PORT = 8080
 
+# 빌드 시스템별 공식 builder 이미지 (Maven/Gradle CLI 내장)
+# Gradle 공식: https://hub.docker.com/_/gradle  (jdk21-alpine 태그 제공)
+# Maven 공식:  https://hub.docker.com/_/maven   (3.9-eclipse-temurin-21-alpine 태그 제공)
+_BUILDER_IMAGE_BY_BUILD_SYSTEM: dict[str, str] = {
+    "gradle": "gradle:jdk{jdk_version}-alpine",
+    "maven": "maven:3.9-eclipse-temurin-{jdk_version}-alpine",
+}
+_FALLBACK_BUILDER = "eclipse-temurin:{jdk_version}-jdk-alpine"
+
 # Spring Boot Gradle plugin ID (KTS + Groovy 양쪽)
 _SPRING_BOOT_PLUGIN_RE = re.compile(
     r"""id\s*\(?\s*["']org\.springframework\.boot["']\s*\)?\s*version\s*["']([^"']+)["']"""
@@ -138,16 +147,28 @@ class JvmStackModule:
     def build_plan(self, detect_result: StackDetectResult) -> BuildPlan:
         """detect_result 기반 BuildPlan 생성.
 
+        builder_image:
+          - Gradle: gradle:jdk{N}-alpine  (Gradle CLI 내장)
+          - Maven:  maven:3.9-eclipse-temurin-{N}-alpine  (mvn CLI 내장)
+          - 기타(jvm-generic 등): eclipse-temurin:{N}-jdk-alpine  (fallback)
+
+        runner_image: eclipse-temurin:{N}-jre-alpine  (slim runtime, 공통)
+
         build_cmd:
           - Maven: "mvn package"
           - Gradle: "gradle bootJar"
         """
-        maven = detect_result.build_system == "maven"
         jdk_version = _DEFAULT_JDK_VERSION
+        build_system = detect_result.build_system or ""
 
+        template = _BUILDER_IMAGE_BY_BUILD_SYSTEM.get(build_system, _FALLBACK_BUILDER)
+        builder_image = template.replace("{jdk_version}", str(jdk_version))
+        runner_image = f"eclipse-temurin:{jdk_version}-jre-alpine"
+
+        maven = build_system == "maven"
         return BuildPlan(
-            builder_image=f"eclipse-temurin:{jdk_version}-jdk-alpine",
-            runner_image=f"eclipse-temurin:{jdk_version}-jre-alpine",
+            builder_image=builder_image,
+            runner_image=runner_image,
             build_cmd="mvn package" if maven else "gradle bootJar",
             artifact_path="target/*.jar" if maven else "build/libs/*.jar",
         )

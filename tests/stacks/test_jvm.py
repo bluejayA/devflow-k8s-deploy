@@ -369,8 +369,8 @@ class TestBuildPlan:
         assert plan.build_cmd == "mvn package"
         assert plan.artifact_path == "target/*.jar"
 
-    def test_builder_image_format(self, tmp_path: Path) -> None:
-        """builder_image은 'eclipse-temurin:{N}-jdk-alpine' 형식."""
+    def test_build_plan_gradle_uses_gradle_image(self, tmp_path: Path) -> None:
+        """Gradle → builder_image은 'gradle:' 공식 이미지 사용."""
         from scripts.stacks.jvm import JvmStackModule
 
         proj = make_gradle_kts_spring3(tmp_path)
@@ -379,12 +379,45 @@ class TestBuildPlan:
 
         plan = JvmStackModule().build_plan(detect_result)
 
-        import re
+        assert plan.builder_image.startswith("gradle:"), (
+            f"Gradle 빌드 시스템은 gradle: 이미지를 사용해야 함. 실제: {plan.builder_image}"
+        )
 
-        assert re.match(r"eclipse-temurin:\d+-jdk-alpine", plan.builder_image)
+    def test_build_plan_maven_uses_maven_image(self, tmp_path: Path) -> None:
+        """Maven → builder_image은 'maven:' 공식 이미지 사용."""
+        from scripts.stacks.jvm import JvmStackModule
+
+        proj = make_maven_spring2(tmp_path)
+        detect_result = JvmStackModule().detect(proj)
+        assert detect_result is not None
+
+        plan = JvmStackModule().build_plan(detect_result)
+
+        assert plan.builder_image.startswith("maven:"), (
+            f"Maven 빌드 시스템은 maven: 이미지를 사용해야 함. 실제: {plan.builder_image}"
+        )
+
+    def test_build_plan_jvm_generic_gradle_uses_gradle_image(self, tmp_path: Path) -> None:
+        """jvm-generic (Ktor, Gradle 빌드 시스템) → builder_image은 gradle: 이미지 사용.
+
+        빌드 시스템 기준으로 이미지를 선택하므로, framework가 jvm-generic/ktor여도
+        Gradle 빌드 시스템이면 gradle: 이미지를 사용한다.
+        """
+        from scripts.stacks.jvm import JvmStackModule
+
+        proj = make_gradle_generic_jvm(tmp_path)
+        detect_result = JvmStackModule().detect(proj)
+        assert detect_result is not None
+        assert detect_result.build_system == "gradle"
+
+        plan = JvmStackModule().build_plan(detect_result)
+
+        assert plan.builder_image.startswith("gradle:"), (
+            f"Gradle 빌드 시스템이면 gradle: 이미지 사용. 실제: {plan.builder_image}"
+        )
 
     def test_runner_image_format(self, tmp_path: Path) -> None:
-        """runner_image은 'eclipse-temurin:{N}-jre-alpine' 형식."""
+        """runner_image은 'eclipse-temurin:{N}-jre-alpine' 형식 (Gradle/Maven 공통)."""
         from scripts.stacks.jvm import JvmStackModule
 
         proj = make_gradle_kts_spring3(tmp_path)
