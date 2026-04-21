@@ -41,3 +41,4 @@
   - P2 (Important): TimeoutExpired 시 text=True로 str 반환되는데 `.decode()` 호출 → `_maybe_decode()` 헬퍼로 방어 → commit abcd8ae
   - P3 (Important): UserInputs.output_dir 무시 (prompt 모드) → prompt 모드에서 inputs 우선, 자동 모드는 method arg → commit f9f95cf
   - 최종: 613 tests pass. aidlc-finishing-a-development-branch 대기.
+- 2026-04-21: **aidlc-finishing-a-development-branch 옵션 B 선택 (PR 생성)** — `git push -u origin feature/v0.1.0-construction` + `gh pr create --base main`. PR URL: https://github.com/bluejayA/devflow-k8s-deploy/pull/2. 워크트리 유지 (머지 전까지). state는 `complete` + `Finishing Choice: B (PR pending)` 상태로 보존 — 다음 재개 시 PR 머지 자동 확인 경로 활성.

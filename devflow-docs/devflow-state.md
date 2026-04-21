@@ -4,7 +4,13 @@
 complete
 
 ## Current Stage
-build-and-test 완료 (607 tests pass, E2E smoke ✅). Codex 외부 리뷰 + aidlc-finishing-a-development-branch 대기
+Finishing branch — PR 생성 완료, 머지 대기
+
+## Finishing Choice
+B (PR pending)
+
+## PR URL
+https://github.com/bluejayA/devflow-k8s-deploy/pull/2
 
 ## Approved Units (2026-04-17)
 **Source**: devflow-docs/inception/units.md (Standard depth)
