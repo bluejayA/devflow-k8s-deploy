@@ -41,7 +41,7 @@
 | 7 | DockerfileGenerator | multi-stage Dockerfile 생성(JDK builder → JRE runner) + 비root 사용자 + 보안 주석 주입 + Gradle/Maven 캐시 레이어 최적화(F-25) | Service | 변경 없음 |
 | 8 | ManifestGenerator | Deployment/Service/ServiceAccount YAML 생성. Pod/Container securityContext + probes + 리소스 + 근거 주석. **emptyDir 기본 마운트(`/tmp` + `/var/log`)** + Service type 제약 안내 | Service | F-32 확장 반영 |
 | 9 | K8sValidator | `validate_k8s.py` stack-agnostic 정적 검증 (SEC-001~009 / RES-001 / IMG-001 / SA-001~002 / SVC-001~002 / PRB-001~002 + WARN). 3단계 exit code(F-42) + `--json` 모드(F-47) + **메시지 한국어 요약(NFR-17)** + **`validation.skipped[]` 메타 정보 출력(F-83 확장)** | Service | 메시지 정책 + skipped 출력 책임 명시 |
-| 10 | KubectlDryRunner | `kubectl apply --dry-run=client` 실행 어댑터. 미설치 시 degraded success(경고 + rationale 기록 + `summary.json.validation.skipped`에 `kubectl_dry_run` 추가). **경계 allowlist 준수**(`--dry-run=client` 외 인자 금지) | Adapter | skipped 기록 책임 명시 |
+| 10 | KubectlDryRunner | `kubectl apply --dry-run=client --validate=false` 실행 어댑터. 미설치 시 degraded success(경고 + rationale 기록 + `summary.json.validation.skipped`에 `kubectl_dry_run` 추가). **경계 allowlist 준수**(`--dry-run=client`, `--validate=false` 외 인자 금지, 6-tuple 고정) | Adapter | skipped 기록 책임 명시 |
 | 11 | AtomicWriter | 임시 디렉토리(`.tmp-{uuid}/`) 쓰기 → atomic rename. **SIGINT/SIGTERM 핸들러**로 임시 정리. **시작 시 7일 이상 고아 `.tmp-*` 자동 회수.** `output.on_exists`(prompt/overwrite/suffix) 분기 | Util | SIGINT 핸들러 + 고아 회수 명시 |
 | 12 | OutputPackager | STEP 5 최종 패키징: `rationale.md`(결정 소스 매핑 + 스킵 검증 섹션) + `summary.json`(고정 스키마, UTC, `validation.skipped[]` 포함) + bail-out 시 `troubleshoot.md`(상단 한국어 1-2줄 요약 의무) | Service | troubleshoot 한국어 요약 + skipped 책임 명시 |
 
@@ -944,7 +944,12 @@ class K8sValidator:
 
 ### 10. KubectlDryRunner (Adapter)
 
-**Responsibility**: `kubectl apply --dry-run=client` 실행. 미설치 시 degraded success(경고 + rationale 기록 + `summary.json.validation.skipped`에 `kubectl_dry_run` 추가). **경계 allowlist 준수** — `--dry-run=client` 외 인자 금지.
+**Responsibility**: `kubectl apply --dry-run=client --validate=false` 실행. 미설치 시 degraded success(경고 + rationale 기록 + `summary.json.validation.skipped`에 `kubectl_dry_run` 추가). **경계 allowlist 준수** — `--dry-run=client`, `--validate=false` 외 인자 금지.
+
+> **`--validate=false` 근거**: kubectl 기본 `--validate=true`는 OpenAPI 스키마를 cluster에서
+> fetch 시도(`https://.../openapi/v2`). cluster-less 환경에서 연결 실패 → 파싱 확인만 원하므로
+> 검증 끔. K8sValidator(`validate_k8s.py`)가 이미 규칙 검증(SEC/RES/IMG/SA/SVC/PRB) 전담.
+> v0.2+에서 `kubeconform` 등 offline validator로 교체 가능.
 
 **Public interface**:
 
@@ -954,7 +959,7 @@ class KubectlDryRunner:
         """which kubectl + 버전 확인 (>= 1.25 권장)."""
 
     def dry_run(self, manifest_dir: Path) -> DryRunResult:
-        """kubectl apply --dry-run=client -f {manifest_dir} 실행.
+        """kubectl apply --dry-run=client --validate=false -f {manifest_dir} 실행.
         반드시 --dry-run=client 인자 포함 (NFR-SEC-05 allowlist).
         DryRunResult(
             success: bool,
@@ -969,8 +974,10 @@ class KubectlDryRunner:
 
     # 내부
     def _build_command(self, manifest_dir: Path) -> list[str]:
-        """['kubectl', 'apply', '--dry-run=client', '-f', str(manifest_dir)]
-        다른 부동 인자(--server-side, --force) 금지 — 경계 위반."""
+        """정확히 6개 인자:
+        ['kubectl', 'apply', '--dry-run=client', '--validate=false', '-f', str(manifest_dir)]
+        allowlist: ["kubectl", "apply", "--dry-run=client", "--validate=false", "-f", <dir>]
+        --server-side / --force / -o yaml 등 추가 인자 금지 (NFR-SEC-05)."""
 ```
 
 **Dependencies**:
@@ -1809,6 +1816,11 @@ PromptRequest(
   - **[메타]** `_shared/types.py` 카탈로그 섹션 신설 — 18+ dataclass/Protocol 단일 정의 (ResolvedConfig, AnalysisResult, ValidationOutcome, DryRunResult, BuildResult, BailOutContext, PromptRequest, HelpEntry 등)
   - **[메타]** SkillPipeline 서브유닛 매핑 — orchestrator/retry_loop/build_runner 3개 분해. `_shared/` 단일 unit 경계 명시
   - **[메타]** AtomicWriter.commit() prompt_callback 주입 방식 명시 (ProjectAnalyzer 패턴 일치)
+- 2026-04-17 — **kubectl `--validate=false` 추가 (E2E 버그 수정)**:
+  - `--dry-run=client`만으로는 cluster 연결 시도(OpenAPI 스키마 fetch) → cluster-less 환경에서 실패.
+  - K8sValidator가 이미 규칙 검증 담당 → kubectl은 파싱 확인만 원함 → `--validate=false` 추가.
+  - allowlist가 5개 → 6개로 변경: `["kubectl", "apply", "--dry-run=client", "--validate=false", "-f", <dir>]`.
+  - v0.2+에서 `kubeconform` 등 offline validator로 교체 가능.
   - **[메타]** F-09 reserved 명시 (requirements.md ID 인벤토리)
 - 2026-04-19 — **F-42 정합성 교정 (Unit 13 구현 리뷰 반영)**:
   - §1 / §B의 `success_predicate=lambda r: r.exit_code <= 2` → `r.exit_code != 1`로 정정.
