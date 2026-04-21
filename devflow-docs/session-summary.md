@@ -1,11 +1,14 @@
 # Session Summary
 
 ## Current State
-- **Phase**: INCEPTION
-- **Stage**: application-design DETAIL 완료 (INCEPTION 종료 게이트)
+- **Phase**: complete
+- **Stage**: build-and-test 완료
 - **Complexity**: Comprehensive
-- **Commit**: f951748 (이후 변경 미커밋)
-- **Session continued**: 2026-04-17
+- **Commit**: 4aef0bf (build-and-test instructions)
+- **Worktree**: devflow-k8s-deploy-construction (feature/v0.1.0-construction)
+- **Session continued**: 2026-04-17 ~ 2026-04-21 (5일, worktree 분리 유지)
+- **Tests**: **607 passed** (0 failure), ruff/mypy strict clean
+- **E2E CLI smoke**: ✅ exit 2 (WARN soft-success), 6 파일 생성
 
 ## Completed Work
 
@@ -36,11 +39,41 @@
 
 ## Next Steps
 
-- **INCEPTION 종료 게이트** (사용자 결정)
-  - A) DETAIL 산출물 그대로 INCEPTION 종료 → CONSTRUCTION phase 진입 (units-generation → code-generation TDD → build-and-test)
-  - B) DETAIL에 대해 spec-reviewer + Codex 외부 검토 1회 → 반영 후 INCEPTION 종료
-  - C) DETAIL 추가 수정 지시
-- INCEPTION 종료 직후 commit + 브랜치 전략 결정 (worktree vs 현재 main)
+- ✅ units-generation (Standard depth) — 16 units 분해 완료
+- ✅ code-generation (Standard, TDD) — 16 units 전부 TDD 완료
+- ✅ build-and-test (Standard) — 607 tests pass, E2E smoke ✅, 지침 문서 작성
+- 🔜 **Codex 외부 리뷰** — 사용자 직접 실행:
+  - `/codex:review --scope branch` (feature/v0.1.0-construction 전체 변경 검토)
+  - 또는 `/codex:adversarial-review` (더 엄격)
+- 🔜 **aidlc-finishing-a-development-branch** — Codex 피드백 반영 후 머지/PR
+- 🔜 머지 완료 후 `-construction` worktree 제거
+
+## CONSTRUCTION 성과 요약
+
+**16 Units 완료** (Phase 1~6):
+- Phase 1 기반: shared
+- Phase 2 독립 컴포넌트: stack_module / template_renderer / config_loader / atomic_writer / k8s_validator / kubectl_dry_runner
+- Phase 3 통합: project_analyzer / dockerfile_generator / manifest_generator / output_packager / pipeline_build_runner / pipeline_retry_loop
+- Phase 4 오케스트레이터: pipeline_orchestrator
+- Phase 5 SKILL + 문서: skill_md_and_readme
+- Phase 6 CI 보안: security_tests
+
+**주요 이슈 해결** (CONSTRUCTION 중):
+- Unit 6 (k8s_validator) F-43 매트릭스 전면 재작업 (prompt 실수 → 정합)
+- Unit 8 (project_analyzer) Critical: multi-module 경로 traversal 방어
+- Unit 10 (manifest_generator) Critical 2: YAML 인젝션 (exposure whitelist + 3 generator 공통 검증)
+- Unit 11 (output_packager) Critical: redact_sensitive (BailOutContext.en_detail 토큰 노출 방어)
+- 통합 E2E 버그 B: bailout_commit (실패 결과 보존 `{output_dir}-failed-{timestamp}/`)
+- 통합 E2E 버그 C: kubectl `--validate=false` + cluster-less graceful skip
+
+**공용 유틸 추출** (shared 보강):
+- `scripts/_shared/image_ref.py` (Unit 9/10 공유, OCI regex allowlist)
+- `scripts/_shared/text_safety.py` (Unit 9/10/11 공유, reject_unsafe_chars + redact_sensitive)
+- `scripts/_shared/fileio.py` (Unit 8/10/12 공유, read_text_limited + is_within + check_yaml_refs)
+
+**application-design drift 교정** (스펙과 구현 정합 2회):
+- Unit 13 리뷰: `success_predicate=lambda r: r.exit_code <= 2` → `!= 1` (F-42 정합)
+- Unit 7/E2E 버그 C: kubectl allowlist 5-tuple → 6-tuple (+ `--validate=false`)
 
 ## For Next Session
 
