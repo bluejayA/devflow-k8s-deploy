@@ -3,6 +3,16 @@
 **Depth**: Comprehensive
 **Timestamp**: 2026-04-15T15:30:00+09:00
 **Source**: `2026-04-15-brainstorming-v0.1.0-scope.md` (13 design axes + 5 extensibility constraints)
+**ID 인벤토리** (2026-04-17 자동 집계 정정): F-* **71개** (F-09 reserved, F-46a 포함) / NFR **17개** (NFR-09 제거, NFR-SEC-05 추가) / TR 8개 / Assumption 13개 / Open Question 4개(전부 해결)
+
+> **자동 집계 명령** (Change Log/CI에 사용):
+> ```bash
+> grep -oE '^\| F-[0-9]+[a-z]?' requirements.md | sort -u | wc -l   # F-*
+> grep -oE '^\| NFR-[A-Z0-9-]+' requirements.md | sort -u | wc -l    # NFR
+> ```
+>
+> **F-09 status**: reserved (의도적 미사용 — F-08과 F-10 사이 ID 슬롯 비워둠. v0.2+ 추가 시 F-09 사용 가능).
+> **NFR-09 status**: removed (성능 NFR. 운영 데이터 기반 v0.2+ 검토).
 
 ---
 
@@ -26,6 +36,8 @@ v0.1.0은 **JVM 단일 스택**으로 시작하되, 확장성 제약 5가지를 
 |---|---|---|---|
 | F-01 | SKILL.md는 5 STEP 파이프라인 구조를 따른다: (1) 입력 수집 → (2) 코드 분석 → (3) 아티팩트 생성 → (4) 검증 게이트 → (5) 결과 패키징 | Must | L |
 | F-02 | STEP 1은 앱명 / 노출 포트 / 노출 방식(ClusterIP\|NodePort\|LoadBalancer) / namespace / 출력 디렉토리 / 리소스 프로파일 힌트를 **구조적으로** 수집한다 | Must | L |
+| F-02a | **용어 번역 레이어**: STEP 1의 모든 질문은 K8s/Spring 원어(`ClusterIP`/`NodePort`/`LoadBalancer`/`namespace`/`actuator` 등)를 사용자 의도 기반 한국어 질문으로 번역하여 제시한다. 예: "노출 방식?" → "어디서 접속할 건가요? (a) 사내 네트워크만 (b) 외부 인터넷에서 접속 가능". 내부 매핑은 `rationale.md`에 원어와 함께 기록. **비개발자/AI-assisted 개발자** 사용성 확보 목적. 프리셋(v0.2+)과는 독립 | Must | L |
+| F-02b | **"이게 뭐예요?" 도움말**: 각 STEP 1 질문에 "? 도움말" 옵션을 제공. 선택 시 1-2줄 설명 후 원 질문으로 복귀. 도움말 텍스트는 한국어, 용어 원어 병기(예: "네임스페이스(namespace)는 쿠버네티스에서 앱을 분류하는 폴더 같은 개념이에요. 보통 프로젝트명으로 쓰세요"). 도움말 내용은 SKILL.md 본문에 정적 포함 (외부 파일 분리는 v0.2+) | Must | L |
 | F-03 | STEP 2는 프로젝트 디렉토리에서 런타임 / 진입점 / 포트 / 상태성을 추론하며, 추론 불가 시 사용자에게 질문한다 | Must | M |
 | F-04 | STEP 3은 Dockerfile + Deployment + Service + ServiceAccount를 생성한다. 이 4종 외 리소스(StatefulSet, CronJob, Ingress 등)는 v0.1.0에서 생성하지 않는다 | Must | L |
 | F-05 | STEP 4는 validate_k8s.py 실행 → `kubectl apply --dry-run=client` 실행 순서로 검증 게이트를 수행한다 | Must | M |
@@ -62,7 +74,7 @@ v0.1.0은 **JVM 단일 스택**으로 시작하되, 확장성 제약 5가지를 
 |---|---|---|---|
 | F-30 | Deployment는 `spec.replicas`, `spec.selector.matchLabels`, `spec.template.metadata.labels`, `spec.template.spec.containers[0]`, `spec.template.spec.securityContext`, `spec.template.spec.serviceAccountName`, `spec.template.spec.automountServiceAccountToken: false` 필드를 포함한다 | Must | L |
 | F-31 | Pod 레벨 securityContext: `runAsNonRoot: true`, `runAsUser: 1000`, `fsGroup: 1000`, `seccompProfile.type: RuntimeDefault` | Must | L |
-| F-32 | Container 레벨 securityContext: `allowPrivilegeEscalation: false`, `privileged: false`, `readOnlyRootFilesystem: true`, `capabilities.drop: [ALL]`. **JVM `/tmp` 쓰기 대응**: `emptyDir` 볼륨을 `/tmp`에 마운트하여 readOnlyRootFilesystem과 공존. 필요 시 `/var/cache`도 추가 | Must | L |
+| F-32 | Container 레벨 securityContext: `allowPrivilegeEscalation: false`, `privileged: false`, `readOnlyRootFilesystem: true`, `capabilities.drop: [ALL]`. **JVM 기본 쓰기 경로 대응 (확장)**: `emptyDir` 볼륨을 (a) `/tmp` (b) `/var/log` (c) Tomcat work dir(`/tmp/tomcat.*`은 (a)에 흡수)에 마운트하여 readOnlyRootFilesystem과 공존. Spring Boot 감지 시 `/tmp` + `/var/log`는 **자동 추가** (감지 결과와 무관하게 기본 적용). 추가 경로(`/var/cache` 등)는 사용자 설정으로 확장. **운영 첫날 503 방지** 목적 — 페르소나 P3-3 리뷰 반영 | Must | L |
 | F-33 | 리소스: `requests` + `limits`에 `cpu`와 `memory` 모두 명시 | Must | L |
 | F-34 | probes: `livenessProbe`와 `readinessProbe` 모두 명시 (F-13/F-14 규칙 적용) | Must | L |
 | F-35 | 전용 ServiceAccount 생성 (default SA 사용 금지), `automountServiceAccountToken: false` 명시 | Must | L |
@@ -77,7 +89,7 @@ v0.1.0은 **JVM 단일 스택**으로 시작하되, 확장성 제약 5가지를 
 |---|---|---|---|
 | F-40 | 검증기는 manifest YAML만 검사하며 스택 판단을 하지 않는다 (stack-agnostic) | Must | L |
 | F-41 | Rule ID 체계: `SEC-NNN` (보안), `RES-NNN` (리소스), `SVC-NNN` (Service), `SA-NNN` (ServiceAccount), `IMG-NNN` (이미지). 각 규칙 고정 ID 유지 | Must | L |
-| F-42 | 3단계 exit code: `0` (all PASS), `1` (FAIL 존재), `2` (FAIL 없음 + WARN 존재 = **soft-success**). `2`는 생성 성공 취급 — 소비자(CI/orchestrator)는 `2`를 continue로 처리해야 함 | Must | L |
+| F-42 | 3단계 exit code: `0` (all PASS), `1` (FAIL 존재), `2` (FAIL 없음 + WARN 존재 = **soft-success**). `2`는 생성 성공 취급 — 소비자(CI/orchestrator)는 `2`를 continue로 처리해야 함. **소비자 가이드 명시 의무 (확장)**: README와 `summary.json` 스펙 문서에 "쉘 호출 시 `&& [ $? -le 2 ]` 또는 `\|\| [ $? -eq 2 ]` 처리 필수" 경고를 명시. 이 경고가 없으면 `set -e` CI에서 soft-success가 실패로 오인됨 — 페르소나 P2-2 리뷰 반영 | Must | L |
 | F-43 | 필수 체크 목록: `SEC-001` runAsNonRoot / `SEC-002` privileged / `SEC-003` allowPrivilegeEscalation / `SEC-004` readOnlyRootFilesystem / `SEC-005` capabilities.drop=[ALL] / `SEC-006` seccompProfile / `SEC-007` runAsUser>0 / `SEC-008` fsGroup / `RES-001` cpu/memory requests + limits / `IMG-001` no latest tag / `SA-001` automountServiceAccountToken=false / `SA-002` serviceAccountName 명시 / `SVC-001` Service 존재 / `SVC-002` targetPort ↔ container port 일치 / `PRB-001` livenessProbe / `PRB-002` readinessProbe | Must | M |
 | F-44 | 모든 체크 함수는 `containers` + `initContainers` 모두 순회한다 (샘플의 initContainer drift 제거) | Must | L |
 | F-45 | WARN 레벨 예시: `RES-W01` requests:limits 비율 과도 (>4배), `IMG-W01` digest pinning 미사용 | Could | L |
@@ -91,7 +103,7 @@ v0.1.0은 **JVM 단일 스택**으로 시작하되, 확장성 제약 5가지를 
 |---|---|---|---|
 | F-50 | STEP 4 자동 수정 루프: validate_k8s.py 실패 시 수정안 생성 → 재검증. 최대 3회 시도 | Must | M |
 | F-51 | `kubectl apply --dry-run=client -f k8s-output/` 실행. 실패 시 동일한 3회 자동 수정 루프 | Must | M |
-| F-52 | 3회 초과 시 bail-out: 현재 상태 보존 + `k8s-output/troubleshoot.md`에 전체 시도 로그 저장 + 사용자에게 수동 개입 요청 | Must | L |
+| F-52 | 3회 초과 시 bail-out: 현재 상태 보존 + `k8s-output/troubleshoot.md`에 전체 시도 로그 저장 + 사용자에게 수동 개입 요청. **한국어 요약 의무 (확장)**: troubleshoot.md 상단에 "어느 STEP / 어느 컴포넌트 / 무슨 이유로 실패" 한국어 1-2줄 요약을 필수 포함. 비개발자/AI-assisted 사용자가 원어 로그를 읽지 않아도 다음 행동을 판단할 수 있어야 함 — 페르소나 P1-3 리뷰 반영 | Must | L |
 | F-53 | **Container image build** 옵션 실행: `build.engine` 설정이 `skip`(기본값)이면 빌드 단계 전체 생략. `auto` 또는 특정 엔진 지정 시에만 실행 (**opt-in 방식**). 엔진 미감지 시 경고 후 스킵 | Should | L |
 | F-54 | Container image build 실패 시 3회 자동 수정 루프 + bail-out (F-50~F-52와 동일 패턴) | Should | M |
 | F-55 | trivy / hadolint 실행 **안내**만 포함. 자동 실행 금지 (경계 유지) | Should | L |
@@ -123,7 +135,7 @@ v0.1.0은 **JVM 단일 스택**으로 시작하되, 확장성 제약 5가지를 
 | F-80 | 출력은 단일 디렉토리 `k8s-output/` (프로젝트 루트 기준, `output.dir` 설정으로 오버라이드) | Must | L |
 | F-81 | 출력 파일: `Dockerfile`, `deployment.yaml`, `service.yaml`, `serviceaccount.yaml`, `rationale.md`, `summary.json`. bail-out 시 `troubleshoot.md` 추가 | Must | L |
 | F-82 | `rationale.md` 섹션: 감지된 스택 / 진입점 / 포트 / 상태성 / 베이스 이미지 선택 근거 / 리소스 기본값 근거 / namespace 결정 근거 / probe 선택 근거 / 검증 결과 요약 / 경고 목록 | Must | L |
-| F-83 | `summary.json` 스키마 (고정, 하위 호환): `{"version": "v1", "generated_at": ISO8601, "stack": string, "app": {"name": string, "ports": [int]}, "images": [{"repository": string, "tag": string}], "namespace": string, "validation": {"pass": int, "warn": int, "fail": int}, "files": [string]}` | Must | M |
+| F-83 | `summary.json` 스키마 (고정, 하위 호환): `{"version": "v1", "generated_at": ISO8601, "stack": string, "app": {"name": string, "ports": [int]}, "images": [{"repository": string, "tag": string}], "namespace": string, "validation": {"pass": int, "warn": int, "fail": int, "skipped": [string]}, "files": [string]}`. **`validation.skipped` 필드 추가 (확장)**: kubectl/빌드엔진 미감지로 스킵된 검증을 기계 판독 가능 형태로 기록 (예: `["kubectl_dry_run", "container_build"]`). CI가 exit code 0/2만 보고 "전부 통과"로 오인하지 못하도록 안전 계약 — 페르소나 P2-1 + Codex Must-fix 반영 | Must | M |
 
 ### 확장성 제약 (5가지) — v0.2+ 스택 추가 비용 최소화 목적으로 승격
 
@@ -142,7 +154,7 @@ v0.1.0은 **JVM 단일 스택**으로 시작하되, 확장성 제약 5가지를 
 | F-100 | 재실행 시 `k8s-output/` 기존 파일 처리: `output.on_exists` 설정에 따라 분기. `prompt` (기본) — 사용자에게 덮어쓰기 여부 질문 / `overwrite` — 조용히 덮어쓰기 (CI-friendly) / `suffix` — 타임스탬프 접미사 새 디렉토리 (`k8s-output-YYYY-MM-DDTHH-MM/`) | Must | M |
 | F-101 | AIDLC construction-orchestrator 연동: v0.1.0은 `summary.json` 스키마(F-83) + 3단계 exit code(F-42)만 **계약**으로 공개. 실연동(orchestrator 쪽 호출 로직)은 v0.2+로 연기. v0.1.0 플러그인은 AIDLC를 인지하지 않음 (백로그 원칙 4 "AIDLC 비종속" 유지) | Must | L |
 | F-102 | Container image build 타임아웃: `build.build_timeout_seconds` 설정, 기본 600초(10분). `0`이면 무제한 (사용자 Ctrl+C에 맡김). 타임아웃 초과 시 build 실패로 처리 → F-54 자동 수정 루프 진입 | Should | L |
-| F-103 | **Atomic write 전략**: STEP 3~5의 파일 쓰기는 임시 디렉토리(`k8s-output/.tmp-{uuid}/`)에 먼저 수행. STEP 4 검증도 임시 대상으로 실행. 전 단계 통과 후 임시 → `k8s-output/`으로 atomic rename. 실패/Ctrl+C 시 임시 디렉토리 삭제, `k8s-output/`은 이전 상태 보존. `k8s-output/`은 항상 **일관된 완전한 세트**를 유지 | Must | L |
+| F-103 | **Atomic write 전략**: STEP 3~5의 파일 쓰기는 임시 디렉토리(`k8s-output/.tmp-{uuid}/`)에 먼저 수행. STEP 4 검증도 임시 대상으로 실행. 전 단계 통과 후 임시 → `k8s-output/`으로 atomic rename. 실패/Ctrl+C 시 임시 디렉토리 삭제, `k8s-output/`은 이전 상태 보존. `k8s-output/`은 항상 **일관된 완전한 세트**를 유지. **Signal handler 명시 (확장)**: SIGINT/SIGTERM에 대해 finally 블록 또는 `signal.signal()` 핸들러로 임시 디렉토리 청소 보장. 시작 시 `.tmp-*` 고아 디렉토리(7일 이상) 자동 정리. Ctrl+C에 의존하지 않는 결정론적 정리 — 페르소나 Must-fix 반영 | Must | L |
 
 ---
 
@@ -165,8 +177,9 @@ v0.1.0은 **JVM 단일 스택**으로 시작하되, 확장성 제약 5가지를 
 | NFR-13 | 테스트 | pytest 커버리지: validate_k8s.py ≥ 85%, 스택 추론 모듈 ≥ 75% | Must |
 | NFR-14 | 재현성 | 동일 환경에서 CI 실행 10회 연속 성공률 100% (flaky 테스트 0) | Should |
 | NFR-15 | 보안 — 시크릿 | 생성된 manifest에 평문 시크릿 포함 금지. Secret 참조(`valueFrom.secretKeyRef`)만 허용하되 Secret 자체는 v0.1.0에서 생성하지 않음 | Must |
+| NFR-SEC-05 | **경계 엔포스먼트 — CI 감지 테스트** | 통합 테스트가 금지 CLI 호출(`docker push` / `podman push` / `nerdctl push` / `kubectl apply`(`--dry-run=client` 외) / `kubectl create` / `kubectl delete` / `kubectl rollout` 등)을 호출하면 **테스트 실패**. `subprocess.Popen`/`subprocess.run` 패치로 호출 인자를 검사하는 allowlist 테스트 픽스처를 제공. 런타임 가드는 추가하지 않음 (오버엔지니어링 + 우회 가능). 회귀 방지가 목적 — Codex Must-fix #2 반영 | Must |
 | NFR-16 | 호환성 | **권장 런타임**: kubectl 1.25+ / 빌드 엔진(Docker 20.10+ / Podman 4.0+ / nerdctl 1.0+). kubectl·빌드 엔진 부재 시 **degraded success** (해당 검증 스킵, rationale.md에 기록). **필수**: Python 3.11+ / Java Temurin 17 또는 21 / Gradle 7+ / Maven 3.8+ | Must |
-| NFR-17 | 국제화 | SKILL description 및 사용자 대화는 한국어, 생성 파일 내 주석은 한국어, 에러 메시지는 한국어 우선 + 원문(영문) 병기. **Timezone**: `summary.json`의 `generated_at`은 **UTC (Z 접미사)** 고정. `rationale.md` 타임스탬프도 UTC. locale은 `ko-KR` 기본 | Must |
+| NFR-17 | 국제화 — 전 스테이지 메시지 정책 | SKILL description 및 사용자 대화는 한국어, 생성 파일 내 주석은 한국어, **에러 메시지는 한국어 우선 + 원문(영문) 병기 — 전 STEP 적용 (확장)**. STEP 1 입력(F-02a/F-02b)뿐 아니라 STEP 2 추론 실패 질문(F-03/F-39), STEP 4 검증 실패 메시지(F-46), bail-out 메시지(F-52), `troubleshoot.md`까지 동일 정책 적용. 컴포넌트별 책임으로는 `SkillPipeline`/`ProjectAnalyzer`/`K8sValidator`/`OutputPackager`가 사용자 대면 출력 시 한국어 + 원어 병기 의무. **Timezone**: `summary.json`의 `generated_at`은 **UTC (Z 접미사)** 고정. `rationale.md` 타임스탬프도 UTC. locale은 `ko-KR` 기본 — Codex Must-fix #4 + 페르소나 P1-3 반영 | Must |
 
 ---
 
@@ -240,3 +253,14 @@ v0.1.0은 **JVM 단일 스택**으로 시작하되, 확장성 제약 5가지를 
 - 2026-04-15T15:45:00+09:00 — OQ-01/02/03 해결: F-100(`output.on_exists`), F-101(AIDLC 계약만), F-102(타임아웃 설정). 빌드 엔진 일반화 — F-53/F-54 명칭 변경, F-57 자동 감지 순서 추가, F-58 graceful degrade, F-59 미지원 엔진 명시. F-61 설정 스키마 확장 (`output.on_exists`, `build.engine`, `build.build_timeout_seconds`). NFR-03/NFR-16 보완. A-11/A-12 가정 추가.
 - 2026-04-15T15:50:00+09:00 — OQ-04 해결: 템플릿 엔진 = Jinja2. Technology Stack 표 확정. A-13 가정 추가.
 - 2026-04-16T00:10:00+09:00 — Codex adversarial review 반영 (15건 즉시 수정 + 1건 제거 + 6건 v0.2 연기): F-04 SA 포함, F-12 포트 우선순위, F-13 Boot 2.x/3.x, F-32 emptyDir, F-36 Service type 제약, F-39 multi-module 승격, F-42 exit code 2 의미, F-46a SEC-009, F-53 build opt-in, F-81 SA 파일, F-91 StackModule 확장, F-103 atomic write, NFR-02/NFR-04/NFR-16/NFR-17 보완, NFR-09 제거. v0.2 연기: JSON Schema 배포/발화 패턴 자동 테스트/주석 파서/degraded_checks[]/확장성 CI/SBOM+멀티아키텍처.
+- 2026-04-17 — application-design LIST 검토 중 **비개발자/AI-assisted 개발자 사용성** 갭 식별. F-02a(용어 번역 레이어), F-02b("이게 뭐예요?" 도움말) 추가. 프리셋(웹 API/내부 서비스/데모)은 v0.2+ 백로그로 연기 — MVP 피드백 후 결정.
+- 2026-04-17 (3-페르소나 + Codex 리뷰 반영) — Must-fix 5건 + 추가 의견 반영:
+  - F-32 확장: `/tmp` + `/var/log` 자동 emptyDir, Tomcat work dir 흡수 (운영 503 방지)
+  - F-42 확장: exit code 2 소비자 가이드 README/문서 명시 의무 (set -e 호환)
+  - F-52 확장: troubleshoot.md 한국어 1-2줄 요약 의무
+  - F-83 확장: `validation.skipped[]` 필드 추가 (CI 안전 계약)
+  - F-103 확장: SIGINT/SIGTERM 핸들러 + 고아 .tmp-* 자동 정리
+  - **신규 NFR-SEC-05**: 경계 엔포스먼트 CI 감지 테스트 (런타임 가드 아님)
+  - NFR-17(I18N) 확장: 전 STEP 한국어 우선 + 원어 병기 정책 (STEP 1 한정 → 전체)
+  - 요구사항 ID 카운트 정정: 헤더 "60 F-*" → 자동 집계 결과 **71개** (F-09 reserved + F-46a 포함). NFR 17개 (NFR-09 제거 + NFR-SEC-05 추가, 순증감 0)
+  - v0.2+ 백로그 추가: NetworkPolicy / PodDisruptionBudget / Stateful 신뢰도 점수 / LoadBalancer 비용 경고 / StackModule BuildPlan 일반화(stages: list) / validate_k8s WARN 확장(terminationGracePeriodSeconds, imagePullPolicy) / 도움말 카탈로그 외부 파일 분리
