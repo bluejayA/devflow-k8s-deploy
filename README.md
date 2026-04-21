@@ -40,7 +40,7 @@ Claude가 아래 5단계를 한국어로 안내하며 실행합니다:
 | **1. 입력 수집** | 한국어로 6개 필드 질문 (각 질문에 "?" 입력 시 도움말) |
 | **2. 프로젝트 분석** | build.gradle.kts / pom.xml 자동 분석 + Spring Boot 버전 감지 |
 | **3. 파일 생성** | Dockerfile + deployment.yaml + service.yaml + serviceaccount.yaml |
-| **4. 검증** | validate_k8s.py 정적 검증 + kubectl dry-run (미설치 시 graceful skip) |
+| **4. 검증** | validate_k8s.py 정적 검증 + kubectl dry-run (미설치 시 graceful skip). kubectl dry-run은 `--validate=false`로 cluster 없이 client-side 파싱만 수행. 엄격한 규칙 검증은 `validate_k8s.py` (K8sValidator)가 담당. |
 | **5. 패키징** | rationale.md (근거 문서) + summary.json (CI 소비용) |
 
 ### STEP 1 입력 항목

@@ -267,8 +267,10 @@ exit code 해석:
 #### 4-2. kubectl dry-run
 
 ```bash
-kubectl apply --dry-run=client -f {output_dir}/
+kubectl apply --dry-run=client --validate=false -f {output_dir}/
 ```
+
+`--validate=false`: cluster 없이 client-side 파싱만 수행. 엄격한 규칙 검증은 `validate_k8s.py` (K8sValidator)가 담당.
 
 kubectl 미설치 시: 경고 메시지 출력 후 스킵 (graceful degrade). `summary.json`에 `skipped: ["kubectl_dry_run"]` 기록.
 
