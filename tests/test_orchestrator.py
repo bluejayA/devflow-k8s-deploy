@@ -182,11 +182,21 @@ def _make_deps(
     dry_run_success: bool = True,
     build_engine: str = "skip",
 ) -> tuple[PipelineDependencies, dict[str, MagicMock]]:
-    """의존성 MagicMock 묶음 생성 헬퍼."""
+    """의존성 MagicMock 묶음 생성 헬퍼.
+
+    on_exists 기본값을 "overwrite"로 설정하여 k8s-output 경로 충돌 방지.
+    (프로젝트 루트에 k8s-output이 존재할 수 있어 prompt 모드 테스트에서 충돌 방지)
+    """
     mocks: dict[str, MagicMock] = {}
 
     config_loader = MagicMock(name="config_loader")
-    raw = config_raw or {"build": {"engine": build_engine}}
+    if config_raw is None:
+        raw: dict[str, Any] = {
+            "build": {"engine": build_engine},
+            "output": {"on_exists": "overwrite"},
+        }
+    else:
+        raw = config_raw
     config = _make_resolved_config(raw=raw)
     config_loader.load.return_value = config
     mocks["config_loader"] = config_loader
@@ -672,6 +682,71 @@ class TestImageTagValidation:
         pipeline.run(tmp_path / "project", tmp_path / "output")
 
         mocks["build_runner"].build.assert_called_once()
+
+
+# ─── Important 4: UserInputs.output_dir 우선순위 ────────────────────────────────
+
+
+class TestOutputDirPriority:
+    """P3: UserInputs.output_dir이 run() method arg보다 우선 적용됨."""
+
+    def test_run_uses_user_input_output_dir_over_method_arg(self, tmp_path: Path) -> None:
+        """prompt 모드에서 사용자가 입력한 output_dir → method arg보다 우선 적용."""
+        deps, mocks = _make_deps()
+
+        custom_output = tmp_path / "custom-output"
+        method_arg_output = tmp_path / "method-arg-output"
+
+        def fake_callback(req: PromptRequest) -> str:
+            if req.help_term_id == "app_name":
+                return "my-app"
+            if req.help_term_id == "port":
+                return "8080"
+            if req.help_term_id == "exposure":
+                return "ClusterIP"
+            if req.help_term_id == "namespace":
+                return "my-ns"
+            if req.help_term_id == "output_dir":
+                return str(custom_output)
+            if req.help_term_id == "resource_hint":
+                return "medium"
+            return "default"
+
+        pipeline = SkillPipeline(deps, prompt_callback=fake_callback)
+        result = pipeline.run(tmp_path / "project", method_arg_output)
+
+        assert result.final_path is not None
+        # custom-output을 선택했으므로 method_arg_output 경로가 아닌 custom_output 기준
+        assert str(custom_output) in str(result.final_path), (
+            f"UserInputs.output_dir({custom_output})가 반영되어야 함. "
+            f"실제 final_path: {result.final_path}"
+        )
+
+    def test_run_auto_mode_uses_method_arg_output_dir(self, tmp_path: Path) -> None:
+        """자동 모드 (prompt_callback=None) 에서는 run() method arg output_dir를 사용.
+
+        prompt 모드에서만 UserInputs.output_dir가 우선 적용되고,
+        자동 모드에서는 CLI --output-dir (method arg)가 최종 경로가 됨.
+        """
+        method_arg_output = tmp_path / "method-arg-output"
+
+        deps, mocks = _make_deps(
+            config_raw={
+                "build": {"engine": "skip"},
+                "output": {"dir": "k8s-output"},  # config에도 다른 값 설정
+            }
+        )
+
+        pipeline = SkillPipeline(deps)  # prompt_callback=None (자동 모드)
+        result = pipeline.run(tmp_path / "project", method_arg_output)
+
+        assert isinstance(result, PackagingResult)
+        assert result.final_path is not None
+        # 자동 모드에서는 method arg가 최종 경로
+        assert str(method_arg_output) in str(result.final_path), (
+            f"자동 모드: method arg output_dir({method_arg_output})가 사용되어야 함. "
+            f"실제 final_path: {result.final_path}"
+        )
 
 
 # ─── CLI main 테스트 ─────────────────────────────────────────────────────────────

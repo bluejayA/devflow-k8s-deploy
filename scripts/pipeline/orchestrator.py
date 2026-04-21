@@ -360,9 +360,19 @@ class SkillPipeline:
             ),
         )
 
+        # effective_output_dir 결정:
+        #   prompt 모드 (prompt_callback 있음): 사용자가 직접 입력한 output_dir 우선.
+        #     inputs.output_dir가 non-empty이면 그 값 사용, 아니면 method arg fallback.
+        #   자동 모드 (prompt_callback=None): method arg (CLI --output-dir) 사용.
+        #     config의 output.dir는 이미 inputs.output_dir에 반영되나, CLI 인자가 최종 경로임.
+        if self._prompt_callback is not None and inputs.output_dir and str(inputs.output_dir):
+            effective_output_dir = inputs.output_dir
+        else:
+            effective_output_dir = output_dir
+
         # STEP 3 + 4 + 5 (AtomicWriter 컨텍스트)
         with AtomicWriter(
-            output_dir=output_dir,
+            output_dir=effective_output_dir,
             on_exists=on_exists,
             prompt_callback=self._prompt_callback,
         ) as writer:
