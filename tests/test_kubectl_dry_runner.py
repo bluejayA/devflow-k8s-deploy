@@ -107,6 +107,63 @@ class TestDryRunDegraded:
 
         assert isinstance(result, DryRunResult)
 
+    def test_connection_refused_in_stderr_returns_skipped(
+        self, runner: KubectlDryRunner, manifest_dir: Path
+    ) -> None:
+        """cluster 미연결(connection refused) → skipped=True, success=True (degraded).
+
+        kubectl --dry-run=client이더라도 API group list 조회 시 connection refused 발생.
+        cluster-less 환경에서 graceful skip 처리 (F-56 degraded success 원칙 적용).
+        """
+        mock_proc = MagicMock()
+        mock_proc.returncode = 1
+        mock_proc.stdout = ""
+        mock_proc.stderr = (
+            'unable to recognize "deploy.yaml": '
+            "Get \"https://127.0.0.1:6443/api\": dial tcp: connect: connection refused"
+        )
+
+        with patch.object(runner, "is_available", return_value=True):
+            with patch("subprocess.run", return_value=mock_proc):
+                result = runner.dry_run(manifest_dir)
+
+        assert result.skipped is True
+        assert result.success is True
+        assert result.skip_reason_ko is not None
+        assert "cluster" in result.skip_reason_ko or "connection" in result.skip_reason_ko.lower()
+
+    def test_connection_refused_in_stdout_stderr_error_log_returns_skipped(
+        self, runner: KubectlDryRunner, manifest_dir: Path
+    ) -> None:
+        """stderr에 'connection refused' 포함 시 skipped=True — 부분 문자열 매칭."""
+        mock_proc = MagicMock()
+        mock_proc.returncode = 1
+        mock_proc.stdout = ""
+        mock_proc.stderr = "connection refused"
+
+        with patch.object(runner, "is_available", return_value=True):
+            with patch("subprocess.run", return_value=mock_proc):
+                result = runner.dry_run(manifest_dir)
+
+        assert result.skipped is True
+        assert result.success is True
+
+    def test_non_connection_error_does_not_skip(
+        self, runner: KubectlDryRunner, manifest_dir: Path
+    ) -> None:
+        """connection refused가 아닌 일반 오류는 skipped=False, success=False."""
+        mock_proc = MagicMock()
+        mock_proc.returncode = 1
+        mock_proc.stdout = ""
+        mock_proc.stderr = "error: the server could not find the requested resource"
+
+        with patch.object(runner, "is_available", return_value=True):
+            with patch("subprocess.run", return_value=mock_proc):
+                result = runner.dry_run(manifest_dir)
+
+        assert result.skipped is False
+        assert result.success is False
+
 
 # ─── dry_run — 실행 성공 ──────────────────────────────────────────────────
 
@@ -238,7 +295,14 @@ class TestBuildCommand:
     ) -> None:
         """_build_command 결과가 정확히 allowlist와 일치."""
         cmd = runner._build_command(manifest_dir)
-        expected = ["kubectl", "apply", "--dry-run=client", "-f", str(manifest_dir)]
+        expected = [
+            "kubectl",
+            "apply",
+            "--dry-run=client",
+            "--validate=false",
+            "-f",
+            str(manifest_dir),
+        ]
         assert cmd == expected
 
     def test_build_command_with_custom_kubectl_path(
@@ -251,17 +315,30 @@ class TestBuildCommand:
             "/custom/kubectl",
             "apply",
             "--dry-run=client",
+            "--validate=false",
             "-f",
             str(manifest_dir),
         ]
         assert cmd == expected
 
-    def test_build_command_length_is_five(
+    def test_build_command_length_is_six(
         self, runner: KubectlDryRunner, manifest_dir: Path
     ) -> None:
-        """추가 인자 없이 정확히 5개 인자만 존재 (allowlist 외 인자 금지)."""
+        """추가 인자 없이 정확히 6개 인자만 존재 (allowlist 외 인자 금지)."""
         cmd = runner._build_command(manifest_dir)
-        assert len(cmd) == 5
+        assert len(cmd) == 6
+
+    def test_build_command_contains_validate_false(
+        self, runner: KubectlDryRunner, manifest_dir: Path
+    ) -> None:
+        """--validate=false 인자가 반드시 포함됨.
+
+        cluster-less 동작: kubectl 기본 --validate=true는 OpenAPI 스키마를
+        cluster에서 fetch → cluster 없으면 실패. 파싱 확인만 원하므로 검증 끔.
+        K8sValidator(validate_k8s.py)가 실제 규칙 검증 담당.
+        """
+        cmd = runner._build_command(manifest_dir)
+        assert "--validate=false" in cmd
 
     def test_build_command_no_server_side_flag(
         self, runner: KubectlDryRunner, manifest_dir: Path
