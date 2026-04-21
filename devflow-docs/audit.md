@@ -135,3 +135,4 @@
 - 2026-04-21T02:09:24Z — file-edit — devflow-docs/devflow-audit.md
 - 2026-04-21T07:21:08Z — file-edit — devflow-docs/devflow-audit.md
 - 2026-04-21T07:25:21Z — file-edit — devflow-docs/devflow-audit.md
+- 2026-04-21T23:22:17Z — file-edit — skills/devflow-k8s-deploy/SKILL.md

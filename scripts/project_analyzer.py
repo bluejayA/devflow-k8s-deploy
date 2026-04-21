@@ -12,6 +12,7 @@ import re
 import unicodedata
 import xml.etree.ElementTree as StdET
 from pathlib import Path
+from typing import Literal
 
 import yaml
 from defusedxml import ElementTree as ET
@@ -216,7 +217,12 @@ class ProjectAnalyzer:
 
     # ── Public API ────────────────────────────────────────────────────────────
 
-    def analyze(self, project_dir: Path, config: ResolvedConfig) -> AnalysisResult:
+    def analyze(
+        self,
+        project_dir: Path,
+        config: ResolvedConfig,
+        resource_hint: Literal["small", "medium", "large"] = "medium",
+    ) -> AnalysisResult:
         """전체 분석 흐름.
 
         1. config_loader.stack_decision(config, project_dir) → StackDecision
@@ -225,6 +231,10 @@ class ProjectAnalyzer:
         4. 선택된 module의 detect/build_plan/probe_plan/defaults/artifact_locator 호출
         5. _detect_statefulness() — 신뢰도 점수와 함께
         6. AnalysisResult 반환 (gaps 포함)
+
+        Args:
+            resource_hint: v0.2.0+ — tier별 defaults 차등 반영 (small/medium/large).
+                           미지정 시 medium 유지 (back-compat 기본값).
 
         Returns:
             AnalysisResult — 분석 결과 + gaps(추론 실패)
@@ -237,11 +247,16 @@ class ProjectAnalyzer:
         # is_within 검사에 사용할 project_root 저장
         self._project_root = project_dir.resolve()
         try:
-            return self._analyze_impl(project_dir, config)
+            return self._analyze_impl(project_dir, config, resource_hint)
         finally:
             self._project_root = None
 
-    def _analyze_impl(self, project_dir: Path, config: ResolvedConfig) -> AnalysisResult:
+    def _analyze_impl(
+        self,
+        project_dir: Path,
+        config: ResolvedConfig,
+        resource_hint: Literal["small", "medium", "large"],
+    ) -> AnalysisResult:
         """analyze() 실제 구현 (project_root 설정 후 호출)."""
         gaps: list[str] = []
 
@@ -289,7 +304,7 @@ class ProjectAnalyzer:
 
         build_plan = module.build_plan(detect_result)
         probe_config = module.probe_plan(detect_result)
-        resource_defaults = module.defaults()
+        resource_defaults = module.defaults(resource_hint)
         artifact_paths = module.artifact_locator(detect_result, analysis_dir)
 
         # 5. 상태성 감지

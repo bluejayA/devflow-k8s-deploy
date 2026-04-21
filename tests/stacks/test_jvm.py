@@ -450,11 +450,11 @@ class TestBuildPlan:
 
 
 class TestDefaults:
-    def test_defaults_field_values(self) -> None:
-        """cpu/memory request/limit 기본값 검증."""
+    def test_defaults_medium_field_values(self) -> None:
+        """medium tier = v0.1.0의 기본값과 동일 (v0.2.0 back-compat baseline)."""
         from scripts.stacks.jvm import JvmStackModule
 
-        defaults = JvmStackModule().defaults()
+        defaults = JvmStackModule().defaults("medium")
 
         assert defaults.cpu_request == "100m"
         assert defaults.memory_request == "512Mi"
@@ -462,10 +462,10 @@ class TestDefaults:
         assert defaults.memory_limit == "1Gi"
 
     def test_defaults_writable_paths(self) -> None:
-        """writable_paths에 /tmp와 /var/log 포함."""
+        """writable_paths에 /tmp와 /var/log 포함 (tier 무관)."""
         from scripts.stacks.jvm import JvmStackModule
 
-        defaults = JvmStackModule().defaults()
+        defaults = JvmStackModule().defaults("medium")
 
         assert "/tmp" in defaults.writable_paths
         assert "/var/log" in defaults.writable_paths

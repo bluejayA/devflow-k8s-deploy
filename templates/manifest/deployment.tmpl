@@ -27,6 +27,8 @@ spec:
       containers:
         - name: {{ app_name }}
           image: {{ image }}
+          # imagePullPolicy 명시 — tag mutation 재푸시 시 갱신 보장 (F-공급망)
+          imagePullPolicy: IfNotPresent
           ports:
             - name: http
               containerPort: {{ port }}
