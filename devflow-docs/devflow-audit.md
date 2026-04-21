@@ -36,3 +36,8 @@
   - E2E 버그 C (kubectl cluster-less 실패): `--validate=false` + connection refused graceful skip → commits 34578ad/47b5145/35cd057/cb1a7ad
   - 지침 문서: build-instructions.md / test-instructions.md → commit 4aef0bf
 - 2026-04-21: **CONSTRUCTION COMPLETE** — commit 4aef0bf. 607 tests pass, E2E CLI 실제 실행 ✅ (exit=2 WARN soft-success, 6 파일 생성, validation.skipped=['kubectl_dry_run']). Phase transition: CONSTRUCTION → complete. Codex 외부 리뷰 + aidlc-finishing-a-development-branch 대기.
+- 2026-04-21: **Codex 외부 리뷰 완료** (`/codex:review --scope branch`) — 3건 버그 수정:
+  - P1 (Critical): Dockerfile builder image에 Maven/Gradle 없어 빌드 실패 → `gradle:jdk21-alpine` / `maven:3.9-eclipse-temurin-21-alpine` 공식 이미지로 교체 → commit 7c2ff9e
+  - P2 (Important): TimeoutExpired 시 text=True로 str 반환되는데 `.decode()` 호출 → `_maybe_decode()` 헬퍼로 방어 → commit abcd8ae
+  - P3 (Important): UserInputs.output_dir 무시 (prompt 모드) → prompt 모드에서 inputs 우선, 자동 모드는 method arg → commit f9f95cf
+  - 최종: 613 tests pass. aidlc-finishing-a-development-branch 대기.
