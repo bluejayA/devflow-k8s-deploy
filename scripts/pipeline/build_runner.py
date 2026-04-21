@@ -43,6 +43,20 @@ def _msg_explicit_not_found(engine: str) -> str:
     return f"지정된 컨테이너 엔진 '{engine}'이(가) 설치되어 있지 않음 — 빌드 건너뜀"
 
 
+def _maybe_decode(value: str | bytes | None) -> str | None:
+    """TimeoutExpired.stdout/stderr의 bytes/str/None을 str | None으로 정규화.
+
+    subprocess.run(text=True) 시 TimeoutExpired의 output 필드는 str,
+    subprocess.run(text=False) 시 bytes 또는 None.
+    두 경우 모두 안전하게 처리한다.
+    """
+    if value is None:
+        return None
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")
+    return value  # 이미 str
+
+
 BuildEngineMode = Literal["skip", "auto", "docker", "podman", "nerdctl"]
 
 
@@ -209,8 +223,8 @@ class BuildRunner:
                 image_ref=None,
                 skipped=False,
                 skip_reason_ko=f"빌드 타임아웃 ({self._build_timeout_seconds}초 초과)",
-                stdout=exc.stdout.decode("utf-8", errors="replace") if exc.stdout else None,
-                stderr=exc.stderr.decode("utf-8", errors="replace") if exc.stderr else None,
+                stdout=_maybe_decode(exc.stdout),
+                stderr=_maybe_decode(exc.stderr),
                 exit_code=None,
             )
 

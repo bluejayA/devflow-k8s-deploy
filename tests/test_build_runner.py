@@ -520,6 +520,68 @@ class TestBuildResultCapture:
         assert result.exit_code is None
 
 
+# ─── TimeoutExpired str output (text=True) 방어 ─────────────────────────
+
+
+class TestTimeoutStrOutput:
+    """TC-28: subprocess.run(text=True) 시 TimeoutExpired.stdout/stderr가 str인 경우 방어."""
+
+    @pytest.fixture()
+    def tmp_ctx(self, tmp_path: Path) -> Path:
+        (tmp_path / "Dockerfile").write_text("FROM scratch\n")
+        return tmp_path
+
+    def test_timeout_with_str_output_handles_gracefully(self, tmp_ctx: Path) -> None:
+        """TC-28: text=True → TimeoutExpired.stdout/stderr가 str일 때 AttributeError 없이 처리."""
+        runner = _make_runner("docker")
+
+        exc = subprocess.TimeoutExpired(cmd=["docker", "build"], timeout=600)
+        # text=True 모드에서는 stdout/stderr가 str로 제공됨
+        exc.stdout = "partial output str"
+        exc.stderr = "partial err str"
+
+        with (
+            patch(
+                "scripts.pipeline.build_runner.shutil.which",
+                side_effect=_fake_which(["docker"]),
+            ),
+            patch(
+                "scripts.pipeline.build_runner.subprocess.run",
+                side_effect=exc,
+            ),
+        ):
+            result = runner.build(tmp_ctx, "myapp:1.0.0")
+
+        assert result.success is False
+        assert result.stdout == "partial output str"
+        assert result.stderr == "partial err str"
+        assert result.exit_code is None
+
+    def test_timeout_with_none_output_returns_none_fields(self, tmp_ctx: Path) -> None:
+        """TC-29: TimeoutExpired.stdout/stderr=None → BuildResult에 None."""
+        runner = _make_runner("docker")
+
+        exc = subprocess.TimeoutExpired(cmd=["docker", "build"], timeout=600)
+        exc.stdout = None
+        exc.stderr = None
+
+        with (
+            patch(
+                "scripts.pipeline.build_runner.shutil.which",
+                side_effect=_fake_which(["docker"]),
+            ),
+            patch(
+                "scripts.pipeline.build_runner.subprocess.run",
+                side_effect=exc,
+            ),
+        ):
+            result = runner.build(tmp_ctx, "myapp:1.0.0")
+
+        assert result.success is False
+        assert result.stdout is None
+        assert result.stderr is None
+
+
 # ─── _build_command engine whitelist ────────────────────────────────────
 
 
