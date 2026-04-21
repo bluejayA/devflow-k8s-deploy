@@ -155,8 +155,9 @@ class JvmStackModule:
         runner_image: eclipse-temurin:{N}-jre-alpine  (slim runtime, 공통)
 
         build_cmd:
-          - Maven: "mvn package"
-          - Gradle: "gradle bootJar"
+          - Maven:  "mvn -B package"      (-B = batch, non-interactive, 색상 ANSI 제거)
+          - Gradle: "gradle --no-daemon bootJar"
+                   (컨테이너 빌드에서 daemon은 clean shutdown 실패 + 메모리 상주)
         """
         jdk_version = _DEFAULT_JDK_VERSION
         build_system = detect_result.build_system or ""
@@ -169,7 +170,7 @@ class JvmStackModule:
         return BuildPlan(
             builder_image=builder_image,
             runner_image=runner_image,
-            build_cmd="mvn package" if maven else "gradle bootJar",
+            build_cmd="mvn -B package" if maven else "gradle --no-daemon bootJar",
             artifact_path="target/*.jar" if maven else "build/libs/*.jar",
         )
 

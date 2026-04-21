@@ -344,7 +344,7 @@ class TestProbePlan:
 
 class TestBuildPlan:
     def test_gradle_build_cmd_and_artifact_path(self, tmp_path: Path) -> None:
-        """Gradle → build_cmd='gradle bootJar', artifact_path='build/libs/*.jar'"""
+        """Gradle → build_cmd='gradle --no-daemon bootJar' (v0.1.1: daemon 비활성)."""
         from scripts.stacks.jvm import JvmStackModule
 
         proj = make_gradle_kts_spring3(tmp_path)
@@ -353,11 +353,11 @@ class TestBuildPlan:
 
         plan = JvmStackModule().build_plan(detect_result)
 
-        assert plan.build_cmd == "gradle bootJar"
+        assert plan.build_cmd == "gradle --no-daemon bootJar"
         assert plan.artifact_path == "build/libs/*.jar"
 
     def test_maven_build_cmd_and_artifact_path(self, tmp_path: Path) -> None:
-        """Maven → build_cmd='mvn package', artifact_path='target/*.jar'"""
+        """Maven → build_cmd='mvn -B package' (v0.1.1: batch 모드)."""
         from scripts.stacks.jvm import JvmStackModule
 
         proj = make_maven_spring2(tmp_path)
@@ -366,7 +366,7 @@ class TestBuildPlan:
 
         plan = JvmStackModule().build_plan(detect_result)
 
-        assert plan.build_cmd == "mvn package"
+        assert plan.build_cmd == "mvn -B package"
         assert plan.artifact_path == "target/*.jar"
 
     def test_build_plan_gradle_uses_gradle_image(self, tmp_path: Path) -> None:

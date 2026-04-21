@@ -202,7 +202,8 @@ def test_generate_runner_latest_raises(
 
 
 # ---------------------------------------------------------------------------
-# 9. generate — 비root 사용자 지시자 포함: groupadd, useradd, USER appuser
+# 9. generate — 비root 사용자 지시자 포함: addgroup, adduser, USER appuser
+#    (v0.1.1 이후: alpine 호환 busybox 유틸)
 # ---------------------------------------------------------------------------
 
 
@@ -214,8 +215,8 @@ def test_generate_non_root_directives(
 ) -> None:
     result = generator.generate(gradle_build_plan, user_inputs, resource_defaults)
 
-    assert "groupadd" in result
-    assert "useradd" in result
+    assert "addgroup" in result
+    assert "adduser" in result
     assert "USER appuser" in result
 
 
@@ -291,10 +292,9 @@ def test_generate_gradle_cache_layer(
 ) -> None:
     result = generator.generate(gradle_build_plan, user_inputs, resource_defaults)
 
-    # Gradle 캐시 레이어: gradlew dependencies 또는 wrapper 파일 복사
-    assert "gradle" in result.lower()
-    # 의존성 캐시 목적의 COPY가 있어야 함 (wrapper 또는 build 파일)
-    assert "COPY gradle" in result or "gradlew" in result
+    # v0.1.1: 시스템 gradle 사용 — build.gradle* 스크립트만 먼저 복사 + dependencies warmup.
+    assert "COPY build.gradle" in result
+    assert "dependencies" in result
 
 
 # ---------------------------------------------------------------------------
