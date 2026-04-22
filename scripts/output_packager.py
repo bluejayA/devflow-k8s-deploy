@@ -138,6 +138,7 @@ class OutputPackager:
         *,
         image_reference: str,
         validation_outcome: ValidationOutcome | None = None,
+        manifest_filenames: list[str] | None = None,
     ) -> PackagingResult:
         """staging_dir에 rationale.md + summary.json 생성.
 
@@ -160,14 +161,10 @@ class OutputPackager:
             skipped = list(validation_outcome.skipped)
             skip_reasons = dict(validation_outcome.skip_reasons)
 
-        generated_files: list[str] = [
-            "Dockerfile",
-            "deployment.yaml",
-            "service.yaml",
-            "serviceaccount.yaml",
-            "summary.json",
-            "rationale.md",
+        workload_files = manifest_filenames if manifest_filenames is not None else [
+            "deployment.yaml", "service.yaml", "serviceaccount.yaml"
         ]
+        generated_files: list[str] = ["Dockerfile", *workload_files, "summary.json", "rationale.md"]
 
         summary_path = staging_dir / "summary.json"
         rationale_path = staging_dir / "rationale.md"

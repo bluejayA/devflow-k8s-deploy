@@ -136,6 +136,15 @@ class StatefulnessSignal:
 
 
 @dataclass(frozen=True)
+class ClusterConfig:
+    """cluster.preset 기반 환경 설정."""
+
+    preset: str
+    storage_class: str | None  # None = 클러스터 기본값 사용
+    network_policy: bool
+
+
+@dataclass(frozen=True)
 class AnalysisResult:
     """ProjectAnalyzer.analyze() 최종 결과."""
 

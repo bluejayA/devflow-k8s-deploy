@@ -756,6 +756,34 @@ class TestWrite:
         data2 = (staging2 / "summary.json").read_bytes()
         assert data1 == data2
 
+    def test_write_statefulset_manifest_filenames_in_summary(
+        self,
+        packager: OutputPackager,
+        staging_dir: Path,
+        user_inputs: UserInputs,
+        analysis_result: AnalysisResult,
+        validation_report: ValidationReport,
+        config_source_map: dict[str, str],
+        validation_outcome: ValidationOutcome,
+    ) -> None:
+        """manifest_filenames 전달 시 summary.json files에 statefulset.yaml 포함."""
+        with patch("scripts.output_packager._utc_now_iso", return_value=FIXED_UTC):
+            packager.write(
+                staging_dir=staging_dir,
+                inputs=user_inputs,
+                analysis=analysis_result,
+                validation=validation_report,
+                config_source_map=config_source_map,
+                image_reference="eclipse-temurin:21-jre-alpine",
+                validation_outcome=validation_outcome,
+                manifest_filenames=["statefulset.yaml", "service.yaml",
+                                    "serviceaccount.yaml", "networkpolicy.yaml"],
+            )
+        data = json.loads((staging_dir / "summary.json").read_text())
+        files = data["files"]
+        assert "statefulset.yaml" in files
+        assert "deployment.yaml" not in files
+
 
 # ---------------------------------------------------------------------------
 # Critical 1: troubleshoot redact 테스트
