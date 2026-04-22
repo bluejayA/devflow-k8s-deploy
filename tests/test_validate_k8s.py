@@ -72,6 +72,8 @@ def _minimal_deployment(
     readiness_probe: dict | None = None,
     # container ports (for SVC-002 cross-check)
     container_ports: list[dict] | None = None,
+    # LIFE-W01: terminationGracePeriodSeconds (pod level)
+    termination_grace_period: int | None = 30,
 ) -> dict:
     """모든 검증을 통과하는 최소 Deployment dict 반환.
 
@@ -133,6 +135,8 @@ def _minimal_deployment(
     }
     if service_account_name is not None:
         pod_spec["serviceAccountName"] = service_account_name
+    if termination_grace_period is not None:
+        pod_spec["terminationGracePeriodSeconds"] = termination_grace_period
 
     return {
         "apiVersion": "apps/v1",
@@ -785,6 +789,61 @@ class TestIMGW01:
         mf = _write_file(tmp_path, doc)
         report = _validator().validate([mf])
         assert "IMG-W01" not in [r.rule_id for r in report.results if r.level == "WARN"]
+
+
+# ─── LIFE-W01: terminationGracePeriodSeconds ──────────────────────────────────
+
+
+class TestLIFEW01:
+    """LIFE-W01: terminationGracePeriodSeconds 미설정 또는 30 미만 WARN."""
+
+    def test_warn_when_missing(self, tmp_path: Path) -> None:
+        doc = _minimal_deployment(termination_grace_period=None)
+        mf = _write_file(tmp_path, doc)
+        report = _validator().validate([mf])
+        assert "LIFE-W01" in [r.rule_id for r in report.results if r.level == "WARN"]
+
+    def test_warn_when_below_threshold(self, tmp_path: Path) -> None:
+        doc = _minimal_deployment(termination_grace_period=10)
+        mf = _write_file(tmp_path, doc)
+        report = _validator().validate([mf])
+        assert "LIFE-W01" in [r.rule_id for r in report.results if r.level == "WARN"]
+
+    def test_no_warn_when_at_threshold(self, tmp_path: Path) -> None:
+        doc = _minimal_deployment(termination_grace_period=30)
+        mf = _write_file(tmp_path, doc)
+        report = _validator().validate([mf])
+        assert "LIFE-W01" not in [r.rule_id for r in report.results if r.level == "WARN"]
+
+
+# ─── IMG-W02: imagePullPolicy Always + digest 없음 ────────────────────────────
+
+
+class TestIMGW02:
+    """IMG-W02: imagePullPolicy=Always + digest 미사용 WARN."""
+
+    def test_warn_always_no_digest(self, tmp_path: Path) -> None:
+        doc = _minimal_deployment(image="myregistry.io/app:v1.2.3")
+        doc["spec"]["template"]["spec"]["containers"][0]["imagePullPolicy"] = "Always"
+        mf = _write_file(tmp_path, doc)
+        report = _validator().validate([mf])
+        assert "IMG-W02" in [r.rule_id for r in report.results if r.level == "WARN"]
+
+    def test_no_warn_always_with_digest(self, tmp_path: Path) -> None:
+        doc = _minimal_deployment(
+            image="myregistry.io/app:v1.2.3@sha256:abc123def456abc123def456abc123def456abc123def456abc123def456abc1"
+        )
+        doc["spec"]["template"]["spec"]["containers"][0]["imagePullPolicy"] = "Always"
+        mf = _write_file(tmp_path, doc)
+        report = _validator().validate([mf])
+        assert "IMG-W02" not in [r.rule_id for r in report.results if r.level == "WARN"]
+
+    def test_no_warn_not_always(self, tmp_path: Path) -> None:
+        doc = _minimal_deployment(image="myregistry.io/app:v1.2.3")
+        doc["spec"]["template"]["spec"]["containers"][0]["imagePullPolicy"] = "IfNotPresent"
+        mf = _write_file(tmp_path, doc)
+        report = _validator().validate([mf])
+        assert "IMG-W02" not in [r.rule_id for r in report.results if r.level == "WARN"]
 
 
 # ─── YAML 파싱 / 멀티문서 / 디렉토리 탐색 ──────────────────────────────────────

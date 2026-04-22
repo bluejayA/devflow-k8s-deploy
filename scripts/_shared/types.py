@@ -58,6 +58,7 @@ class UserInputs:
     namespace: str
     output_dir: Path
     resource_hint: Literal["small", "medium", "large"]
+    replicas: int = 2
 
 
 # ─── 분석 ───
