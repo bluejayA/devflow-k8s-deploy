@@ -1,34 +1,34 @@
-# 빌드 단계: JDK로 소스 빌드
+# 빌드 단계: JDK로 소스 빌드 (builder image에 시스템 gradle/maven 포함)
 FROM {{ builder_image }} AS builder
 
 WORKDIR /build
 
-# 의존성 캐시 레이어 — Gradle/Maven 의존성이 먼저 복사되어 소스 변경 시에도 재사용
+# 의존성 캐시 레이어 — 빌드 스크립트만 먼저 복사해 소스 변경 시 재사용
 {% if build_system == "gradle" %}
-COPY gradle gradle
-COPY gradlew ./
 COPY build.gradle* settings.gradle* gradle.properties* ./
-RUN ./gradlew --no-daemon dependencies > /dev/null 2>&1 || true
+{% if has_gradle_dir %}COPY gradle ./gradle
+{% endif %}RUN gradle --no-daemon dependencies > /dev/null 2>&1 || true
 {% elif build_system == "maven" %}
 COPY pom.xml .
 RUN mvn -B dependency:go-offline -q 2>&1 || true
 {% endif %}
 
-# 소스 복사 및 빌드
+# 소스 + 모듈 전체 복사 — `.dockerignore`(k8s-output/, .git/, build/, target/, .env 등)로 오염 차단
 COPY . .
 RUN {{ build_cmd }}
 
 # 런타임 단계: JRE로 경량 실행
 FROM {{ runner_image }}
 
-# 비root 사용자 — 컨테이너 탈출 공격 시 호스트 root 권한 차단
-RUN groupadd --system --gid 1000 appgroup \
- && useradd --system --uid 1000 --gid appgroup --no-create-home appuser
+# 비root 사용자 — 컨테이너 탈출 시 호스트 root 권한 차단
+# busybox 계열(alpine) 유틸 사용 — glibc 전용 명령은 alpine에서 미동작
+RUN addgroup -S -g 1000 appgroup \
+ && adduser -S -u 1000 -G appgroup -H appuser
 
 WORKDIR /app
 
 # COPY --chown — 임의 사용자 ID 충돌 방지
-COPY --from=builder --chown=appuser:appgroup {{ artifact_path }} /app/app.jar
+COPY --from=builder --chown=appuser:appgroup /build/{{ artifact_path }} /app/app.jar
 
 # latest 태그 금지 — 재현성 + 공급망 공격 방지 (builder/runner 이미지 태그에 반영)
 

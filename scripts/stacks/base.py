@@ -7,7 +7,7 @@ v0.2+: Go / Python / React 슬롯 예정
 from __future__ import annotations
 
 from pathlib import Path
-from typing import ClassVar
+from typing import ClassVar, Literal
 
 from typing_extensions import Protocol, runtime_checkable
 
@@ -17,6 +17,8 @@ from scripts._shared.types import (
     ResourceDefaults,
     StackDetectResult,
 )
+
+ResourceHint = Literal["small", "medium", "large"]
 
 
 @runtime_checkable
@@ -49,8 +51,12 @@ class StackModule(Protocol):
         """liveness / readiness ProbeConfig 생성."""
         ...
 
-    def defaults(self) -> ResourceDefaults:
-        """스택 기본 리소스 설정 + writable_paths."""
+    def defaults(self, resource_hint: ResourceHint) -> ResourceDefaults:
+        """스택 기본 리소스 설정 + writable_paths.
+
+        resource_hint: 사용자가 STEP 1에서 선택한 규모 등급 (small/medium/large).
+                       각 스택은 tier별 cpu/memory 값을 차등 반환해야 한다.
+        """
         ...
 
     def artifact_locator(

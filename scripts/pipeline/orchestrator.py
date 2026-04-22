@@ -296,6 +296,28 @@ def _fix_dry_run_failures(
     )
 
 
+# v0.2.0 — 앱 이미지 태그 기본값. config.build.image_tag 미지정 시 사용.
+_DEFAULT_APP_IMAGE_TAG = "app:0.2.0"
+
+
+def _resolve_app_image_tag(config: ResolvedConfig) -> str:
+    """앱 배포 이미지 태그 결정 (v0.2.0).
+
+    우선순위:
+      1) config.build.image_tag (사용자 명시)
+      2) _DEFAULT_APP_IMAGE_TAG (`app:0.2.0`)
+
+    base runner image(`eclipse-temurin:*-jre-alpine` 등)를 반환하지 않음 —
+    v0.1.0의 CrashLoopBackOff 회귀 방지.
+
+    유효하지 않은 이미지 참조 시 InvalidImageError는 상위 검증에서 처리 (build step).
+    여기서는 순수 조회만 수행.
+    """
+    build_section = _safe_section(config.raw, "build")
+    tag = build_section.get("image_tag", _DEFAULT_APP_IMAGE_TAG)
+    return str(tag) if tag else _DEFAULT_APP_IMAGE_TAG
+
+
 # ─── SkillPipeline ─────────────────────────────────────────────────────────────
 
 
@@ -379,7 +401,7 @@ class SkillPipeline:
             try:
                 # STEP 3
                 artifacts = self._generate_artifacts_step3(
-                    writer.staging_dir, inputs, analysis, config
+                    writer.staging_dir, inputs, analysis, config, project_dir=project_dir
                 )
 
                 # STEP 4
@@ -604,8 +626,10 @@ class SkillPipeline:
         config: ResolvedConfig,
         inputs: UserInputs,
     ) -> AnalysisResult:
-        """STEP 2: ProjectAnalyzer.analyze() 호출."""
-        return self._deps.project_analyzer.analyze(project_dir, config)
+        """STEP 2: ProjectAnalyzer.analyze() 호출. resource_hint 전달(v0.2.0+)."""
+        return self._deps.project_analyzer.analyze(
+            project_dir, config, resource_hint=inputs.resource_hint
+        )
 
     # ─── STEP 3: 아티팩트 생성 ───────────────────────────────────────────────
 
@@ -615,24 +639,36 @@ class SkillPipeline:
         inputs: UserInputs,
         analysis: AnalysisResult,
         config: ResolvedConfig,
+        *,
+        project_dir: Path | None = None,
     ) -> GeneratedArtifacts:
-        """STEP 3: Dockerfile + 3 manifest 생성 → staging_dir에 저장."""
+        """STEP 3: Dockerfile + 3 manifest 생성 → staging_dir에 저장.
+
+        v0.2.0 P1-a/P1-b: project_dir로 gradle/ 존재 감지 + `Dockerfile.dockerignore`
+        동반 생성 (context pollution 방어).
+        """
         # Dockerfile 생성
         dockerfile_content = self._deps.dockerfile_generator.generate(
             analysis.build_plan,
             inputs,
             analysis.defaults,
+            project_dir=project_dir,
         )
         dockerfile_path = staging_dir / "Dockerfile"
         dockerfile_path.write_text(dockerfile_content, encoding="utf-8")
 
-        # Deployment YAML — runner_image를 컨테이너 이미지로 사용
+        # Dockerfile.dockerignore — `docker build -f k8s-output/Dockerfile` 시 자동 적용
+        ignore_content = self._deps.dockerfile_generator.generate_dockerignore()
+        (staging_dir / "Dockerfile.dockerignore").write_text(ignore_content, encoding="utf-8")
+
+        # Deployment YAML — 빌드된 앱 이미지 태그를 사용 (v0.2.0 수정: runner_image 금지)
+        app_image = _resolve_app_image_tag(config)
         deployment_content = self._deps.manifest_generator.generate_deployment(
             inputs,
             analysis,
             analysis.defaults,
             analysis.probe_config,
-            image=analysis.build_plan.runner_image,
+            image=app_image,
         )
         deployment_path = staging_dir / "deployment.yaml"
         deployment_path.write_text(deployment_content, encoding="utf-8")
@@ -732,8 +768,8 @@ class SkillPipeline:
         build_engine = build_section.get("engine", "skip")
         build_result = None
         if build_engine != "skip":
-            # 기본 이미지 태그 — config에서 조회 후 검증
-            image_tag = str(build_section.get("image_tag", "app:0.1.0"))
+            # 기본 이미지 태그 — _resolve_app_image_tag로 deployment와 단일 출처 공유
+            image_tag = _resolve_app_image_tag(config)
             try:
                 validate_image_reference(image_tag)
             except InvalidImageError:
@@ -744,7 +780,7 @@ class SkillPipeline:
                 build_engine = "skip"
 
         if build_engine != "skip":
-            image_tag = str(build_section.get("image_tag", "app:0.1.0"))
+            image_tag = _resolve_app_image_tag(config)
             build_result = run_build_loop(
                 self._deps.build_runner,
                 staging_dir,
@@ -778,8 +814,12 @@ class SkillPipeline:
         validation_outcome: ValidationOutcome,
         config: ResolvedConfig,
     ) -> PackagingResult:
-        """STEP 5: OutputPackager.write() 호출."""
-        image_reference = analysis.build_plan.runner_image
+        """STEP 5: OutputPackager.write() 호출.
+
+        v0.2.0: summary.json/rationale.md의 image_reference도 앱 이미지 태그로 일치시킴
+        (이전 버그: runner_image → CrashLoop 재현).
+        """
+        image_reference = _resolve_app_image_tag(config)
         return self._deps.output_packager.write(
             staging_dir,
             inputs,
@@ -891,7 +931,7 @@ def main(argv: list[str] | None = None) -> int:
 
     parser = argparse.ArgumentParser(
         prog="devflow-k8s-deploy",
-        description="devflow-k8s-deploy v0.1.0 — JVM 프로젝트를 k8s 배포 파일로 변환",
+        description="devflow-k8s-deploy v0.2.0 — JVM 프로젝트를 k8s 배포 파일로 변환",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 예시:

@@ -45,6 +45,7 @@ from scripts._shared.types import (
     ResourceDefaults,
     StackDetectResult,
 )
+from scripts.stacks.base import ResourceHint
 
 # ──────────────────────────────────────────────────────────────────────────────
 # 내부 상수
@@ -52,6 +53,30 @@ from scripts._shared.types import (
 
 _DEFAULT_JDK_VERSION = 21
 _DEFAULT_PORT = 8080
+
+# JVM 리소스 tier — small/medium/large 등급별 requests/limits.
+# request = 스케줄 시 확보할 최소, limit = 초과 시 throttling/OOMKill.
+# memory_request는 JVM heap(기본 1/4)+metaspace+class+thread stack 여유 기준.
+_RESOURCE_TIERS: dict[str, dict[str, str]] = {
+    "small": {
+        "cpu_request": "50m",
+        "memory_request": "256Mi",
+        "cpu_limit": "500m",
+        "memory_limit": "512Mi",
+    },
+    "medium": {
+        "cpu_request": "100m",
+        "memory_request": "512Mi",
+        "cpu_limit": "1000m",
+        "memory_limit": "1Gi",
+    },
+    "large": {
+        "cpu_request": "250m",
+        "memory_request": "1Gi",
+        "cpu_limit": "2000m",
+        "memory_limit": "2Gi",
+    },
+}
 
 # 빌드 시스템별 공식 builder 이미지 (Maven/Gradle CLI 내장)
 # Gradle 공식: https://hub.docker.com/_/gradle  (jdk21-alpine 태그 제공)
@@ -155,8 +180,9 @@ class JvmStackModule:
         runner_image: eclipse-temurin:{N}-jre-alpine  (slim runtime, 공통)
 
         build_cmd:
-          - Maven: "mvn package"
-          - Gradle: "gradle bootJar"
+          - Maven:  "mvn -B package"      (-B = batch, non-interactive, 색상 ANSI 제거)
+          - Gradle: "gradle --no-daemon bootJar"
+                   (컨테이너 빌드에서 daemon은 clean shutdown 실패 + 메모리 상주)
         """
         jdk_version = _DEFAULT_JDK_VERSION
         build_system = detect_result.build_system or ""
@@ -169,7 +195,7 @@ class JvmStackModule:
         return BuildPlan(
             builder_image=builder_image,
             runner_image=runner_image,
-            build_cmd="mvn package" if maven else "gradle bootJar",
+            build_cmd="mvn -B package" if maven else "gradle --no-daemon bootJar",
             artifact_path="target/*.jar" if maven else "build/libs/*.jar",
         )
 
@@ -207,13 +233,21 @@ class JvmStackModule:
                 readiness=ProbeSpec(kind="http", path="/actuator/health", port=port),
             )
 
-    def defaults(self) -> ResourceDefaults:
-        """JVM 스택 기본 리소스 설정."""
+    def defaults(self, resource_hint: ResourceHint) -> ResourceDefaults:
+        """JVM 스택 tier별 리소스 설정.
+
+        small:  저부하 사이드카/유틸 — JVM 최소 동작
+        medium: 일반 마이크로서비스 (기본값)
+        large:  대용량/메모리 집약 서비스
+
+        writable_paths는 tier와 무관 — Spring Boot 런타임 쓰기 경로(F-32).
+        """
+        tier = _RESOURCE_TIERS[resource_hint]
         return ResourceDefaults(
-            cpu_request="100m",
-            memory_request="512Mi",
-            cpu_limit="1000m",
-            memory_limit="1Gi",
+            cpu_request=tier["cpu_request"],
+            memory_request=tier["memory_request"],
+            cpu_limit=tier["cpu_limit"],
+            memory_limit=tier["memory_limit"],
             writable_paths=["/tmp", "/var/log"],
         )
 

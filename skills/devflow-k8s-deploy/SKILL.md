@@ -13,7 +13,7 @@ description: |
   - v0.1.0은 JVM 스택만 지원 (Go/Python/React는 v0.2+ 예정)
 
 metadata:
-  version: 0.1.0
+  version: 0.2.0
   author: Jay
   category: infrastructure
   stacks: [jvm]

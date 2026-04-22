@@ -6,6 +6,7 @@ Gradle/Maven 의존성 캐시 레이어 최적화(F-25). 보안 근거 주석(F-
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Literal
 
 from scripts._shared.errors import InvalidImageError
@@ -46,6 +47,8 @@ class DockerfileGenerator:
         build_plan: BuildPlan,
         inputs: UserInputs,
         defaults: ResourceDefaults,  # noqa: ARG002  (v0.1.0 미사용 — v0.2+ writable_paths VOLUME 용 예약)
+        *,
+        project_dir: Path | None = None,
     ) -> str:
         """Dockerfile 문자열 반환.
 
@@ -81,16 +84,35 @@ class DockerfileGenerator:
 
         build_system = _detect_build_system(build_plan.build_cmd)
 
+        # v0.2.0 P1-a: Gradle Version Catalog(`gradle/libs.versions.toml`) +
+        # convention plugins 지원 — project_dir에 `gradle/` 있으면 dep cache 레이어에
+        # 포함. 없으면 생략(없는 상태에서 COPY하면 docker build 실패).
+        has_gradle_dir = False
+        if project_dir is not None:
+            gradle_path = project_dir / "gradle"
+            has_gradle_dir = gradle_path.is_dir()
+
         context: dict[str, object] = {
             "artifact_path": build_plan.artifact_path,
             "build_cmd": build_plan.build_cmd,
             "build_system": build_system,
             "builder_image": build_plan.builder_image,
+            "has_gradle_dir": has_gradle_dir,
             "port": inputs.port,
             "runner_image": build_plan.runner_image,
         }
 
         return self._renderer.render_dockerfile("jvm", context)
+
+    def generate_dockerignore(self) -> str:
+        """`.dockerignore` 내용 반환 (Docker 20.10+ `Dockerfile.dockerignore` 규약).
+
+        v0.2.0 P1-b: `COPY . .`로 복원하면서 context pollution(.git/, build/,
+        k8s-output/, .env 등) 방어를 전담하는 독립 아티팩트. Dockerfile 바로 옆에
+        `Dockerfile.dockerignore` 이름으로 배치하면 `docker build -f <dir>/Dockerfile
+        <ctx>` 시 자동 적용.
+        """
+        return self._renderer.render_dockerignore()
 
     def _validate_image_tag(self, image: str) -> None:
         """이미지 참조 문자열을 엄격 allowlist로 검증.

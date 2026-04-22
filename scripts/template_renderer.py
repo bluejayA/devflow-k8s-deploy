@@ -83,6 +83,14 @@ class TemplateRenderer:
         template_path = f"dockerfile/{stack}.tmpl"
         return self._render(template_path, context)
 
+    def render_dockerignore(self) -> str:
+        """templates/dockerfile/dockerignore.tmpl 렌더링.
+
+        변수 없는 정적 템플릿(v0.2.0 시점) — context={} 로 위임.
+        미래에 stack별 .dockerignore 차등이 필요하면 context 변수 추가.
+        """
+        return self._render("dockerfile/dockerignore.tmpl", {})
+
     def render_manifest(self, kind: str, context: dict[str, object]) -> str:
         """templates/manifest/{kind}.tmpl 렌더링.
 

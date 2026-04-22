@@ -34,3 +34,6 @@ __pycache__/
 *.pyc
 dist/
 build/
+k8s-output/
+k8s-output-failed-*/
+.venv/

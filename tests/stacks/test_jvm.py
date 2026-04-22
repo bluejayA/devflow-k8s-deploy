@@ -344,7 +344,7 @@ class TestProbePlan:
 
 class TestBuildPlan:
     def test_gradle_build_cmd_and_artifact_path(self, tmp_path: Path) -> None:
-        """Gradle → build_cmd='gradle bootJar', artifact_path='build/libs/*.jar'"""
+        """Gradle → build_cmd='gradle --no-daemon bootJar' (v0.1.1: daemon 비활성)."""
         from scripts.stacks.jvm import JvmStackModule
 
         proj = make_gradle_kts_spring3(tmp_path)
@@ -353,11 +353,11 @@ class TestBuildPlan:
 
         plan = JvmStackModule().build_plan(detect_result)
 
-        assert plan.build_cmd == "gradle bootJar"
+        assert plan.build_cmd == "gradle --no-daemon bootJar"
         assert plan.artifact_path == "build/libs/*.jar"
 
     def test_maven_build_cmd_and_artifact_path(self, tmp_path: Path) -> None:
-        """Maven → build_cmd='mvn package', artifact_path='target/*.jar'"""
+        """Maven → build_cmd='mvn -B package' (v0.1.1: batch 모드)."""
         from scripts.stacks.jvm import JvmStackModule
 
         proj = make_maven_spring2(tmp_path)
@@ -366,7 +366,7 @@ class TestBuildPlan:
 
         plan = JvmStackModule().build_plan(detect_result)
 
-        assert plan.build_cmd == "mvn package"
+        assert plan.build_cmd == "mvn -B package"
         assert plan.artifact_path == "target/*.jar"
 
     def test_build_plan_gradle_uses_gradle_image(self, tmp_path: Path) -> None:
@@ -450,11 +450,11 @@ class TestBuildPlan:
 
 
 class TestDefaults:
-    def test_defaults_field_values(self) -> None:
-        """cpu/memory request/limit 기본값 검증."""
+    def test_defaults_medium_field_values(self) -> None:
+        """medium tier = v0.1.0의 기본값과 동일 (v0.2.0 back-compat baseline)."""
         from scripts.stacks.jvm import JvmStackModule
 
-        defaults = JvmStackModule().defaults()
+        defaults = JvmStackModule().defaults("medium")
 
         assert defaults.cpu_request == "100m"
         assert defaults.memory_request == "512Mi"
@@ -462,10 +462,10 @@ class TestDefaults:
         assert defaults.memory_limit == "1Gi"
 
     def test_defaults_writable_paths(self) -> None:
-        """writable_paths에 /tmp와 /var/log 포함."""
+        """writable_paths에 /tmp와 /var/log 포함 (tier 무관)."""
         from scripts.stacks.jvm import JvmStackModule
 
-        defaults = JvmStackModule().defaults()
+        defaults = JvmStackModule().defaults("medium")
 
         assert "/tmp" in defaults.writable_paths
         assert "/var/log" in defaults.writable_paths
