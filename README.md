@@ -2,15 +2,15 @@
 
 JVM 프로젝트를 Kubernetes 배포용 Dockerfile + manifest로 자동 생성하는 Claude Code 플러그인.
 
-**v0.2.0** — JVM (Kotlin + Java Spring Boot) 스택 지원. v0.1.0의 런타임 배포 결함 전면 수정.
+**v0.4.0** — StatefulSet/PVC + NetworkPolicy zero-trust 지원. 클러스터 preset 구조 도입.
 
-![version](https://img.shields.io/badge/version-0.2.0-blue)
-![release](https://img.shields.io/badge/release-v0.2.0-success)
-![tests](https://img.shields.io/badge/tests-631_passed-green)
+![version](https://img.shields.io/badge/version-0.4.0-blue)
+![release](https://img.shields.io/badge/release-v0.4.0-success)
+![tests](https://img.shields.io/badge/tests-688_passed-green)
 ![status](https://img.shields.io/badge/status-released-success)
 ![license](https://img.shields.io/badge/license-MIT-lightgrey)
 
-> **⚠️ v0.1.0 사용자**: v0.1.0은 Dockerfile이 alpine 런타임에서 `groupadd: not found`로 빌드 실패, deployment.yaml이 베이스 JRE 이미지를 참조해 **CrashLoopBackOff 확정** 결함이 있습니다. **v0.2.0 업그레이드 필수**. 아래 [v0.2.0 변경사항](#v020-변경사항) 참조.
+> **⚠️ v0.1.0 사용자**: v0.1.0은 Dockerfile alpine 런타임 빌드 실패 + deployment.yaml **CrashLoopBackOff** 확정 결함이 있습니다. **v0.4.0 업그레이드 필수**. 아래 [v0.2.0 변경사항](#v020-변경사항) 참조.
 
 ---
 
@@ -43,7 +43,7 @@ Claude가 아래 5단계를 한국어로 안내하며 실행합니다:
 |------|------|
 | **1. 입력 수집** | 한국어로 6개 필드 질문 (각 질문에 "?" 입력 시 도움말) |
 | **2. 프로젝트 분석** | build.gradle.kts / pom.xml 자동 분석 + Spring Boot 버전 감지 |
-| **3. 파일 생성** | Dockerfile + Dockerfile.dockerignore + deployment.yaml + service.yaml + serviceaccount.yaml |
+| **3. 파일 생성** | Dockerfile + Dockerfile.dockerignore + deployment.yaml (또는 statefulset.yaml) + service.yaml + serviceaccount.yaml + networkpolicy.yaml (클러스터 설정 시) |
 | **4. 검증** | validate_k8s.py 정적 검증 + kubectl dry-run (미설치 시 graceful skip). kubectl dry-run은 `--validate=false`로 cluster 없이 client-side 파싱만 수행. 엄격한 규칙 검증은 `validate_k8s.py` (K8sValidator)가 담당. |
 | **5. 패키징** | rationale.md (근거 문서) + summary.json (CI 소비용) |
 
@@ -163,6 +163,11 @@ service:
   type: ClusterIP
   port: 80
   target_port: 8080
+
+cluster:
+  preset: orbstack       # orbstack: local-path StorageClass + Cilium NetworkPolicy
+  # storage_class: my-custom-storage  # preset 기본값 override
+  # network_policy: false              # NetworkPolicy 생성 스킵 (+ NET-W01 WARN)
 ```
 
 ### 3계층 설정 우선순위 (F-60)
@@ -265,12 +270,12 @@ jq '.validation.skipped' k8s-output/summary.json
 ### GitHub Release (권장)
 ```bash
 # 특정 버전 체크아웃
-git clone --branch v0.2.0 https://github.com/bluejayA/devflow-k8s-deploy.git
+git clone --branch v0.4.0 https://github.com/bluejayA/devflow-k8s-deploy.git
 cd devflow-k8s-deploy
 uv sync
 
 # 또는 GitHub Release에서 source 다운로드
-gh release download v0.2.0 -R bluejayA/devflow-k8s-deploy
+gh release download v0.4.0 -R bluejayA/devflow-k8s-deploy
 ```
 
 ### Claude Code 플러그인 (devflow-marketplace)
@@ -284,7 +289,7 @@ gh release download v0.2.0 -R bluejayA/devflow-k8s-deploy
 git clone https://github.com/bluejayA/devflow-k8s-deploy
 cd devflow-k8s-deploy
 uv sync --all-extras
-uv run pytest -v              # 631 tests
+uv run pytest -v              # 688 tests
 uv run ruff check scripts/ tests/
 uv run mypy scripts/
 ```
@@ -293,13 +298,14 @@ uv run mypy scripts/
 
 ## 개발 상태
 
-**v0.2.0 Released (2026-04-22)** 🎉 · [v0.1.0 (2026-04-21)](https://github.com/bluejayA/devflow-k8s-deploy/releases/tag/v0.1.0)
+**v0.4.0 Released (2026-04-22)** 🎉 · [v0.2.0](https://github.com/bluejayA/devflow-k8s-deploy/releases/tag/v0.2.0) · [v0.1.0](https://github.com/bluejayA/devflow-k8s-deploy/releases/tag/v0.1.0)
 
-- 전체 테스트: **631 통과** / ruff / mypy strict clean
+- 전체 테스트: **688 통과** / ruff / mypy strict clean
+- v0.4.0: StatefulSet/PVC + NetworkPolicy zero-trust + ClusterConfig preset (Codex 외부 리뷰 3건 반영)
+- v0.3.0: replicas 설정화 + LIFE-W01/IMG-W02 WARN 규칙 + validators 패키지 모듈화
 - v0.2.0: v0.1.0의 런타임 배포 결함 6건 수정 + Codex 외부 리뷰 P1/P2 반영
-- v0.1.0: 16 units × 3-Stage 리뷰 + E2E CLI smoke 통과 + Codex 초기 리뷰 3건 반영 ([v0.1.0 여정 요약](devflow-docs/release/v0.1.0-release-notes.md))
+- v0.1.0: 16 units × 3-Stage 리뷰 + E2E CLI smoke 통과 ([여정 요약](devflow-docs/release/v0.1.0-release-notes.md))
 - 개발 방법론: INCEPTION → CONSTRUCTION (aidlc-devflow 플러그인)
-- 관련 이슈: [bluejayA/aidlc-devflow#41 (BL-031)](https://github.com/bluejayA/aidlc-devflow/issues/41)
 
 ---
 
@@ -310,6 +316,39 @@ uv run mypy scripts/
 3. **설정 3계층** — **프로젝트 > 조직 > 내장 기본값** (앞이 우선, 뒤를 덮어씀). 프로젝트 설정이 조직 설정을 덮어쓰고, 조직 설정이 내장 기본값을 덮어씁니다.
 4. **AIDLC 비종속** — aidlc-devflow 플러그인 없이 단독 사용 가능.
 5. **한국어 우선** — 모든 사용자 대면 메시지 한국어 요약 + 원어 병기 (NFR-17).
+
+---
+
+## v0.4.0 변경사항
+
+### 신규 기능
+
+- **StatefulSet + PVC 지원** (BL-003): `stateful: high` 감지 시 `statefulset.yaml` 자동 생성
+  - `volumeClaimTemplates` 포함 PVC 설정 — StorageClass는 cluster preset 기반
+  - liveness/readinessProbe 자동 포함
+  - STS-W01: volumeClaimTemplates 미설정 시 WARN
+- **NetworkPolicy zero-trust** (BL-004): `networkpolicy.yaml` 자동 생성
+  - default deny-all ingress/egress + CoreDNS egress(kube-system:53) 자동 허용
+  - `cluster.network_policy: false` 시 생성 스킵 + NET-W01 WARN (로컬 테스트용)
+- **ClusterConfig / preset 구조** 도입
+  - `cluster.preset: orbstack` → `storageClassName: local-path`, NetworkPolicy 활성
+  - preset 미설정 시 orbstack fallback 또는 인터랙티브 선택
+  - `storage_class`, `network_policy` 직접 override 가능
+
+### Codex 외부 리뷰 반영 (P1/P2)
+
+- `generate_statefulset()` placeholder 이미지 제거 — `build.image_tag` 연결
+- `cluster: <string>` scalar 설정 AttributeError 방어 (`isinstance(dict)` guard)
+- `summary.json` generated_files 동적 생성 — statefulset.yaml/networkpolicy.yaml 반영
+
+---
+
+## v0.3.0 변경사항
+
+- **replicas 설정화**: `.devflow-k8s-deploy.yml`의 `replicas` 필드로 제어 가능
+- **LIFE-W01**: liveness probe 미설정 시 WARN
+- **IMG-W02**: image digest pinning 미설정 시 WARN
+- **validators 패키지 모듈화**: `validate_k8s.py` 단일 파일 → `validators/rules/` 규칙별 분리
 
 ---
 
@@ -337,21 +376,20 @@ v0.1.0 샘플 배포 검증 중 발견된 **6건의 런타임 결함**을 수정
 
 ---
 
-## v0.2.0 제약 (v0.1.0에서 유지)
+## v0.4.0 제약
 
 - JVM 스택만 (Kotlin + Java Spring Boot)
-- `StatefulSet` 미지원 (Deployment만) — stateful 앱 감지 시 경고
-- auto-fix 루프 미지원 (v0.3+) — 검증 실패 시 troubleshoot.md 안내 + 수동 수정
-- PVC / NetworkPolicy / PDB 없음
+- auto-fix 루프 미지원 (v0.5+) — 검증 실패 시 troubleshoot.md 안내 + 수동 수정
+- PDB / topologySpreadConstraints 없음
+- cluster preset: `orbstack`만 내장 (커스텀은 `storage_class` / `network_policy` 직접 지정)
 
-## v0.3+ 로드맵
+## v0.5+ 로드맵
 
 - Go / Python / React 스택 추가
 - auto-fix 루프 (3회 자동 수정)
-- StatefulSet + PVC 지원
-- NetworkPolicy (zero-trust default deny)
 - PodDisruptionBudget / topologySpreadConstraints
 - Helm chart 생성
+- cluster preset 확장 (EKS, GKE, kind)
 
 ---
 

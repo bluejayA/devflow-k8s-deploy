@@ -1,0 +1,26 @@
+# DevFlow State
+
+## Current Phase
+complete
+
+## Finishing Choice
+B (PR pending)
+
+## PR URL
+https://github.com/bluejayA/devflow-k8s-deploy/pull/23
+
+## Current Stage
+build-and-test (완료)
+
+## Completed Units
+- bl003-bl004 — StatefulSet/PVC + NetworkPolicy zero-trust (685 tests, commit: 33df09e)
+
+## Complexity
+Standard
+
+## Selected Approach
+A안 — 직행 구현 (application-design/units-generation 스킵, TDD 직행)
+
+## Worktree
+- branch: feature/statefulset-networkpolicy
+- path: .worktrees/feature-statefulset-networkpolicy

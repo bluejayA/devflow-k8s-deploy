@@ -44,3 +44,16 @@
 - 2026-04-21: **aidlc-finishing-a-development-branch 옵션 B 선택 (PR 생성)** — `git push -u origin feature/v0.1.0-construction` + `gh pr create --base main`. PR URL: https://github.com/bluejayA/devflow-k8s-deploy/pull/2. 워크트리 유지 (머지 전까지). state는 `complete` + `Finishing Choice: B (PR pending)` 상태로 보존 — 다음 재개 시 PR 머지 자동 확인 경로 활성.
 - 2026-04-21: **PR #2 머지 완료** (merge commit c718051 on main) → v0.1.0 annotated tag + push + GitHub Release 생성 (https://github.com/bluejayA/devflow-k8s-deploy/releases/tag/v0.1.0). README v0.1.0 Released 상태로 업데이트 (commit 34606bc).
 - 2026-04-21: **Flow finished — PR merged** — devflow-state/session-summary를 `devflow-docs/.archive/{name}-2026-04-21.md`로 이동 + state의 Current Phase `complete` → `finished` 반영. `-construction` worktree 제거 + `feature/v0.1.0-construction` 로컬 브랜치 삭제. main 단일 worktree로 복귀.
+[2026-04-22T08:04:25Z] New flow — clean start (artifacts archived, workspace.md preserved)
+[2026-04-22T08:05:58Z] workspace-detection — Brownfield, delta update (Git Activity + validators package), 655 tests
+[2026-04-22T09:42:52Z] requirements-analysis — Standard depth, F-14개 도출, 열린질문 0개, 가정 5개
+[2026-04-22T10:04:22Z] requirements-analysis UPDATE — F-01/F-10/F-11/F-13 수정: allow_ingress/egress ClusterConfig 분리, network_policy:false = all-allow 로컬 시나리오 명시
+[2026-04-22T10:06:28Z] pre-planning — User Stories only (NFR skipped)
+[2026-04-22T10:08:18Z] user-stories — 2 actors, 8 stories (Must:4, Should:4)
+[2026-04-22T10:09:45Z] user-stories UPDATE — 주니어 엔지니어 액터 추가, US-009/010/011 신규 (Should)
+[2026-04-22T10:14:25Z] workflow-planning — A안(직행구현)/B안(설계후구현) 생성, A안 권장
+[2026-04-22T10:15:42Z] approach-selected — A안 직행구현 선택
+[2026-04-22T10:18:28Z] Branch: feature/statefulset-networkpolicy
+[2026-04-22T10:22:08Z] worktree-created — feature/statefulset-networkpolicy @ d050480, baseline 655 passed
+[2026-04-22T10:37:11Z] Phase transition: INCEPTION → CONSTRUCTION — commit: d050480
+[2026-04-22T12:42:52Z] code-plan approved — bl003-bl004, 9 new files, 8 modified, 25+ tests
