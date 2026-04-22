@@ -541,6 +541,10 @@ class SkillPipeline:
             )
             resource_hint = cast(Literal["small", "medium", "large"], resource_hint_answer)
 
+        replicas = int(app_raw.get("replicas", 2))
+        if replicas < 1:
+            raise ValueError(f"app.replicas는 1 이상이어야 합니다: {replicas}")
+
         return UserInputs(
             app_name=app_name,
             port=port,
@@ -548,6 +552,7 @@ class SkillPipeline:
             namespace=namespace,
             output_dir=Path(output_dir_str),
             resource_hint=resource_hint,
+            replicas=replicas,
         )
 
     def _prompt_field(

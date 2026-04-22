@@ -28,6 +28,9 @@ BUILTIN_DEFAULTS: dict[str, Any] = {
     "validation": {
         "skipped": [],  # --skipped 인자 기본값
     },
+    "app": {
+        "replicas": 2,  # spec.replicas 기본값 — 1 이상 필수
+    },
 }
 
 

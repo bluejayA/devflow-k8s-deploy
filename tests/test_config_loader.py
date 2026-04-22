@@ -568,3 +568,31 @@ class TestSymlinkDefense:
         # 심볼릭 링크 경고 기록
         assert len(result.warnings) >= 1
         assert any("심볼릭" in w or "symlink" in w.lower() for w in result.warnings)
+
+
+# ---------------------------------------------------------------------------
+# #18 replicas 기본값 테스트
+# ---------------------------------------------------------------------------
+
+def test_builtin_defaults_has_app_replicas() -> None:
+    """BUILTIN_DEFAULTS에 app.replicas: 2 기본값이 존재해야 한다."""
+    from scripts._shared.defaults import BUILTIN_DEFAULTS
+
+    assert "app" in BUILTIN_DEFAULTS
+    assert BUILTIN_DEFAULTS["app"]["replicas"] == 2
+
+
+def test_config_loader_app_replicas_default(tmp_path: Path) -> None:
+    """설정 파일에 app.replicas 없으면 기본값 2가 병합된다."""
+    loader = ConfigLoader(org_config_path=tmp_path / "no_org.yml")
+    result = loader.load(tmp_path)
+    assert result.raw.get("app", {}).get("replicas") == 2
+
+
+def test_config_loader_app_replicas_override(tmp_path: Path) -> None:
+    """프로젝트 설정의 app.replicas가 기본값을 덮어쓴다."""
+    proj_cfg = tmp_path / ".devflow-k8s-deploy.yml"
+    proj_cfg.write_text("app:\n  replicas: 5\n", encoding="utf-8")
+    loader = ConfigLoader(org_config_path=tmp_path / "no_org.yml")
+    result = loader.load(tmp_path)
+    assert result.raw["app"]["replicas"] == 5
