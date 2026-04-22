@@ -1251,7 +1251,7 @@ class TestExceptionNarrowing:
             raise PermissionError(f"Permission denied: {path}")
 
         monkeypatch.setattr(
-            "scripts.validate_k8s.read_text_limited", raise_permission_error
+            "scripts.validators.core.read_text_limited", raise_permission_error
         )
         report = _validator().validate([mf])
         assert any(r.rule_id == "PARSE-ERR" for r in report.results)
