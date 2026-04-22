@@ -815,6 +815,13 @@ class TestLIFEW01:
         report = _validator().validate([mf])
         assert "LIFE-W01" not in [r.rule_id for r in report.results if r.level == "WARN"]
 
+    def test_warn_when_non_numeric(self, tmp_path: Path) -> None:
+        doc = _minimal_deployment(termination_grace_period=None)
+        doc["spec"]["template"]["spec"]["terminationGracePeriodSeconds"] = "30s"
+        mf = _write_file(tmp_path, doc)
+        report = _validator().validate([mf])
+        assert "LIFE-W01" in [r.rule_id for r in report.results if r.level == "WARN"]
+
 
 # ─── IMG-W02: imagePullPolicy Always + digest 없음 ────────────────────────────
 

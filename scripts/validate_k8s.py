@@ -819,13 +819,18 @@ class K8sValidator:
     def _rule_life_w01(self, pod_spec: dict[str, Any]) -> list[CheckResult]:
         """LIFE-W01: terminationGracePeriodSeconds 미설정 또는 30 미만 WARN."""
         val = pod_spec.get("terminationGracePeriodSeconds")
-        if val is not None and int(val) >= 30:
-            return []
-        reason = (
-            f"terminationGracePeriodSeconds={val!r} — 30 미만"
-            if val is not None
-            else "terminationGracePeriodSeconds 미설정"
-        )
+        if val is not None:
+            try:
+                if int(val) >= 30:
+                    return []
+            except (ValueError, TypeError):
+                pass
+        if val is None:
+            reason = "terminationGracePeriodSeconds 미설정"
+        elif not isinstance(val, int):
+            reason = f"terminationGracePeriodSeconds={val!r} — 비정수값"
+        else:
+            reason = f"terminationGracePeriodSeconds={val!r} — 30 미만"
         return [
             CheckResult(
                 rule_id="LIFE-W01",
