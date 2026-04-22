@@ -2,15 +2,15 @@
 
 JVM 프로젝트를 Kubernetes 배포용 Dockerfile + manifest로 자동 생성하는 Claude Code 플러그인.
 
-**v0.1.0** — JVM (Kotlin + Java Spring Boot) 스택 지원.
+**v0.2.0** — JVM (Kotlin + Java Spring Boot) 스택 지원. v0.1.0의 런타임 배포 결함 전면 수정.
 
-![version](https://img.shields.io/badge/version-0.1.0-blue)
-![release](https://img.shields.io/badge/release-v0.1.0-success)
-![tests](https://img.shields.io/badge/tests-613_passed-green)
+![version](https://img.shields.io/badge/version-0.2.0-blue)
+![release](https://img.shields.io/badge/release-v0.2.0-success)
+![tests](https://img.shields.io/badge/tests-631_passed-green)
 ![status](https://img.shields.io/badge/status-released-success)
 ![license](https://img.shields.io/badge/license-MIT-lightgrey)
 
-**🎉 v0.1.0 Released** ([Release Notes](https://github.com/bluejayA/devflow-k8s-deploy/releases/tag/v0.1.0) · [PR #2](https://github.com/bluejayA/devflow-k8s-deploy/pull/2) · [여정 요약](devflow-docs/release/v0.1.0-release-notes.md))
+> **⚠️ v0.1.0 사용자**: v0.1.0은 Dockerfile이 alpine 런타임에서 `groupadd: not found`로 빌드 실패, deployment.yaml이 베이스 JRE 이미지를 참조해 **CrashLoopBackOff 확정** 결함이 있습니다. **v0.2.0 업그레이드 필수**. 아래 [v0.2.0 변경사항](#v020-변경사항) 참조.
 
 ---
 
@@ -43,7 +43,7 @@ Claude가 아래 5단계를 한국어로 안내하며 실행합니다:
 |------|------|
 | **1. 입력 수집** | 한국어로 6개 필드 질문 (각 질문에 "?" 입력 시 도움말) |
 | **2. 프로젝트 분석** | build.gradle.kts / pom.xml 자동 분석 + Spring Boot 버전 감지 |
-| **3. 파일 생성** | Dockerfile + deployment.yaml + service.yaml + serviceaccount.yaml |
+| **3. 파일 생성** | Dockerfile + Dockerfile.dockerignore + deployment.yaml + service.yaml + serviceaccount.yaml |
 | **4. 검증** | validate_k8s.py 정적 검증 + kubectl dry-run (미설치 시 graceful skip). kubectl dry-run은 `--validate=false`로 cluster 없이 client-side 파싱만 수행. 엄격한 규칙 검증은 `validate_k8s.py` (K8sValidator)가 담당. |
 | **5. 패키징** | rationale.md (근거 문서) + summary.json (CI 소비용) |
 
@@ -64,10 +64,10 @@ Claude가 아래 5단계를 한국어로 안내하며 실행합니다:
 
 | 스택 | 감지 파일 | 상태 |
 |------|----------|------|
-| JVM — Kotlin + Spring Boot 2.x/3.x | `build.gradle.kts` / `build.gradle` / `pom.xml` | v0.1.0 |
-| Go | — | v0.2 예정 |
-| Python | — | v0.3 예정 |
-| React (nginx) | — | v0.4 예정 |
+| JVM — Kotlin + Spring Boot 2.x/3.x | `build.gradle.kts` / `build.gradle` / `pom.xml` | v0.2.0 |
+| Go | — | v0.3 예정 |
+| Python | — | v0.4 예정 |
+| React (nginx) | — | v0.5 예정 |
 
 ---
 
@@ -78,10 +78,12 @@ Claude가 아래 5단계를 한국어로 안내하며 실행합니다:
 - multi-stage: 빌드 시스템별 도구 포함 builder → slim JRE runner
   - Gradle: `gradle:jdk21-alpine` (builder) → `eclipse-temurin:21-jre-alpine` (runner)
   - Maven: `maven:3.9-eclipse-temurin-21-alpine` (builder) → `eclipse-temurin:21-jre-alpine` (runner)
-- 비root 사용자: `groupadd/useradd appuser` + `USER appuser`
+- 비root 사용자: busybox 호환 `addgroup/adduser appuser` + `USER appuser` (alpine 런타임 대응)
 - `COPY --chown=appuser:appuser`
 - `latest` 태그 금지 (F-23) — 명시 버전 또는 digest 필수. OCI regex allowlist로 개행/인젝션 방어
 - Gradle/Maven 의존성 레이어 최적화 (캐시 레이어 분리)
+- Gradle Version Catalog(`gradle/libs.versions.toml`) + convention plugins 자동 감지 (v0.2.0)
+- `Dockerfile.dockerignore` 동반 생성 — `.git`, `build/`, `k8s-output/`, `.env*` 등 context pollution 방어
 - 보안 관련 지시어마다 "왜 이 설정인지" 근거 주석 포함
 
 ### Kubernetes Manifest
@@ -263,25 +265,26 @@ jq '.validation.skipped' k8s-output/summary.json
 ### GitHub Release (권장)
 ```bash
 # 특정 버전 체크아웃
-git clone --branch v0.1.0 https://github.com/bluejayA/devflow-k8s-deploy.git
+git clone --branch v0.2.0 https://github.com/bluejayA/devflow-k8s-deploy.git
 cd devflow-k8s-deploy
 uv sync
 
 # 또는 GitHub Release에서 source 다운로드
-gh release download v0.1.0 -R bluejayA/devflow-k8s-deploy
+gh release download v0.2.0 -R bluejayA/devflow-k8s-deploy
 ```
 
-### Claude Code 플러그인 (marketplace 등록 예정)
+### Claude Code 플러그인 (devflow-marketplace)
 ```bash
-/plugin install bluejayA/devflow-k8s-deploy
+/plugin marketplace add bluejayA/devflow-marketplace
+/plugin install devflow-k8s-deploy@devflow-marketplace
 ```
 
 ### 개발/로컬 사용
 ```bash
 git clone https://github.com/bluejayA/devflow-k8s-deploy
 cd devflow-k8s-deploy
-uv sync
-uv run pytest -v              # 613 tests
+uv sync --all-extras
+uv run pytest -v              # 631 tests
 uv run ruff check scripts/ tests/
 uv run mypy scripts/
 ```
@@ -290,14 +293,12 @@ uv run mypy scripts/
 
 ## 개발 상태
 
-**v0.1.0 Released (2026-04-21)** 🎉
+**v0.2.0 Released (2026-04-22)** 🎉 · [v0.1.0 (2026-04-21)](https://github.com/bluejayA/devflow-k8s-deploy/releases/tag/v0.1.0)
 
-- 전체 테스트: **613 통과** / ruff / mypy strict — 전부 clean
-- 16 units 완성 (6 phases)
-- E2E CLI smoke test 통과 (샘플 Spring Boot → Dockerfile + manifest 3종 + rationale.md + summary.json 생성 검증)
-- Codex 외부 리뷰 통과 (3건 반영)
+- 전체 테스트: **631 통과** / ruff / mypy strict clean
+- v0.2.0: v0.1.0의 런타임 배포 결함 6건 수정 + Codex 외부 리뷰 P1/P2 반영
+- v0.1.0: 16 units × 3-Stage 리뷰 + E2E CLI smoke 통과 + Codex 초기 리뷰 3건 반영 ([v0.1.0 여정 요약](devflow-docs/release/v0.1.0-release-notes.md))
 - 개발 방법론: INCEPTION → CONSTRUCTION (aidlc-devflow 플러그인)
-- 전체 여정 요약: [`devflow-docs/release/v0.1.0-release-notes.md`](devflow-docs/release/v0.1.0-release-notes.md) — INCEPTION 7단계 + 16 units × 3-Stage 리뷰 + 통합/외부 버그 수정 기록
 - 관련 이슈: [bluejayA/aidlc-devflow#41 (BL-031)](https://github.com/bluejayA/aidlc-devflow/issues/41)
 
 ---
@@ -312,14 +313,38 @@ uv run mypy scripts/
 
 ---
 
-## v0.1.0 제약
+## v0.2.0 변경사항
+
+v0.1.0 샘플 배포 검증 중 발견된 **6건의 런타임 결함**을 수정. v0.1.0 Dockerfile은 `docker build` 시점에, 생성된 deployment.yaml은 `kubectl apply` 시점에 실패했기에 **긴급 패치**.
+
+### Critical fixes (docker build + k8s apply 시점 실패)
+- **Dockerfile alpine 호환**: `groupadd`/`useradd` → `addgroup`/`adduser` (v0.1.0은 `groupadd: not found`로 즉시 실패)
+- **Dockerfile wrapper 의존 제거**: 시스템 gradle 사용 (v0.1.0은 `gradle/` dir + `gradlew` 강제)
+- **Dockerfile Version Catalog 지원**: `gradle/libs.versions.toml` 있으면 조건부 COPY (Codex P1-a)
+- **Dockerfile multi-module 지원**: `COPY src ./src` 하드코딩 제거 → `COPY . .` + `Dockerfile.dockerignore` 동반 생성 (Codex P1-b)
+- **deployment.yaml 앱 이미지 wiring**: `build.image_tag` 사용 (v0.1.0은 베이스 runner 이미지를 그대로 넣어 CrashLoopBackOff 확정)
+- **deployment.yaml `imagePullPolicy: IfNotPresent`** 명시 + non-mutable tag 전제 주석 (Codex P2)
+
+### UX / 정책 fixes
+- **`resource_hint` 실반영**: `StackModule.defaults(resource_hint)` tier 매핑 — small(50m-500m, 256-512Mi) / medium(100m-1000m, 512Mi-1Gi) / large(250m-2000m, 1-2Gi). v0.1.0은 사용자 응답이 silent discard.
+- **gradle `--no-daemon` + maven `-B`**: 컨테이너 빌드 효율/안전성
+
+### Breaking changes (플러그인 API 직접 import 시)
+- `StackModule.defaults()` → `defaults(resource_hint)` — 호출부에 인자 필요
+- `ProjectAnalyzer.analyze(project_dir, config)` → `analyze(project_dir, config, resource_hint="medium")` — 기본값 있어 기존 호출 무변경도 OK
+
+플러그인 최종 사용자(SKILL 호출)는 변경 불필요 — orchestrator가 자동 처리.
+
+---
+
+## v0.2.0 제약 (v0.1.0에서 유지)
 
 - JVM 스택만 (Kotlin + Java Spring Boot)
 - `StatefulSet` 미지원 (Deployment만) — stateful 앱 감지 시 경고
-- auto-fix 루프 미지원 (v0.2+) — 검증 실패 시 troubleshoot.md 안내 + 수동 수정
+- auto-fix 루프 미지원 (v0.3+) — 검증 실패 시 troubleshoot.md 안내 + 수동 수정
 - PVC / NetworkPolicy / PDB 없음
 
-## v0.2+ 로드맵
+## v0.3+ 로드맵
 
 - Go / Python / React 스택 추가
 - auto-fix 루프 (3회 자동 수정)
