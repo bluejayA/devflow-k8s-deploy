@@ -904,7 +904,13 @@ class TestExitCode:
                 "limits": {"cpu": "500m", "memory": "512Mi"},
             },
         )
-        mf = _write_file(tmp_path, dep)
+        netpol = {
+            "apiVersion": "networking.k8s.io/v1",
+            "kind": "NetworkPolicy",
+            "metadata": {"name": "myapp-netpol"},
+            "spec": {"podSelector": {}, "policyTypes": ["Ingress", "Egress"]},
+        }
+        mf = _write_file(tmp_path, dep, netpol)
         report = _validator().validate([mf])
         assert report.exit_code == 0
 
@@ -1061,7 +1067,13 @@ class TestCLI:
                 "limits": {"cpu": "500m", "memory": "512Mi"},
             },
         )
-        mf = _write_file(tmp_path, dep)
+        netpol = {
+            "apiVersion": "networking.k8s.io/v1",
+            "kind": "NetworkPolicy",
+            "metadata": {"name": "myapp-netpol"},
+            "spec": {"podSelector": {}, "policyTypes": ["Ingress", "Egress"]},
+        }
+        mf = _write_file(tmp_path, dep, netpol)
         from scripts.validate_k8s import main
         monkeypatch.setattr(sys, "argv", ["validate_k8s.py", str(mf)])
         code = main()

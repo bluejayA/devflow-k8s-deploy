@@ -23,6 +23,7 @@ from scripts._shared.types import (
     AnalysisResult,
     BuildPlan,
     BuildResult,
+    ClusterConfig,
     DryRunResult,
     MessagePolicy,
     PackagingResult,
@@ -199,6 +200,19 @@ def _make_deps(
         raw = config_raw
     config = _make_resolved_config(raw=raw)
     config_loader.load.return_value = config
+
+    # resolve_cluster_config: raw['cluster'] 기반으로 ClusterConfig 반환
+    cluster_raw = raw.get("cluster") or {}
+    preset = str(cluster_raw.get("preset", "orbstack"))
+    _preset_defaults = {"orbstack": {"storage_class": "local-path", "network_policy": True}}
+    _pd = _preset_defaults.get(preset, {})
+    cluster_config = ClusterConfig(
+        preset=preset,
+        storage_class=cluster_raw.get("storage_class", _pd.get("storage_class")),  # type: ignore[arg-type]
+        network_policy=bool(cluster_raw.get("network_policy", _pd.get("network_policy", False))),
+    )
+    config_loader.resolve_cluster_config.return_value = cluster_config
+
     mocks["config_loader"] = config_loader
 
     project_analyzer = MagicMock(name="project_analyzer")
@@ -214,6 +228,10 @@ def _make_deps(
     manifest_generator.generate_deployment.return_value = "apiVersion: apps/v1\nkind: Deployment"
     manifest_generator.generate_service.return_value = "apiVersion: v1\nkind: Service"
     manifest_generator.generate_serviceaccount.return_value = "apiVersion: v1\nkind: ServiceAccount"
+    manifest_generator.generate_statefulset.return_value = "apiVersion: apps/v1\nkind: StatefulSet"
+    manifest_generator.generate_networkpolicy.return_value = (
+        "apiVersion: networking.k8s.io/v1\nkind: NetworkPolicy"
+    )
     mocks["manifest_generator"] = manifest_generator
 
     k8s_validator = MagicMock(name="k8s_validator")
@@ -888,3 +906,85 @@ class TestCollectInputsReplicas:
         })
         with pytest.raises(ValueError, match="replicas"):
             pipeline._collect_inputs_step1(config, tmp_path)
+
+
+# ─── StatefulSet / NetworkPolicy 통합 테스트 ─────────────────────────────────
+
+
+class TestStatefulsetNetworkpolicyOrchestration:
+    """Step 7: orchestrator StatefulSet/NetworkPolicy 분기 테스트."""
+
+    def _make_stateful_analysis(self, confidence: str = "high") -> AnalysisResult:
+        base = _make_analysis_result()
+        return AnalysisResult(
+            **{
+                **base.__dict__,
+                "statefulness": StatefulnessSignal(
+                    is_stateful=True, confidence=confidence, reasons=["DB 연결 감지"]
+                ),
+            }
+        )
+
+    def _run_pipeline(
+        self,
+        tmp_path: Path,
+        analysis: AnalysisResult,
+        config_raw: dict[str, Any],
+    ) -> tuple[Any, dict[str, MagicMock]]:
+        deps, mocks = _make_deps(config_raw=config_raw, analysis=analysis)
+        pipeline = SkillPipeline(deps, prompt_callback=None)
+        result = pipeline.run(tmp_path, tmp_path / "out")
+        return result, mocks
+
+    def test_stateful_high_generates_statefulset(self, tmp_path: Path) -> None:
+        analysis = self._make_stateful_analysis(confidence="high")
+        config_raw = {
+            "app": {"name": "my-app", "port": 8080, "exposure": "ClusterIP",
+                    "resource_hint": "medium"},
+            "build": {"engine": "skip"},
+            "output": {"dir": str(tmp_path / "out"), "on_exists": "overwrite"},
+            "cluster": {"preset": "orbstack"},
+        }
+        _, mocks = self._run_pipeline(tmp_path, analysis, config_raw)
+        mocks["manifest_generator"].generate_statefulset.assert_called_once()
+
+    def test_stateful_low_generates_deployment(self, tmp_path: Path) -> None:
+        base = _make_analysis_result()
+        analysis = AnalysisResult(
+            **{**base.__dict__, "statefulness": StatefulnessSignal(
+                is_stateful=False, confidence="high", reasons=[]
+            )}
+        )
+        config_raw = {
+            "app": {"name": "my-app", "port": 8080, "exposure": "ClusterIP",
+                    "resource_hint": "medium"},
+            "build": {"engine": "skip"},
+            "output": {"dir": str(tmp_path / "out"), "on_exists": "overwrite"},
+        }
+        _, mocks = self._run_pipeline(tmp_path, analysis, config_raw)
+        mocks["manifest_generator"].generate_deployment.assert_called_once()
+        mocks["manifest_generator"].generate_statefulset.assert_not_called()
+
+    def test_network_policy_true_generates_networkpolicy(self, tmp_path: Path) -> None:
+        analysis = _make_analysis_result()
+        config_raw = {
+            "app": {"name": "my-app", "port": 8080, "exposure": "ClusterIP",
+                    "resource_hint": "medium"},
+            "build": {"engine": "skip"},
+            "output": {"dir": str(tmp_path / "out"), "on_exists": "overwrite"},
+            "cluster": {"preset": "orbstack"},
+        }
+        _, mocks = self._run_pipeline(tmp_path, analysis, config_raw)
+        mocks["manifest_generator"].generate_networkpolicy.assert_called_once()
+
+    def test_network_policy_false_skips_networkpolicy(self, tmp_path: Path) -> None:
+        analysis = _make_analysis_result()
+        config_raw = {
+            "app": {"name": "my-app", "port": 8080, "exposure": "ClusterIP",
+                    "resource_hint": "medium"},
+            "build": {"engine": "skip"},
+            "output": {"dir": str(tmp_path / "out"), "on_exists": "overwrite"},
+            "cluster": {"preset": "orbstack", "network_policy": False},
+        }
+        _, mocks = self._run_pipeline(tmp_path, analysis, config_raw)
+        mocks["manifest_generator"].generate_networkpolicy.assert_not_called()

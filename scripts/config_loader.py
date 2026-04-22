@@ -13,7 +13,16 @@ import yaml
 from scripts._shared.defaults import load_builtin_defaults
 from scripts._shared.errors import UnsupportedStackError
 from scripts._shared.fileio import check_yaml_refs, is_within, read_text_limited
-from scripts._shared.types import NamespaceResolution, ResolvedConfig, StackDecision
+from scripts._shared.types import (
+    ClusterConfig,
+    NamespaceResolution,
+    ResolvedConfig,
+    StackDecision,
+)
+
+BUILTIN_CLUSTER_PRESETS: dict[str, dict[str, object]] = {
+    "orbstack": {"storage_class": "local-path", "network_policy": True},
+}
 
 # v0.1.0에서 지원하는 stack 목록 (단일 출처)
 _SUPPORTED_STACKS: frozenset[str] = frozenset({"auto", "jvm"})
@@ -201,6 +210,39 @@ class ConfigLoader:
 
         # stack_val == "jvm" (지원 목록 내 나머지 값)
         return StackDecision(forced_stack="jvm", source=source)
+
+    def resolve_cluster_config(
+        self,
+        config: ResolvedConfig,
+        prompt_callback: object,
+    ) -> ClusterConfig:
+        """cluster.preset 기반 ClusterConfig 반환.
+
+        우선순위:
+          1. config.raw['cluster']['preset'] 값
+          2. prompt_callback=None 시 'orbstack' fallback
+          (interactive 질문은 향후 확장)
+
+        preset 기반 기본값을 config override가 덮음.
+        알 수 없는 preset은 storage_class=None, network_policy=False 기본.
+        """
+        _cluster_val = config.raw.get("cluster")
+        cluster_raw: dict[str, object] = _cluster_val if isinstance(_cluster_val, dict) else {}
+        preset: str = str(cluster_raw.get("preset") or "orbstack")
+
+        preset_defaults = BUILTIN_CLUSTER_PRESETS.get(preset, {})
+        storage_class_val = cluster_raw.get(
+            "storage_class", preset_defaults.get("storage_class")
+        )
+        network_policy_val = cluster_raw.get(
+            "network_policy", preset_defaults.get("network_policy", False)
+        )
+
+        return ClusterConfig(
+            preset=preset,
+            storage_class=storage_class_val if storage_class_val is not None else None,  # type: ignore[arg-type]
+            network_policy=bool(network_policy_val),
+        )
 
     # ------------------------------------------------------------------
     # Internal helpers
