@@ -27,7 +27,8 @@ spec:
       containers:
         - name: {{ app_name }}
           image: {{ image }}
-          # imagePullPolicy 명시 — tag mutation 재푸시 시 갱신 보장 (F-공급망)
+          # imagePullPolicy 명시 — non-mutable tag 전제(동일 태그 재사용 금지).
+          # 공급망 방어 강화: CI/CD에서 digest(`image@sha256:...`) pinning 권장.
           imagePullPolicy: IfNotPresent
           ports:
             - name: http

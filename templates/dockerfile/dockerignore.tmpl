@@ -1,0 +1,53 @@
+# Docker build context 필터 — `Dockerfile.dockerignore` 경로 규약 (Docker 20.10+)
+# `docker build -f k8s-output/Dockerfile <ctx>` 시 자동 적용
+
+# VCS
+.git
+.gitignore
+
+# 빌드 산출물 (매번 컨테이너 내에서 재생성)
+build/
+target/
+out/
+dist/
+bin/
+.gradle/
+.mvn/wrapper/maven-wrapper.jar
+
+# IDE
+.idea/
+.vscode/
+*.iml
+*.iws
+*.ipr
+
+# OS
+.DS_Store
+Thumbs.db
+
+# devflow 산출물
+k8s-output/
+k8s-output-failed-*/
+
+# 시크릿 (git에 없더라도 로컬에 있을 수 있음)
+.env
+.env.*
+*.pem
+*.key
+*.p12
+*.pfx
+*credential*
+*token*
+kubeconfig
+*.kubeconfig
+
+# Python/JS (혼합 repo 대비)
+__pycache__/
+*.pyc
+node_modules/
+
+# 테스트 결과
+coverage/
+htmlcov/
+.coverage
+.pytest_cache/

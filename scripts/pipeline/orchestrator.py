@@ -401,7 +401,7 @@ class SkillPipeline:
             try:
                 # STEP 3
                 artifacts = self._generate_artifacts_step3(
-                    writer.staging_dir, inputs, analysis, config
+                    writer.staging_dir, inputs, analysis, config, project_dir=project_dir
                 )
 
                 # STEP 4
@@ -639,16 +639,27 @@ class SkillPipeline:
         inputs: UserInputs,
         analysis: AnalysisResult,
         config: ResolvedConfig,
+        *,
+        project_dir: Path | None = None,
     ) -> GeneratedArtifacts:
-        """STEP 3: Dockerfile + 3 manifest 생성 → staging_dir에 저장."""
+        """STEP 3: Dockerfile + 3 manifest 생성 → staging_dir에 저장.
+
+        v0.2.0 P1-a/P1-b: project_dir로 gradle/ 존재 감지 + `Dockerfile.dockerignore`
+        동반 생성 (context pollution 방어).
+        """
         # Dockerfile 생성
         dockerfile_content = self._deps.dockerfile_generator.generate(
             analysis.build_plan,
             inputs,
             analysis.defaults,
+            project_dir=project_dir,
         )
         dockerfile_path = staging_dir / "Dockerfile"
         dockerfile_path.write_text(dockerfile_content, encoding="utf-8")
+
+        # Dockerfile.dockerignore — `docker build -f k8s-output/Dockerfile` 시 자동 적용
+        ignore_content = self._deps.dockerfile_generator.generate_dockerignore()
+        (staging_dir / "Dockerfile.dockerignore").write_text(ignore_content, encoding="utf-8")
 
         # Deployment YAML — 빌드된 앱 이미지 태그를 사용 (v0.2.0 수정: runner_image 금지)
         app_image = _resolve_app_image_tag(config)

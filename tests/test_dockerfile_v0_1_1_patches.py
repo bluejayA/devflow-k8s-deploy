@@ -173,24 +173,26 @@ def test_jvm_gradle_build_cmd_has_no_daemon(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# I2: COPY . . 대신 src 디렉토리만 복사
+# I2: context pollution 방어 — v0.2.0 Codex P1-b 피드백 이후
+#     `COPY src ./src` 하드코딩은 multi-module 깨뜨려서 원복. 대신 `.dockerignore`로
+#     .git / build/ / k8s-output/ / .env 유입 차단. 자세한 건
+#     test_codex_p1_p2_fixes.py::test_dockerfile_generator_emits_dockerignore 참조.
 # ---------------------------------------------------------------------------
 
 
-def test_gradle_dockerfile_avoids_full_context_copy(
+def test_gradle_dockerfile_uses_full_context_with_ignore_filter(
     generator: DockerfileGenerator,
     gradle_plan: BuildPlan,
     inputs: UserInputs,
     defaults: ResourceDefaults,
 ) -> None:
-    """`COPY . .`는 .git/build/k8s-output/.env 등 의도치 않은 유입 경로 — 회피."""
+    """`COPY . .` 복원 — multi-module 레이아웃 지원. pollution은 .dockerignore 담당."""
     result = generator.generate(gradle_plan, inputs, defaults)
 
-    assert "COPY . ." not in result, "빌드 context 전체 복사는 비밀/빌드 산출물 유입 경로"
-    assert "COPY src" in result, "소스 디렉토리 스코프 복사 필요"
+    assert "COPY . ." in result, "multi-module 루트 지원을 위해 전체 context COPY 필요"
 
 
-def test_maven_dockerfile_avoids_full_context_copy(
+def test_maven_dockerfile_uses_full_context_with_ignore_filter(
     generator: DockerfileGenerator,
     maven_plan: BuildPlan,
     inputs: UserInputs,
@@ -198,5 +200,4 @@ def test_maven_dockerfile_avoids_full_context_copy(
 ) -> None:
     result = generator.generate(maven_plan, inputs, defaults)
 
-    assert "COPY . ." not in result
-    assert "COPY src" in result
+    assert "COPY . ." in result

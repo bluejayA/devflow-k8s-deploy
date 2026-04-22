@@ -6,14 +6,15 @@ WORKDIR /build
 # 의존성 캐시 레이어 — 빌드 스크립트만 먼저 복사해 소스 변경 시 재사용
 {% if build_system == "gradle" %}
 COPY build.gradle* settings.gradle* gradle.properties* ./
-RUN gradle --no-daemon dependencies > /dev/null 2>&1 || true
+{% if has_gradle_dir %}COPY gradle ./gradle
+{% endif %}RUN gradle --no-daemon dependencies > /dev/null 2>&1 || true
 {% elif build_system == "maven" %}
 COPY pom.xml .
 RUN mvn -B dependency:go-offline -q 2>&1 || true
 {% endif %}
 
-# 소스 복사 및 빌드 — src/만 스코프 복사 (.git, build/, k8s-output/ 등 유입 차단)
-COPY src ./src
+# 소스 + 모듈 전체 복사 — `.dockerignore`(k8s-output/, .git/, build/, target/, .env 등)로 오염 차단
+COPY . .
 RUN {{ build_cmd }}
 
 # 런타임 단계: JRE로 경량 실행

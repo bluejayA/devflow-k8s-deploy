@@ -207,6 +207,7 @@ def _make_deps(
 
     dockerfile_generator = MagicMock(name="dockerfile_generator")
     dockerfile_generator.generate.return_value = "FROM eclipse-temurin:21-jdk\nRUN echo ok"
+    dockerfile_generator.generate_dockerignore.return_value = ".git\nbuild/\n"
     mocks["dockerfile_generator"] = dockerfile_generator
 
     manifest_generator = MagicMock(name="manifest_generator")
