@@ -57,3 +57,4 @@
 [2026-04-22T10:22:08Z] worktree-created — feature/statefulset-networkpolicy @ d050480, baseline 655 passed
 [2026-04-22T10:37:11Z] Phase transition: INCEPTION → CONSTRUCTION — commit: d050480
 [2026-04-22T12:42:52Z] code-plan approved — bl003-bl004, 9 new files, 8 modified, 25+ tests
+[2026-04-22T14:43:21Z] flow-finished | option=B (PR merged) | v0.4.0 released | tag=v0.4.0 | commit=e12506d | worktree-removed=true
