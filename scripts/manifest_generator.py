@@ -75,6 +75,15 @@ def _validate_dns1123_label(value: str, field_name: str) -> None:
         )
 
 
+def _build_probe_dict(probe: ProbeSpec, initial_delay: int, period: int) -> dict[str, object]:
+    """ProbeSpec을 K8s probe dict로 변환 (yaml.dump 직접 사용용)."""
+    if probe.kind == "http":
+        handler: dict[str, object] = {"httpGet": {"path": probe.path, "port": probe.port}}
+    else:
+        handler = {"tcpSocket": {"port": probe.port}}
+    return {**handler, "initialDelaySeconds": initial_delay, "periodSeconds": period}
+
+
 def _build_probe_context(probe: ProbeSpec, prefix: str) -> dict[str, object]:
     """ProbeSpec을 템플릿 컨텍스트로 변환.
 
@@ -319,6 +328,12 @@ class ManifestGenerator:
                                 "name": inputs.app_name,
                                 "image": image,
                                 "ports": [{"containerPort": inputs.port, "protocol": "TCP"}],
+                                "livenessProbe": _build_probe_dict(
+                                    analysis.probe_config.liveness, 10, 10
+                                ),
+                                "readinessProbe": _build_probe_dict(
+                                    analysis.probe_config.readiness, 5, 5
+                                ),
                                 "securityContext": {
                                     "allowPrivilegeEscalation": False,
                                     "privileged": False,

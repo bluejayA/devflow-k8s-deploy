@@ -165,6 +165,21 @@ class TestGenerateStatefulset:
                 inputs, analysis, cluster, image="myrepo/app:1.0.0", storage_size="not-valid"
             )
 
+    def test_generate_statefulset_has_probes(self) -> None:
+        gen = self._make_generator()
+        inputs = _make_inputs()
+        analysis = _make_analysis()
+        cluster = _make_cluster_config()
+
+        yaml_str = gen.generate_statefulset(inputs, analysis, cluster, image="myrepo/app:1.0.0")
+        doc = yaml.safe_load(yaml_str)
+
+        container = doc["spec"]["template"]["spec"]["containers"][0]
+        assert "livenessProbe" in container, "livenessProbe 누락 — PRB-001 FAIL"
+        assert "readinessProbe" in container, "readinessProbe 누락 — PRB-002 FAIL"
+        assert container["livenessProbe"]["httpGet"]["path"] == "/actuator/health/liveness"
+        assert container["readinessProbe"]["httpGet"]["path"] == "/actuator/health/readiness"
+
     def test_generate_statefulset_injection_defense(self) -> None:
         gen = self._make_generator()
         inputs = _make_inputs()

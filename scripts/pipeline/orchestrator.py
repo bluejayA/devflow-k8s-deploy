@@ -418,7 +418,8 @@ class SkillPipeline:
 
                 # STEP 5
                 result = self._package_step5(
-                    writer.staging_dir, inputs, analysis, validation_outcome, config
+                    writer.staging_dir, inputs, analysis, validation_outcome, config,
+                    manifest_filenames=[p.name for p in artifacts.manifest_paths],
                 )
 
                 final_path = writer.commit()
@@ -859,6 +860,8 @@ class SkillPipeline:
         analysis: AnalysisResult,
         validation_outcome: ValidationOutcome,
         config: ResolvedConfig,
+        *,
+        manifest_filenames: list[str] | None = None,
     ) -> PackagingResult:
         """STEP 5: OutputPackager.write() 호출.
 
@@ -874,6 +877,7 @@ class SkillPipeline:
             config.source_map,
             image_reference=image_reference,
             validation_outcome=validation_outcome,
+            manifest_filenames=manifest_filenames,
         )
 
 

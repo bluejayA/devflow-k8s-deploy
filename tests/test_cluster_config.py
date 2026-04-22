@@ -74,3 +74,11 @@ class TestResolveClusterConfig:
         assert result.preset == "unknown-env"
         assert result.storage_class is None
         assert result.network_policy is False
+
+    def test_resolve_cluster_config_scalar_cluster_no_crash(self) -> None:
+        """cluster: orbstack (스칼라) — dict 가드 실패 시 AttributeError 발생했던 케이스."""
+        loader = ConfigLoader()
+        config = self._make_config({"cluster": "orbstack"})
+        result = loader.resolve_cluster_config(config, prompt_callback=None)
+        assert isinstance(result, ClusterConfig)
+        assert result.preset == "orbstack"  # orbstack fallback

@@ -226,7 +226,8 @@ class ConfigLoader:
         preset 기반 기본값을 config override가 덮음.
         알 수 없는 preset은 storage_class=None, network_policy=False 기본.
         """
-        cluster_raw: dict[str, object] = config.raw.get("cluster") or {}
+        _cluster_val = config.raw.get("cluster")
+        cluster_raw: dict[str, object] = _cluster_val if isinstance(_cluster_val, dict) else {}
         preset: str = str(cluster_raw.get("preset") or "orbstack")
 
         preset_defaults = BUILTIN_CLUSTER_PRESETS.get(preset, {})
