@@ -59,7 +59,7 @@ _DEFAULT_PORT = 8080
 # memory_request는 JVM heap(기본 1/4)+metaspace+class+thread stack 여유 기준.
 _RESOURCE_TIERS: dict[str, dict[str, str]] = {
     "small": {
-        "cpu_request": "50m",
+        "cpu_request": "125m",
         "memory_request": "256Mi",
         "cpu_limit": "500m",
         "memory_limit": "512Mi",
