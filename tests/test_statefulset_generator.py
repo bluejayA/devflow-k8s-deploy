@@ -89,13 +89,30 @@ class TestGenerateStatefulset:
         analysis = _make_analysis()
         cluster = _make_cluster_config()
 
-        yaml_str = gen.generate_statefulset(inputs, analysis, cluster)
+        yaml_str = gen.generate_statefulset(inputs, analysis, cluster, image="myrepo/app:1.0.0")
         doc = yaml.safe_load(yaml_str)
 
         assert doc["kind"] == "StatefulSet"
         assert doc["apiVersion"] == "apps/v1"
         assert doc["metadata"]["name"] == "my-app"
         assert doc["spec"]["replicas"] == 1
+        container = doc["spec"]["template"]["spec"]["containers"][0]
+        assert container["image"] == "myrepo/app:1.0.0"
+
+    def test_generate_statefulset_container_security_context(self) -> None:
+        gen = self._make_generator()
+        inputs = _make_inputs()
+        analysis = _make_analysis()
+        cluster = _make_cluster_config()
+
+        yaml_str = gen.generate_statefulset(inputs, analysis, cluster, image="myrepo/app:1.0.0")
+        doc = yaml.safe_load(yaml_str)
+
+        sec = doc["spec"]["template"]["spec"]["containers"][0]["securityContext"]
+        assert sec["allowPrivilegeEscalation"] is False
+        assert sec["readOnlyRootFilesystem"] is True
+        assert sec.get("privileged") is False
+        assert sec["capabilities"]["drop"] == ["ALL"]
 
     def test_generate_statefulset_volume_claim_templates(self) -> None:
         gen = self._make_generator()
@@ -103,7 +120,7 @@ class TestGenerateStatefulset:
         analysis = _make_analysis()
         cluster = _make_cluster_config()
 
-        yaml_str = gen.generate_statefulset(inputs, analysis, cluster)
+        yaml_str = gen.generate_statefulset(inputs, analysis, cluster, image="myrepo/app:1.0.0")
         doc = yaml.safe_load(yaml_str)
 
         vcts = doc["spec"]["volumeClaimTemplates"]
@@ -119,7 +136,7 @@ class TestGenerateStatefulset:
         analysis = _make_analysis()
         cluster = _make_cluster_config(storage_class="local-path")
 
-        yaml_str = gen.generate_statefulset(inputs, analysis, cluster)
+        yaml_str = gen.generate_statefulset(inputs, analysis, cluster, image="myrepo/app:1.0.0")
         doc = yaml.safe_load(yaml_str)
 
         vct = doc["spec"]["volumeClaimTemplates"][0]
@@ -131,7 +148,7 @@ class TestGenerateStatefulset:
         analysis = _make_analysis()
         cluster = _make_cluster_config(storage_class=None)
 
-        yaml_str = gen.generate_statefulset(inputs, analysis, cluster)
+        yaml_str = gen.generate_statefulset(inputs, analysis, cluster, image="myrepo/app:1.0.0")
         doc = yaml.safe_load(yaml_str)
 
         vct = doc["spec"]["volumeClaimTemplates"][0]
@@ -144,7 +161,9 @@ class TestGenerateStatefulset:
         cluster = _make_cluster_config()
 
         with pytest.raises(ValueError, match="storage_size"):
-            gen.generate_statefulset(inputs, analysis, cluster, storage_size="not-valid")
+            gen.generate_statefulset(
+                inputs, analysis, cluster, image="myrepo/app:1.0.0", storage_size="not-valid"
+            )
 
     def test_generate_statefulset_injection_defense(self) -> None:
         gen = self._make_generator()
@@ -153,4 +172,4 @@ class TestGenerateStatefulset:
         cluster = _make_cluster_config(storage_class="local-path\nmalicious: true")
 
         with pytest.raises(ValueError):
-            gen.generate_statefulset(inputs, analysis, cluster)
+            gen.generate_statefulset(inputs, analysis, cluster, image="myrepo/app:1.0.0")

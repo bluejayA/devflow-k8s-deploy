@@ -269,6 +269,7 @@ class ManifestGenerator:
         analysis: AnalysisResult,
         cluster: ClusterConfig,
         *,
+        image: str,
         storage_size: str = "1Gi",
     ) -> str:
         """statefulset.yaml 문자열 반환.
@@ -316,10 +317,11 @@ class ManifestGenerator:
                         "containers": [
                             {
                                 "name": inputs.app_name,
-                                "image": "placeholder:latest",
+                                "image": image,
                                 "ports": [{"containerPort": inputs.port, "protocol": "TCP"}],
                                 "securityContext": {
                                     "allowPrivilegeEscalation": False,
+                                    "privileged": False,
                                     "readOnlyRootFilesystem": True,
                                     "capabilities": {"drop": ["ALL"]},
                                 },

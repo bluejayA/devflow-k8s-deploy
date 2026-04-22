@@ -686,7 +686,7 @@ class SkillPipeline:
         )
         if is_stateful_high and cluster_config is not None:
             workload_content = self._deps.manifest_generator.generate_statefulset(
-                inputs, analysis, cluster_config
+                inputs, analysis, cluster_config, image=app_image
             )
             workload_path = staging_dir / "statefulset.yaml"
         else:
