@@ -281,6 +281,7 @@ class K8sValidator:
         results.extend(self._rule_sec008(pod_spec))
         results.extend(self._rule_sa001(pod_spec))
         results.extend(self._rule_sa002(pod_spec))
+        results.extend(self._rule_life_w01(pod_spec))
 
         containers: list[dict[str, Any]] = pod_spec.get("containers", [])
         init_containers: list[dict[str, Any]] = pod_spec.get("initContainers", [])
@@ -308,6 +309,7 @@ class K8sValidator:
         results.extend(self._rule_res_w01(container))
         results.extend(self._rule_img001(container))
         results.extend(self._rule_img_w01(container))
+        results.extend(self._rule_img_w02(container))
         results.extend(self._rule_prb001(container))
         results.extend(self._rule_prb002(container))
         return results
@@ -810,6 +812,60 @@ class K8sValidator:
                 suggestion=(
                     "image: myregistry.io/app:v1.2.3@sha256:... 형식으로 "
                     "digest를 고정하면 이미지 교체 공격(supply chain attack)을 방지할 수 있습니다."
+                ),
+            )
+        ]
+
+    def _rule_life_w01(self, pod_spec: dict[str, Any]) -> list[CheckResult]:
+        """LIFE-W01: terminationGracePeriodSeconds 미설정 또는 30 미만 WARN."""
+        val = pod_spec.get("terminationGracePeriodSeconds")
+        if val is not None:
+            try:
+                if int(val) >= 30:
+                    return []
+            except (ValueError, TypeError):
+                pass
+        if val is None:
+            reason = "terminationGracePeriodSeconds 미설정"
+        elif not isinstance(val, int):
+            reason = f"terminationGracePeriodSeconds={val!r} — 비정수값"
+        else:
+            reason = f"terminationGracePeriodSeconds={val!r} — 30 미만"
+        return [
+            CheckResult(
+                rule_id="LIFE-W01",
+                level="WARN",
+                container="(pod)",
+                message_ko=f"graceful shutdown 시간 부족: {reason}",
+                message_en=f"Insufficient graceful shutdown period: {reason}.",
+                suggestion=(
+                    "spec.template.spec.terminationGracePeriodSeconds: 30 이상을 설정하면 "
+                    "롤링 업데이트 중 진행 중인 요청이 완료될 때까지 기다릴 수 있습니다."
+                ),
+            )
+        ]
+
+    def _rule_img_w02(self, c: dict[str, Any]) -> list[CheckResult]:
+        """IMG-W02: imagePullPolicy=Always + digest 미사용 WARN."""
+        name = str(c.get("name", "unknown"))
+        image = str(c.get("image", ""))
+        pull_policy = str(c.get("imagePullPolicy", ""))
+
+        if pull_policy != "Always":
+            return []
+        if "@sha256:" in image:
+            return []
+
+        return [
+            CheckResult(
+                rule_id="IMG-W02",
+                level="WARN",
+                container=name,
+                message_ko=f"imagePullPolicy=Always이지만 digest가 없음: {image!r}",
+                message_en=f"imagePullPolicy=Always but no digest: {image!r}.",
+                suggestion=(
+                    "imagePullPolicy: Always와 함께 @sha256: digest를 사용하면 "
+                    "레지스트리에서 항상 동일한 이미지를 pull합니다."
                 ),
             )
         ]

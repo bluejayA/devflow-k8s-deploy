@@ -25,8 +25,7 @@ from scripts.template_renderer import TemplateRenderer
 # 시작/끝은 알파뉴메릭, 중간에 하이픈 허용
 _DNS1123_LABEL_RE = re.compile(r"^[a-z0-9]([a-z0-9\-]{0,61}[a-z0-9])?$")
 
-# 기본 replicas (v0.1.0 고정값, v0.2+에서 설정화 예정)
-_DEFAULT_REPLICAS = 2
+
 
 # exposure 허용 목록 — 런타임 검증 (Literal 타입은 런타임 강제 안 됨)
 _ALLOWED_EXPOSURES: frozenset[str] = frozenset({"ClusterIP", "NodePort", "LoadBalancer"})
@@ -146,7 +145,7 @@ class ManifestGenerator:
 
         포함:
           - metadata.name = inputs.app_name, namespace = inputs.namespace
-          - spec.replicas (default 2 — v0.1.0 고정값)
+          - spec.replicas = inputs.replicas
           - spec.template.spec.serviceAccountName = '{app_name}-sa'
           - spec.template.spec.automountServiceAccountToken: false
           - Pod securityContext (F-31): runAsNonRoot, runAsUser=1000,
@@ -194,7 +193,7 @@ class ManifestGenerator:
             "memory_request": defaults.memory_request,
             "namespace": inputs.namespace,
             "port": inputs.port,
-            "replicas": _DEFAULT_REPLICAS,
+            "replicas": inputs.replicas,
             **liveness_ctx,
             **readiness_ctx,
         }

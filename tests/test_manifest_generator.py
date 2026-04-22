@@ -150,7 +150,7 @@ def test_generate_deployment_metadata(
     assert doc["metadata"]["namespace"] == "dev"
 
 
-# 3. replicas == 2
+# 3. replicas == 2 (default)
 def test_generate_deployment_replicas(
     generator: ManifestGenerator,
     user_inputs: UserInputs,
@@ -164,6 +164,30 @@ def test_generate_deployment_replicas(
     )
     doc = yaml.safe_load(result)
     assert doc["spec"]["replicas"] == 2
+
+
+# 3b. replicas 설정값이 deployment spec.replicas에 반영됨
+def test_generate_deployment_custom_replicas(
+    generator: ManifestGenerator,
+    analysis_result: AnalysisResult,
+    resource_defaults: ResourceDefaults,
+    http_probe_config: ProbeConfig,
+) -> None:
+    inputs = UserInputs(
+        app_name="my-app",
+        port=8080,
+        exposure="ClusterIP",
+        namespace="dev",
+        output_dir=Path("/tmp/output"),
+        resource_hint="medium",
+        replicas=5,
+    )
+    result = generator.generate_deployment(
+        inputs, analysis_result, resource_defaults, http_probe_config,
+        image="myrepo/my-app:1.0.0",
+    )
+    doc = yaml.safe_load(result)
+    assert doc["spec"]["replicas"] == 5
 
 
 # 4. serviceAccountName == '{app_name}-sa'

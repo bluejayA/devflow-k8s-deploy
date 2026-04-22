@@ -824,3 +824,67 @@ class TestComputeCliExitCode:
             validation_exit_code=None,
         )
         assert _compute_cli_exit_code(result) == 0
+
+
+# ---------------------------------------------------------------------------
+# #18 replicas 설정화 — orchestrator 연결 테스트
+# ---------------------------------------------------------------------------
+
+class TestCollectInputsReplicas:
+    """_collect_inputs()가 app.replicas를 config에서 읽어 UserInputs에 전달한다."""
+
+    def _make_pipeline(self, config_raw: dict) -> tuple:
+        from scripts._shared.types import NamespaceResolution
+        from scripts.pipeline.orchestrator import SkillPipeline
+
+        raw = {
+            "output": {"on_exists": "overwrite"},
+            **config_raw,
+        }
+        deps, _ = _make_deps(config_raw=raw)
+        deps.config_loader.resolve_namespace.return_value = NamespaceResolution(
+            value="test-ns", source="user_input", requires_confirmation=False
+        )
+        config = _make_resolved_config(raw=raw)
+        pipeline = SkillPipeline(deps=deps, prompt_callback=None)
+        return pipeline, config
+
+    def test_replicas_from_config(self, tmp_path: Path) -> None:
+        """app.replicas: 3 → UserInputs.replicas == 3."""
+        pipeline, config = self._make_pipeline({
+            "app": {"name": "my-app", "port": 8080, "exposure": "ClusterIP",
+                    "resource_hint": "medium", "replicas": 3},
+            "output": {"dir": "k8s-output"},
+        })
+        inputs = pipeline._collect_inputs_step1(config, tmp_path)
+        assert inputs.replicas == 3
+
+    def test_replicas_default_when_missing(self, tmp_path: Path) -> None:
+        """app.replicas 미설정 → UserInputs.replicas == 2."""
+        pipeline, config = self._make_pipeline({
+            "app": {"name": "my-app", "port": 8080, "exposure": "ClusterIP",
+                    "resource_hint": "medium"},
+            "output": {"dir": "k8s-output"},
+        })
+        inputs = pipeline._collect_inputs_step1(config, tmp_path)
+        assert inputs.replicas == 2
+
+    def test_replicas_zero_raises_value_error(self, tmp_path: Path) -> None:
+        """app.replicas: 0 → ValueError."""
+        pipeline, config = self._make_pipeline({
+            "app": {"name": "my-app", "port": 8080, "exposure": "ClusterIP",
+                    "resource_hint": "medium", "replicas": 0},
+            "output": {"dir": "k8s-output"},
+        })
+        with pytest.raises(ValueError, match="replicas"):
+            pipeline._collect_inputs_step1(config, tmp_path)
+
+    def test_replicas_negative_raises_value_error(self, tmp_path: Path) -> None:
+        """app.replicas: -1 → ValueError."""
+        pipeline, config = self._make_pipeline({
+            "app": {"name": "my-app", "port": 8080, "exposure": "ClusterIP",
+                    "resource_hint": "medium", "replicas": -1},
+            "output": {"dir": "k8s-output"},
+        })
+        with pytest.raises(ValueError, match="replicas"):
+            pipeline._collect_inputs_step1(config, tmp_path)
