@@ -1,0 +1,77 @@
+# devflow-k8s-deploy 설정 샘플
+# 복사 후 .devflow-k8s-deploy.yml 로 저장하세요.
+# 우선순위: 이 파일 > ~/.claude/devflow-k8s-deploy.yml (조직) > 내장 기본값
+
+# ── 스택 ─────────────────────────────────────────────────────────────
+# auto: 프로젝트 파일(build.gradle.kts / pom.xml 등)로 자동 감지 (권장)
+# jvm:  명시 강제
+stack: auto
+
+# ── 네임스페이스 ──────────────────────────────────────────────────────
+# 미설정 시 프로젝트 디렉터리명을 제안. "default" 자동 배정 금지.
+namespace: my-service
+
+# ── 앱 정보 ──────────────────────────────────────────────────────────
+app:
+  name: my-service          # Deployment/Service/SA 이름에 사용
+  port: 8080                # 컨테이너 포트 (미설정 시 application.yml 추론 → 8080)
+  exposure: ClusterIP       # ClusterIP / NodePort / LoadBalancer
+  resource_hint: medium     # small / medium(기본) / large
+
+  # 다중 모듈 프로젝트일 때만 사용. 미설정 시 인터랙티브 선택.
+  # module: api
+
+# ── 이미지 태그 ───────────────────────────────────────────────────────
+# 생성되는 deployment.yaml 의 image: <tag> 값.
+# 미설정 시 "app:latest" 경고 → CI에서 명시 권장.
+build:
+  image_tag: my-registry.io/my-service:1.0.0   # digest 추가 권장: :1.0.0@sha256:...
+  engine: skip              # skip(기본) / auto / docker / podman / nerdctl
+  build_timeout_seconds: 600
+
+# ── 출력 ─────────────────────────────────────────────────────────────
+output:
+  dir: k8s-output           # 생성 파일 저장 디렉터리
+  on_exists: prompt         # prompt(기본) / overwrite / suffix
+
+# ── kubectl dry-run ───────────────────────────────────────────────────
+kubectl:
+  dry_run: true             # false 로 끄면 dry-run 스킵 (kubectl 미설치 환경)
+
+# ── 베이스 이미지 오버라이드 ──────────────────────────────────────────
+# 기본값: eclipse-temurin:21-*-alpine
+# 사내 미러 레지스트리 사용 시 아래 주석 해제 후 교체
+# base_images:
+#   jdk: my-registry.io/mirror/eclipse-temurin:21-jdk-alpine
+#   jre: my-registry.io/mirror/eclipse-temurin:21-jre-alpine
+
+# ── 클러스터 환경 ─────────────────────────────────────────────────────
+# preset: 미리 정의된 환경 값 세트. 현재 지원: orbstack
+#   orbstack  — storageClassName: local-path, network_policy: true (Cilium)
+# preset 미설정 시 orbstack fallback (자동 모드) 또는 인터랙티브 선택.
+cluster:
+  preset: orbstack
+
+  # storage_class: preset 기본값 override (선택)
+  # storage_class: my-custom-storage
+
+  # network_policy: NetworkPolicy YAML 생성 여부 (선택)
+  # false 시 networkpolicy.yaml 미생성 + NET-W01 WARN (로컬 all-allow 테스트용)
+  # network_policy: false
+
+# ── 네트워크 정책 허용 규칙 (cluster.network_policy: true 시 활성) ────
+# 기본: deny-all ingress/egress + CoreDNS egress(kube-system:53) 자동 허용
+# network:
+#   allow_ingress_from:
+#     - namespace: frontend-ns
+#       port: 8080
+#   allow_egress_to:
+#     - namespace: database-ns
+#       port: 5432
+
+# ── validation 규칙 스킵 ──────────────────────────────────────────────
+# 특정 규칙을 CI에서 한시적으로 제외할 때만 사용. 남용 금지.
+# validation:
+#   skipped:
+#     - IMG-W01   # digest pinning WARN — 레지스트리 미구성 환경
+#     - NET-W01   # NetworkPolicy WARN — 로컬 테스트 (cluster.network_policy: false 대안)

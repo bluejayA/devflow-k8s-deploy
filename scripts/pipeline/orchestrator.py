@@ -25,6 +25,7 @@ from scripts._shared.text_safety import reject_unsafe_chars
 from scripts._shared.types import (
     AnalysisResult,
     BailOutContext,
+    ClusterConfig,
     FixOutcome,
     GeneratedArtifacts,
     HelpEntry,
@@ -392,6 +393,11 @@ class SkillPipeline:
         else:
             effective_output_dir = output_dir
 
+        # ClusterConfig 해석
+        cluster_config = self._deps.config_loader.resolve_cluster_config(
+            config, prompt_callback=self._prompt_callback
+        )
+
         # STEP 3 + 4 + 5 (AtomicWriter 컨텍스트)
         with AtomicWriter(
             output_dir=effective_output_dir,
@@ -401,7 +407,8 @@ class SkillPipeline:
             try:
                 # STEP 3
                 artifacts = self._generate_artifacts_step3(
-                    writer.staging_dir, inputs, analysis, config, project_dir=project_dir
+                    writer.staging_dir, inputs, analysis, config,
+                    cluster_config=cluster_config, project_dir=project_dir
                 )
 
                 # STEP 4
@@ -645,12 +652,15 @@ class SkillPipeline:
         analysis: AnalysisResult,
         config: ResolvedConfig,
         *,
+        cluster_config: ClusterConfig | None = None,
         project_dir: Path | None = None,
     ) -> GeneratedArtifacts:
-        """STEP 3: Dockerfile + 3 manifest 생성 → staging_dir에 저장.
+        """STEP 3: Dockerfile + manifest 생성 → staging_dir에 저장.
 
         v0.2.0 P1-a/P1-b: project_dir로 gradle/ 존재 감지 + `Dockerfile.dockerignore`
         동반 생성 (context pollution 방어).
+        statefulness.is_stateful=True, confidence=high → StatefulSet, 그 외 → Deployment.
+        cluster_config.network_policy=True → networkpolicy.yaml 추가.
         """
         # Dockerfile 생성
         dockerfile_content = self._deps.dockerfile_generator.generate(
@@ -666,31 +676,62 @@ class SkillPipeline:
         ignore_content = self._deps.dockerfile_generator.generate_dockerignore()
         (staging_dir / "Dockerfile.dockerignore").write_text(ignore_content, encoding="utf-8")
 
-        # Deployment YAML — 빌드된 앱 이미지 태그를 사용 (v0.2.0 수정: runner_image 금지)
+        manifest_paths: list[Path] = []
+
+        # Workload YAML — statefulness HIGH → StatefulSet, 그 외 → Deployment
         app_image = _resolve_app_image_tag(config)
-        deployment_content = self._deps.manifest_generator.generate_deployment(
-            inputs,
-            analysis,
-            analysis.defaults,
-            analysis.probe_config,
-            image=app_image,
+        is_stateful_high = (
+            analysis.statefulness.is_stateful
+            and analysis.statefulness.confidence == "high"
         )
-        deployment_path = staging_dir / "deployment.yaml"
-        deployment_path.write_text(deployment_content, encoding="utf-8")
+        if is_stateful_high and cluster_config is not None:
+            workload_content = self._deps.manifest_generator.generate_statefulset(
+                inputs, analysis, cluster_config
+            )
+            workload_path = staging_dir / "statefulset.yaml"
+        else:
+            workload_content = self._deps.manifest_generator.generate_deployment(
+                inputs,
+                analysis,
+                analysis.defaults,
+                analysis.probe_config,
+                image=app_image,
+            )
+            workload_path = staging_dir / "deployment.yaml"
+        workload_path.write_text(workload_content, encoding="utf-8")
+        manifest_paths.append(workload_path)
 
         # Service YAML
         service_content = self._deps.manifest_generator.generate_service(inputs)
         service_path = staging_dir / "service.yaml"
         service_path.write_text(service_content, encoding="utf-8")
+        manifest_paths.append(service_path)
 
         # ServiceAccount YAML
         sa_content = self._deps.manifest_generator.generate_serviceaccount(inputs)
         sa_path = staging_dir / "serviceaccount.yaml"
         sa_path.write_text(sa_content, encoding="utf-8")
+        manifest_paths.append(sa_path)
+
+        # NetworkPolicy YAML (cluster_config.network_policy=True 시 생성)
+        if cluster_config is not None and cluster_config.network_policy:
+            network_raw = _safe_section(config.raw, "network")
+            allow_ingress = network_raw.get("allow_ingress_from") or None
+            allow_egress = network_raw.get("allow_egress_to") or None
+            np_content = self._deps.manifest_generator.generate_networkpolicy(
+                inputs,
+                cluster_config,
+                allow_ingress_from=allow_ingress,
+                allow_egress_to=allow_egress,
+            )
+            if np_content is not None:
+                np_path = staging_dir / "networkpolicy.yaml"
+                np_path.write_text(np_content, encoding="utf-8")
+                manifest_paths.append(np_path)
 
         return GeneratedArtifacts(
             dockerfile_path=dockerfile_path,
-            manifest_paths=[deployment_path, service_path, sa_path],
+            manifest_paths=manifest_paths,
         )
 
     # ─── STEP 4: 검증 게이트 ─────────────────────────────────────────────────

@@ -7,12 +7,14 @@ from typing import Any, Literal
 
 from scripts._shared.types import CheckResult
 
-RuleScope = Literal["container", "pod_spec", "service"]
+RuleScope = Literal["container", "pod_spec", "service", "statefulset", "manifest_set"]
 
 _registry: dict[str, list[Callable[..., list[CheckResult]]]] = {
     "container": [],
     "pod_spec": [],
     "service": [],
+    "statefulset": [],
+    "manifest_set": [],
 }
 
 

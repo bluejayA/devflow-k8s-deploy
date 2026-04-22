@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import pytest
-
 
 def _minimal_container(**overrides: object) -> dict:
     base = {

@@ -92,11 +92,16 @@ class K8sValidator:
                     suggestion="YAML 구문을 확인하세요.",
                 ))
 
+        all_valid_docs: list[dict[str, Any]] = []
         for _fp, file_docs in all_docs_per_file:
             if file_docs is None:
                 continue
             for doc in file_docs:
                 results.extend(self._validate_doc(doc, context_docs=file_docs))
+            all_valid_docs.extend(file_docs)
+
+        # manifest_set 후처리 (NET-W01 등 집합 수준 규칙)
+        results.extend(run_rules("manifest_set", {}, docs=all_valid_docs))
 
         counts: dict[str, int] = {
             "pass": sum(1 for r in results if r.level == "PASS"),
@@ -141,6 +146,8 @@ class K8sValidator:
         results: list[CheckResult] = []
         if kind in ("Deployment", "StatefulSet", "DaemonSet", "Job", "CronJob"):
             results.extend(self._check_workload(doc))
+            if kind == "StatefulSet":
+                results.extend(run_rules("statefulset", doc))
         elif kind == "Pod":
             results.extend(self._check_pod_spec(_as_dict(doc.get("spec"))))
         elif kind == "Service":
