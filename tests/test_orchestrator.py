@@ -259,6 +259,21 @@ def _make_deps(
     output_packager.write.return_value = _make_packaging_result()
     mocks["output_packager"] = output_packager
 
+    # BL-015: stack_registry 의존성 — MagicMock stack 모듈로 치환
+    stack_module_mock = MagicMock()
+    stack_module_mock.template_name = "jvm"
+    stack_module_mock.dockerfile_context.return_value = {
+        "artifact_path": "",
+        "build_cmd": "",
+        "build_system": "gradle",
+        "builder_image": "",
+        "has_gradle_dir": False,
+        "port": 8080,
+        "runner_image": "",
+    }
+    stack_registry = {"jvm": stack_module_mock}
+    mocks["stack_registry"] = stack_registry
+
     deps = PipelineDependencies(
         config_loader=config_loader,
         project_analyzer=project_analyzer,
@@ -268,6 +283,7 @@ def _make_deps(
         kubectl_dry_runner=kubectl_dry_runner,
         build_runner=build_runner,
         output_packager=output_packager,
+        stack_registry=stack_registry,
     )
     return deps, mocks
 

@@ -44,6 +44,7 @@ from scripts._shared.types import (
     ProbeSpec,
     ResourceDefaults,
     StackDetectResult,
+    UserInputs,
 )
 from scripts.stacks.base import ResourceHint
 
@@ -134,6 +135,7 @@ class JvmStackModule:
     """
 
     name: ClassVar[str] = "jvm"
+    template_name: ClassVar[str] = "jvm"
 
     # ── Public: StackModule Protocol ──────────────────────────────────────────
 
@@ -262,6 +264,43 @@ class JvmStackModule:
         if detect_result.build_system == "maven":
             return self._locate_maven_jars(project_dir)
         return self._locate_gradle_jars(project_dir)
+
+    def dockerfile_context(
+        self,
+        *,
+        build_plan: BuildPlan,
+        detect_result: StackDetectResult,
+        inputs: UserInputs,
+        project_dir: Path | None,
+    ) -> dict[str, object]:
+        """Dockerfile 템플릿(`templates/dockerfile/jvm.tmpl`) 렌더 컨텍스트.
+
+        키:
+          - builder_image / runner_image / build_cmd / artifact_path: build_plan 그대로 전달
+          - build_system: detect_result에서 직접 참조 (Gradle/Maven 분기용)
+          - port: 사용자 입력 포트 (EXPOSE 지시어용)
+          - has_gradle_dir: project_dir/gradle 서브디렉토리 존재 시 True
+            (Gradle Version Catalog + convention plugins 대응 — v0.2.0 P1-a)
+        """
+        # v0.2.0 P1-a: Gradle Version Catalog / convention plugins 지원.
+        # project_dir이 없거나 gradle/ 서브디렉토리가 없으면 False.
+        has_gradle_dir = False
+        if project_dir is not None:
+            has_gradle_dir = (project_dir / "gradle").is_dir()
+
+        # detect_result.build_system은 JVM 감지 시 항상 설정됨 (jvm.py detect() 참조).
+        # 안전장치로 None이면 gradle 기본값.
+        build_system = detect_result.build_system or "gradle"
+
+        return {
+            "artifact_path": build_plan.artifact_path,
+            "build_cmd": build_plan.build_cmd,
+            "build_system": build_system,
+            "builder_image": build_plan.builder_image,
+            "has_gradle_dir": has_gradle_dir,
+            "port": inputs.port,
+            "runner_image": build_plan.runner_image,
+        }
 
     # ── 내부 헬퍼: 빌드 파일 탐색 ─────────────────────────────────────────────
 

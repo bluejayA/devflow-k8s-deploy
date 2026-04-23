@@ -17,13 +17,23 @@ import yaml
 from scripts._shared.types import BuildPlan, ResourceDefaults, UserInputs
 from scripts.dockerfile_generator import DockerfileGenerator
 from scripts.manifest_generator import ManifestGenerator
+from scripts.stacks.jvm import JvmStackModule
 from scripts.template_renderer import TemplateRenderer
+from tests.conftest import auto_inject_generate
 
 PROJECT_ROOT = Path(__file__).parent.parent
 
 
 def _renderer() -> TemplateRenderer:
     return TemplateRenderer(PROJECT_ROOT / "templates")
+
+
+def _make_generator() -> DockerfileGenerator:
+    # BL-015: generate() 시그니처에 stack_module/detect_result 필수가 되면서,
+    # 테스트 호출부 수정 최소화를 위해 auto-inject 래퍼 적용.
+    gen = DockerfileGenerator(_renderer())
+    auto_inject_generate(gen, JvmStackModule())
+    return gen
 
 
 def _make_inputs() -> UserInputs:
@@ -63,7 +73,7 @@ def _gradle_plan() -> BuildPlan:
 
 def test_dockerfile_uses_full_context_copy(tmp_path: Path) -> None:
     """`COPY . .`로 복원되어 multi-module 루트(src 없음) 지원."""
-    gen = DockerfileGenerator(_renderer())
+    gen = _make_generator()
     out = gen.generate(_gradle_plan(), _make_inputs(), _make_defaults(), project_dir=tmp_path)
 
     assert "COPY . ." in out, "multi-module 지원을 위해 전체 context COPY 필요"
@@ -72,7 +82,7 @@ def test_dockerfile_uses_full_context_copy(tmp_path: Path) -> None:
 
 def test_dockerfile_generator_emits_dockerignore(tmp_path: Path) -> None:
     """DockerfileGenerator가 .dockerignore 내용도 함께 생성 (context pollution 방어)."""
-    gen = DockerfileGenerator(_renderer())
+    gen = _make_generator()
     # 신규 API: generate_dockerignore() 메서드
     ignore = gen.generate_dockerignore()
 
@@ -98,7 +108,7 @@ def test_dockerfile_includes_gradle_dir_when_present(tmp_path: Path) -> None:
         encoding="utf-8",
     )
 
-    gen = DockerfileGenerator(_renderer())
+    gen = _make_generator()
     out = gen.generate(_gradle_plan(), _make_inputs(), _make_defaults(), project_dir=tmp_path)
 
     # 대소문자 관계없이 gradle dir COPY가 포함되어야 함
@@ -107,7 +117,7 @@ def test_dockerfile_includes_gradle_dir_when_present(tmp_path: Path) -> None:
 
 def test_dockerfile_omits_gradle_dir_when_absent(tmp_path: Path) -> None:
     """project_dir에 gradle/ 없으면 `COPY gradle` 부재 (Docker build 즉시 실패 방지)."""
-    gen = DockerfileGenerator(_renderer())
+    gen = _make_generator()
     out = gen.generate(_gradle_plan(), _make_inputs(), _make_defaults(), project_dir=tmp_path)
 
     # 어떠한 `COPY gradle ` 시퀀스도 없어야 함 (gradle.properties*는 별개 패턴이라 OK)

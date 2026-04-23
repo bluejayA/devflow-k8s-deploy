@@ -1,18 +1,22 @@
-"""DockerfileGenerator — multi-stage Dockerfile 생성기.
+"""DockerfileGenerator — multi-stage Dockerfile 생성기 (스택 중립 facade).
 
-JDK builder → JRE runner 2단계 구조. 비root 사용자. `latest` 금지 검증.
-Gradle/Maven 의존성 캐시 레이어 최적화(F-25). 보안 근거 주석(F-24).
+책임:
+  - 이미지 태그 / 주입 방어 등 스택 무관 보안 검증
+  - 템플릿 렌더 위임
+
+템플릿 선택 + Jinja2 컨텍스트 구성은 `StackModule.dockerfile_context()`가 담당한다.
+v0.1~v0.4: JVM만 지원. BL-015 (v0.5) 리팩토링으로 Go/Python/Rust 확장 준비.
 """
 
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Literal
 
 from scripts._shared.errors import InvalidImageError
 from scripts._shared.image_ref import validate_image_reference
 from scripts._shared.text_safety import reject_unsafe_chars
-from scripts._shared.types import BuildPlan, ResourceDefaults, UserInputs
+from scripts._shared.types import BuildPlan, ResourceDefaults, StackDetectResult, UserInputs
+from scripts.stacks.base import StackModule
 from scripts.template_renderer import TemplateRenderer
 
 
@@ -48,24 +52,24 @@ class DockerfileGenerator:
         inputs: UserInputs,
         defaults: ResourceDefaults,  # noqa: ARG002  (v0.1.0 미사용 — v0.2+ writable_paths VOLUME 용 예약)
         *,
+        stack_module: StackModule,
+        detect_result: StackDetectResult,
         project_dir: Path | None = None,
     ) -> str:
-        """Dockerfile 문자열 반환.
+        """Dockerfile 문자열 반환 (스택 중립).
 
-        포함:
-          - FROM {builder_image} AS builder + 의존성 캐시 레이어 + 소스 복사 + build_cmd
-          - FROM {runner_image} + RUN groupadd/useradd appuser + COPY --from=builder --chown
-          - USER appuser (ENTRYPOINT 직전)
-          - HEALTHCHECK는 v0.1.0 미포함 (probes로 대체)
-        보안 주석:
-          - # 비root 사용자 — 컨테이너 탈출 공격 시 호스트 root 권한 차단
-          - # latest 태그 금지 — 재현성 + 공급망 공격 방지
-          - # COPY --chown — 임의 사용자 ID 충돌 방지
+        facade 책임:
+          - 이미지 태그 검증 + 주입 방어 (스택 무관)
+          - stack_module.dockerfile_context() 로 스택별 컨텍스트 위임
+          - 템플릿 렌더 (키는 stack_module.template_name)
 
         Args:
             build_plan: 빌드 계획 (이미지, 빌드 명령, 아티팩트 경로).
             inputs: 사용자 입력 (앱 이름, 포트 등).
             defaults: 리소스 기본값 (v0.1.0 미사용, v0.2+ writable_paths VOLUME 확장 예약).
+            stack_module: 현재 스택 모듈 (JvmStackModule 등).
+            detect_result: StackModule.detect() 결과.
+            project_dir: 프로젝트 루트 — 스택별 힌트 감지(Gradle 디렉토리 등)에 사용.
 
         Returns:
             정규화된 Dockerfile 문자열.
@@ -82,27 +86,15 @@ class DockerfileGenerator:
         _validate_command(build_plan.build_cmd, "build_cmd")
         _validate_command(build_plan.artifact_path, "artifact_path")
 
-        build_system = _detect_build_system(build_plan.build_cmd)
+        # 스택별 컨텍스트 위임
+        context = stack_module.dockerfile_context(
+            build_plan=build_plan,
+            detect_result=detect_result,
+            inputs=inputs,
+            project_dir=project_dir,
+        )
 
-        # v0.2.0 P1-a: Gradle Version Catalog(`gradle/libs.versions.toml`) +
-        # convention plugins 지원 — project_dir에 `gradle/` 있으면 dep cache 레이어에
-        # 포함. 없으면 생략(없는 상태에서 COPY하면 docker build 실패).
-        has_gradle_dir = False
-        if project_dir is not None:
-            gradle_path = project_dir / "gradle"
-            has_gradle_dir = gradle_path.is_dir()
-
-        context: dict[str, object] = {
-            "artifact_path": build_plan.artifact_path,
-            "build_cmd": build_plan.build_cmd,
-            "build_system": build_system,
-            "builder_image": build_plan.builder_image,
-            "has_gradle_dir": has_gradle_dir,
-            "port": inputs.port,
-            "runner_image": build_plan.runner_image,
-        }
-
-        return self._renderer.render_dockerfile("jvm", context)
+        return self._renderer.render_dockerfile(stack_module.template_name, context)
 
     def generate_dockerignore(self) -> str:
         """`.dockerignore` 내용 반환 (Docker 20.10+ `Dockerfile.dockerignore` 규약).
@@ -127,30 +119,3 @@ class DockerfileGenerator:
             InvalidImageError: 형식 위반, latest 태그, 태그/digest 누락 시.
         """
         validate_image_reference(image)
-
-
-def _detect_build_system(build_cmd: str) -> Literal["gradle", "maven"]:
-    """빌드 커맨드를 공백/구분자 기준 토큰 분해 후 정확 매칭.
-
-    Args:
-        build_cmd: 빌드 명령어 문자열 (예: ``./gradlew bootJar``, ``mvn package``).
-
-    Returns:
-        'gradle' 또는 'maven'. 감지 불가 시 'gradle' 기본값.
-    """
-    maven_tokens = {"mvn", "mvnw", "./mvnw", "mvn.cmd", "maven"}
-    gradle_tokens = {"gradle", "gradlew", "./gradlew", "gradle.cmd"}
-
-    for tok in build_cmd.lower().split():
-        # 경로 prefix 제거 (예: "/usr/bin/mvn" → "mvn")
-        base = tok.rsplit("/", 1)[-1]
-        if base in maven_tokens:
-            return "maven"
-
-    for tok in build_cmd.lower().split():
-        base = tok.rsplit("/", 1)[-1]
-        if base in gradle_tokens:
-            return "gradle"
-
-    # 감지 불가 시 gradle 기본값
-    return "gradle"
