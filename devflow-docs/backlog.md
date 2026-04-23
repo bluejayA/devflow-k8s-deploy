@@ -1,6 +1,6 @@
 # Backlog
 
-_Last updated: 2026-04-24 — BL-001 범위 축소(최소 스코프) + BL-017 신규 생성_
+_Last updated: 2026-04-24 — BL-018 신규 생성 (manifest 생성 방식 일관성 복원)_
 
 ---
 
@@ -43,6 +43,7 @@ BL-015 완료로 다국어 스택 확장 Protocol 경계 정리됨. BL-001 Go �
 | ID | 제목 | 이슈 | 우선순위 |
 |----|------|------|---------|
 | **BL-016** | SKILL.md STEP 4-1 ↔ orchestrator 검증 경로 drift | [#25](https://github.com/bluejayA/devflow-k8s-deploy/issues/25) | low-medium |
+| **BL-018** | manifest 생성 방식 일관성 복원 (Jinja2 vs dict+yaml.dump 혼용 해소) | [#28](https://github.com/bluejayA/devflow-k8s-deploy/issues/28) | medium |
 
 ### JVM 제약 / 정확도
 
