@@ -1,15 +1,16 @@
 # Backlog
 
-_Last updated: 2026-04-22 — BL-003/BL-004 완료 (PR #23 pending merge → v0.4.0)_
+_Last updated: 2026-04-23 — BL-016 추가 (SKILL.md ↔ orchestrator 검증 경로 drift)_
 
 ---
 
 ## Next
 
-v0.3 목표 항목 — 우선 구현 대상
+다국어 스택 확장(BL-001/006/007) 선결 리팩토링 우선.
 
 | ID | 제목 | 이슈 | 분류 |
 |----|------|------|------|
+| **BL-015** | StackModule Protocol 확장 — Dockerfile 책임 이관 | [#24](https://github.com/bluejayA/devflow-k8s-deploy/issues/24) | refactor |
 | **BL-001** | Go 스택 지원 | [#8](https://github.com/bluejayA/devflow-k8s-deploy/issues/8) | 스택 확장 |
 | **BL-002** | auto-fix 루프 (검증 실패 시 자동 수정 3회) | [#12](https://github.com/bluejayA/devflow-k8s-deploy/issues/12) | DX |
 | **BL-005** | PodDisruptionBudget / topologySpreadConstraints | [#14](https://github.com/bluejayA/devflow-k8s-deploy/issues/14) | 고가용성 |
@@ -37,6 +38,12 @@ v0.3 목표 항목 — 우선 구현 대상
 | ID | 제목 | 이슈 | 목표 버전 |
 |----|------|------|---------|
 | **BL-010** | CIS Kubernetes Benchmark 매핑 | [#19](https://github.com/bluejayA/devflow-k8s-deploy/issues/19) | v0.4 |
+
+### 문서 / 일관성
+
+| ID | 제목 | 이슈 | 우선순위 |
+|----|------|------|---------|
+| **BL-016** | SKILL.md STEP 4-1 ↔ orchestrator 검증 경로 drift | [#25](https://github.com/bluejayA/devflow-k8s-deploy/issues/25) | low-medium |
 
 ### JVM 제약 / 정확도
 

@@ -13,7 +13,9 @@ import pytest
 from scripts._shared.errors import InvalidImageError
 from scripts._shared.types import BuildPlan, ResourceDefaults, UserInputs
 from scripts.dockerfile_generator import DockerfileGenerator
+from scripts.stacks.jvm import JvmStackModule
 from scripts.template_renderer import TemplateRenderer
+from tests.conftest import auto_inject_generate
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -29,8 +31,14 @@ def renderer() -> TemplateRenderer:
 
 
 @pytest.fixture()
-def generator(renderer: TemplateRenderer) -> DockerfileGenerator:
-    return DockerfileGenerator(renderer)
+def generator(
+    renderer: TemplateRenderer, jvm_stack_module: JvmStackModule
+) -> DockerfileGenerator:
+    # BL-015: generate() 시그니처에 stack_module/detect_result가 필수가 되었으므로
+    # 기존 테스트 호출부 수정 최소화를 위해 auto-inject 래퍼 적용.
+    gen = DockerfileGenerator(renderer)
+    auto_inject_generate(gen, jvm_stack_module)
+    return gen
 
 
 @pytest.fixture()
@@ -451,32 +459,6 @@ def test_generate_rejects_artifact_path_with_newline(
         generator.generate(bad_plan, user_inputs, resource_defaults)
 
 
-# ---------------------------------------------------------------------------
-# 23. _detect_build_system — 토큰 분해: gradle 후 maven 주석어가 와도 gradle 반환 (Important 3)
-# ---------------------------------------------------------------------------
-
-
-def test_detect_build_system_ignores_comment_tokens(
-    generator: DockerfileGenerator,
-    user_inputs: UserInputs,
-    resource_defaults: ResourceDefaults,
-) -> None:
-    """'gradle wrapper # using maven-style' 같은 문구는 gradle로 판정해야 함."""
-    from scripts.dockerfile_generator import _detect_build_system
-
-    result = _detect_build_system("gradle wrapper # using maven-style")
-    assert result == "gradle"
-
-
-# ---------------------------------------------------------------------------
-# 24. _detect_build_system — ./mvnw → maven (Important 3)
-# ---------------------------------------------------------------------------
-
-
-def test_detect_build_system_mvnw(
-    generator: DockerfileGenerator,
-) -> None:
-    from scripts.dockerfile_generator import _detect_build_system
-
-    result = _detect_build_system("./mvnw package -DskipTests")
-    assert result == "maven"
+# BL-015: `_detect_build_system(build_cmd)` is deleted. JvmStackModule uses
+# `_detect_build_system(build_files)` on file list instead, and production
+# consumers read `detect_result.build_system` directly.

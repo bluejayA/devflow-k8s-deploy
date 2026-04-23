@@ -54,6 +54,7 @@ if TYPE_CHECKING:
     from scripts.output_packager import OutputPackager
     from scripts.pipeline.build_runner import BuildRunner
     from scripts.project_analyzer import ProjectAnalyzer
+    from scripts.stacks.base import StackModule
     from scripts.validate_k8s import K8sValidator
 
 
@@ -209,6 +210,7 @@ class PipelineDependencies:
     """SkillPipeline이 주입받는 컴포넌트 묶음.
 
     테스트에서 MagicMock으로 쉽게 교체 가능하도록 DI.
+    stack_registry는 DockerfileGenerator 호출 시 현재 스택 모듈을 룩업하는 데 사용.
     """
 
     config_loader: ConfigLoader
@@ -219,6 +221,7 @@ class PipelineDependencies:
     kubectl_dry_runner: KubectlDryRunner
     build_runner: BuildRunner
     output_packager: OutputPackager
+    stack_registry: dict[str, StackModule]
 
 
 # ─── Module-level helpers ─────────────────────────────────────────────────────
@@ -663,11 +666,14 @@ class SkillPipeline:
         statefulness.is_stateful=True, confidence=high → StatefulSet, 그 외 → Deployment.
         cluster_config.network_policy=True → networkpolicy.yaml 추가.
         """
-        # Dockerfile 생성
+        # Dockerfile 생성 — stack_registry에서 현재 스택 모듈 룩업
+        stack_module = self._deps.stack_registry[analysis.stack]
         dockerfile_content = self._deps.dockerfile_generator.generate(
             analysis.build_plan,
             inputs,
             analysis.defaults,
+            stack_module=stack_module,
+            detect_result=analysis.detect_result,
             project_dir=project_dir,
         )
         dockerfile_path = staging_dir / "Dockerfile"
@@ -897,7 +903,6 @@ def _build_default_dependencies(project_dir: Path) -> PipelineDependencies:
     from scripts.output_packager import OutputPackager
     from scripts.pipeline.build_runner import BuildRunner
     from scripts.project_analyzer import ProjectAnalyzer
-    from scripts.stacks.base import StackModule
     from scripts.stacks.jvm import JvmStackModule
     from scripts.template_renderer import TemplateRenderer
     from scripts.validate_k8s import K8sValidator
@@ -950,6 +955,7 @@ def _build_default_dependencies(project_dir: Path) -> PipelineDependencies:
         kubectl_dry_runner=kubectl_dry_runner,
         build_runner=build_runner,
         output_packager=output_packager,
+        stack_registry=stack_registry,
     )
 
 

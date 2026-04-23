@@ -20,13 +20,17 @@ from scripts._shared.types import BuildPlan, ResourceDefaults, UserInputs
 from scripts.dockerfile_generator import DockerfileGenerator
 from scripts.stacks.jvm import JvmStackModule
 from scripts.template_renderer import TemplateRenderer
+from tests.conftest import auto_inject_generate
 
 PROJECT_ROOT = Path(__file__).parent.parent
 
 
 @pytest.fixture()
-def generator() -> DockerfileGenerator:
-    return DockerfileGenerator(TemplateRenderer(PROJECT_ROOT / "templates"))
+def generator(jvm_stack_module: JvmStackModule) -> DockerfileGenerator:
+    # BL-015: auto_inject_generate로 stack_module/detect_result 자동 주입.
+    gen = DockerfileGenerator(TemplateRenderer(PROJECT_ROOT / "templates"))
+    auto_inject_generate(gen, jvm_stack_module)
+    return gen
 
 
 @pytest.fixture()
