@@ -160,6 +160,55 @@ def test_resolved_config_layer_raws_default_empty_dict() -> None:
     assert cfg.layer_raws == {}  # default_factory=dict
 
 
+def test_stack_detect_result_cmd_candidates_default() -> None:
+    """StackDetectResult.cmd_candidates 신규 필드(F-25/NFR-04 o):
+    미지정 시 기본값 빈 list. 기존 호출부 호환성."""
+    from scripts._shared.types import StackDetectResult
+
+    # 기존 호출부 스타일 — 새 필드 미지정
+    result = StackDetectResult(
+        port=8080, entrypoint="", framework="spring-boot", version="3.2.0"
+    )
+    assert result.cmd_candidates == []
+
+    # Go 사용 시나리오 — cmd_candidates 명시
+    result_go = StackDetectResult(
+        port=None,
+        entrypoint="",
+        framework="go-generic",
+        version="1.22",
+        cmd_candidates=["kube-api", "kube-scheduler"],
+    )
+    assert result_go.cmd_candidates == ["kube-api", "kube-scheduler"]
+
+
+def test_resource_defaults_run_as_user_default() -> None:
+    """ResourceDefaults.run_as_user 신규 필드(F-30):
+    미지정 시 기본값 1000 (JVM 관례). 기존 호출부 호환성 + Go는 65532 명시."""
+    from scripts._shared.types import ResourceDefaults
+
+    # 기존 호출부 스타일 — run_as_user 미지정 시 JVM 관례값 1000
+    defaults_jvm = ResourceDefaults(
+        cpu_request="100m",
+        memory_request="512Mi",
+        cpu_limit="1000m",
+        memory_limit="1Gi",
+        writable_paths=["/tmp", "/var/log"],
+    )
+    assert defaults_jvm.run_as_user == 1000
+
+    # Go 스택은 distroless nonroot UID 65532 명시
+    defaults_go = ResourceDefaults(
+        cpu_request="50m",
+        memory_request="64Mi",
+        cpu_limit="250m",
+        memory_limit="128Mi",
+        writable_paths=["/tmp"],
+        run_as_user=65532,
+    )
+    assert defaults_go.run_as_user == 65532
+
+
 def test_resolved_config_layer_raws_explicit() -> None:
     """ResolvedConfig.layer_raws 명시 설정 — project_config/org_config/builtin_default 키."""
     from scripts._shared.types import ResolvedConfig

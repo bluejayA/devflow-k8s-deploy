@@ -17,6 +17,8 @@ def test_all_derived_errors_inherit_devflow_error() -> None:
         BailOutError,
         ConfigError,
         DevflowError,
+        GoBuildPlanError,
+        GoDetectionError,
         InvalidImageError,
         JvmDetectionError,
         KubectlExecutionError,
@@ -37,6 +39,8 @@ def test_all_derived_errors_inherit_devflow_error() -> None:
         UnknownStackError,
         MultiModuleAbort,
         JvmDetectionError,
+        GoDetectionError,
+        GoBuildPlanError,
         InvalidImageError,
         MalformedManifestError,
         KubectlExecutionError,
@@ -103,3 +107,26 @@ def test_template_not_found_error_raise_except() -> None:
 
     with pytest.raises(TemplateNotFoundError):
         raise TemplateNotFoundError("templates/dockerfile/jvm.tmpl을 찾을 수 없습니다.")
+
+
+def test_go_detection_error_raise_except() -> None:
+    """GoDetectionError: go.mod 파싱 실패 시나리오 (F-20)."""
+    from scripts._shared.errors import DevflowError, GoDetectionError
+
+    with pytest.raises(GoDetectionError) as exc_info:
+        raise GoDetectionError("go.mod 파싱 실패: invalid module path")
+    assert isinstance(exc_info.value, DevflowError)
+    assert "go.mod" in str(exc_info.value)
+
+
+def test_go_build_plan_error_raise_except() -> None:
+    """GoBuildPlanError: 복수 cmd 엔트리포인트 해결 실패 시나리오 (F-26)."""
+    from scripts._shared.errors import DevflowError, GoBuildPlanError
+
+    with pytest.raises(GoBuildPlanError) as exc_info:
+        raise GoBuildPlanError(
+            "복수 cmd 엔트리포인트 발견: [kube-api, kube-scheduler]. "
+            "'app_name'을 해당 디렉토리명과 일치시키거나 'stack.go.entrypoint'를 지정하세요."
+        )
+    assert isinstance(exc_info.value, DevflowError)
+    assert "cmd" in str(exc_info.value)

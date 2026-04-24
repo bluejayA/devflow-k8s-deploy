@@ -71,11 +71,15 @@ class StackDetectResult:
     port: int | None
     # 컨테이너 진입점 힌트. 감지기는 빈 문자열 또는 "java -jar {artifact}" 형태.
     # DockerfileGenerator가 채워도 됨.
+    # Go 스택: "."(루트 main.go 확정) 또는 ""(미결정 sentinel — build_plan에서 해결).
     entrypoint: str
-    framework: str  # 'spring-boot' / 'ktor' / 'micronaut' / 'jvm-generic'
-    version: str | None  # Spring Boot 등 버전
+    framework: str  # 'spring-boot' / 'ktor' / 'micronaut' / 'jvm-generic' / 'go-generic'
+    version: str | None  # Spring Boot 버전 또는 Go 버전 등
     build_system: Literal["gradle", "maven"] | None = None  # JVM 빌드 시스템
     actuator_enabled: bool = False  # Spring Boot Actuator 활성화 여부
+    # Go multi-binary 모노레포(kube-style) 후보 디렉토리명 목록 (F-25).
+    # 루트 main.go 확정 또는 JVM 등 다른 스택은 기본값 빈 list.
+    cmd_candidates: list[str] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -115,6 +119,10 @@ class ResourceDefaults:
     cpu_limit: str
     memory_limit: str
     writable_paths: list[str]  # ['/tmp', '/var/log']
+    # 컨테이너 런타임 UID (F-30). JVM 관례 1000(alpine adduser -u 1000) 기본값.
+    # Go 스택은 distroless nonroot 내장 UID 65532 명시 필수 —
+    # 누락 시 NFR-04 (r) UID 정합성 테스트 실패로 감지.
+    run_as_user: int = 1000
 
 
 @dataclass(frozen=True)
