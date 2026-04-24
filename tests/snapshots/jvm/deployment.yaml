@@ -1,0 +1,79 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: jvm-app
+  namespace: default
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: jvm-app
+  template:
+    metadata:
+      labels:
+        app: jvm-app
+    spec:
+      serviceAccountName: jvm-app-sa
+      # 기본 토큰 자동 마운트 차단 — RBAC 최소권한
+      automountServiceAccountToken: false
+      # Pod securityContext — 컨테이너 권한 분리 — privileged escalation 방지 (F-31)
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: jvm-app
+          image: local/test:1.0.0
+          # imagePullPolicy 명시 — non-mutable tag 전제(동일 태그 재사용 금지).
+          # 공급망 방어 강화: CI/CD에서 digest(`image@sha256:...`) pinning 권장.
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8080
+          # Container securityContext — 컨테이너 권한 분리 — privileged escalation 방지 (F-32)
+          securityContext:
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            privileged: false
+            capabilities:
+              drop:
+                - ALL
+          # 리소스 한도 — OOMKill로 다른 Pod 영향 방지 (F-33)
+          resources:
+            requests:
+              cpu: 100m
+              memory: 512Mi
+            limits:
+              cpu: 1000m
+              memory: 1Gi
+          # 프로브 — 헬스체크 — 비정상 인스턴스 자동 제거 (F-34)
+          livenessProbe:
+            httpGet:
+              path: /actuator/health/liveness
+              port: 8080
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /actuator/health/readiness
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          # emptyDir 마운트 — readOnlyRootFilesystem 공존 + JVM 런타임 쓰기 경로 (F-32)
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+            - name: var-log
+              mountPath: /var/log
+      volumes:
+        - name: tmp
+          # DoS 방어 — 노드 디스크 소진 방지 (Tomcat work dir, JVM temp files)
+          emptyDir:
+            sizeLimit: 50Mi
+        - name: var-log
+          # DoS 방어 + Spring Boot 런타임 로그 경로
+          emptyDir:
+            sizeLimit: 100Mi

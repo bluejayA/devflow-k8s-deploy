@@ -364,7 +364,14 @@ class ManifestGenerator:
                 ],
             },
         }
-        return yaml.dump(doc, default_flow_style=False, allow_unicode=True)
+        return yaml.dump(
+            doc,
+            default_flow_style=False,
+            allow_unicode=True,
+            sort_keys=False,
+            indent=2,
+            width=1000,
+        )
 
 
     def generate_networkpolicy(
@@ -455,7 +462,14 @@ class ManifestGenerator:
                 "egress": egress_rules,
             },
         }
-        return yaml.dump(doc, default_flow_style=False, allow_unicode=True)
+        return yaml.dump(
+            doc,
+            default_flow_style=False,
+            allow_unicode=True,
+            sort_keys=False,
+            indent=2,
+            width=1000,
+        )
 
 
 def _validate_k8s_quantity(value: str) -> None:
