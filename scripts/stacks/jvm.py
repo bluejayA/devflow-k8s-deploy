@@ -171,8 +171,16 @@ class JvmStackModule:
             actuator_enabled=actuator_enabled,
         )
 
-    def build_plan(self, detect_result: StackDetectResult) -> BuildPlan:
+    def build_plan(
+        self,
+        detect_result: StackDetectResult,
+        *,
+        inputs: UserInputs | None = None,
+    ) -> BuildPlan:
         """detect_result 기반 BuildPlan 생성.
+
+        `inputs`는 BL-001 F-24 Protocol 확장으로 추가됐으나 JVM은 내부 무시 —
+        기존 골든 byte-identical 유지 (NFR-04 j).
 
         builder_image:
           - Gradle: gradle:jdk{N}-alpine  (Gradle CLI 내장)
@@ -186,6 +194,7 @@ class JvmStackModule:
           - Gradle: "gradle --no-daemon bootJar"
                    (컨테이너 빌드에서 daemon은 clean shutdown 실패 + 메모리 상주)
         """
+        _ = inputs  # JVM 스택은 inputs 미사용 — byte-identical 유지
         jdk_version = _DEFAULT_JDK_VERSION
         build_system = detect_result.build_system or ""
 

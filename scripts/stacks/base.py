@@ -48,8 +48,21 @@ class StackModule(Protocol):
         """
         ...
 
-    def build_plan(self, detect_result: StackDetectResult) -> BuildPlan:
+    def build_plan(
+        self,
+        detect_result: StackDetectResult,
+        *,
+        inputs: UserInputs | None = None,
+    ) -> BuildPlan:
         """detect_result 기반 BuildPlan 생성.
+
+        BL-001 F-24 Protocol 확장: `inputs` 키워드 추가(Optional).
+        - JVM: `inputs` 무시 (기존 골든 byte-identical 유지 — NFR-04 j)
+        - Go: `inputs.app_name`으로 엔트리포인트 resolve + `go build -o {app_name}` 구성
+        - 기타 스택: 필요 시 내부에서 None 체크 후 사용
+
+        Optional 선택 근거: Phase 5(Analyzer signature 확장, F-27) 완료 전까지
+        호출부가 점진적으로 이행. Phase 5 이후 Analyzer는 `inputs=inputs` 명시 전달.
 
         v0.2+에서 BuildPlan(stages: list[Stage])로 일반화 예정 (백로그).
         """
