@@ -58,3 +58,16 @@
 [2026-04-22T10:37:11Z] Phase transition: INCEPTION → CONSTRUCTION — commit: d050480
 [2026-04-22T12:42:52Z] code-plan approved — bl003-bl004, 9 new files, 8 modified, 25+ tests
 [2026-04-22T14:43:21Z] flow-finished | option=B (PR merged) | v0.4.0 released | tag=v0.4.0 | commit=e12506d | worktree-removed=true
+[2026-04-23T23:35:50Z] New flow — clean start (artifacts archived, workspace.md preserved) — BL-001 Go stack
+[2026-04-23T23:36:25Z] New aidlc session started — request: BL-001 Go 스택 지원 (최소 스코프, issue #8). Scope: scripts/stacks/go.py + templates/dockerfile/go.tmpl + go.mod detect + Go small tier + net/http probe. Excluded: gin/echo/fiber framework probe (→ BL-017/#27). Baseline: main @ d5a4e14, 695 tests. Invariants: NFR-EXT-01 (no JVM hardcoding), JVM golden snapshots byte-identical, security defaults (nonroot, readOnlyRootFilesystem, caps.drop=ALL).
+[2026-04-23T23:38:30Z] workspace-detection — Brownfield, delta update (v0.4.0 릴리즈 + BL-015 Protocol 확장 반영), 695 tests, HEAD d5a4e14
+[2026-04-23T23:51:57Z] INCEPTION 중 발견 → BL-018(#28) 신규 생성 — manifest 생성 방식 일관성 복원 (Jinja2 vs dict+yaml.dump). BL-001과 독립, BL-001 완료 후 착수 권장. commit b328640
+[2026-04-24T00:49:42Z] complexity-declaration — Standard (신규 기능, 기존 Protocol 패턴 재현, 아키텍처 결정 최소)
+[2026-04-24T01:00:59Z] requirements-analysis — Standard depth, F-23개 도출(Stack Module 10 + Dockerfile 4 + 통합 3 + override 2 + 내부 4), NFR-08개, 열린질문 0개, 가정 7개. Q1 distroless/static-debian12:nonroot / Q2 루트+cmd 엔트리포인트 지원
+[2026-04-24T01:06:12Z] requirements-analysis UPDATE — kube-style 모노레포(복수 cmd/*/main.go) 대응. F-04/05/06/10/13/22 재정의 + F-24(Protocol 확장: build_plan에 inputs 키워드)/F-25(cmd_candidates 필드)/F-26(GoBuildPlanError) 신규. A-08 신규. NFR-02/04 보강. 요구사항 총 26개(Functional 26 + NFR 8 + 가정 8)
+[2026-04-24T01:21:54Z] codex-review requirements-01 — 조건부 승인. P1 6건(inputs 전달 경로/override 책임 경계/F-24 마이그레이션 체크리스트/A-08 우선순위/build_cmd shell 주입/테스트 승격), P2 7건(UID 정책 충돌 중요/manifest 골든/writable_paths 반영/Protocol optional 검토 등), P3 5건. 원문 저장: devflow-docs/inception/codex-review-requirements-01.md
+[2026-04-24T01:27:09Z] requirements-analysis UPDATE 2 — Codex 리뷰 P1+P2 반영. F-06/08/18/19/22/24 보강 + F-27~F-33 신규(오케스트레이션 통합 확장 + Deployment 매니페스트 스택 연동). NFR-02 범위 정비 + NFR-04 케이스 (d-jvm)/(k)~(s) 확장 + NFR-05 UID 정책 통일. A-07 표기 정리, A-08 우선순위 재정의(config > app_name > 단일 > 에러) + rationale gap 기록. 요구사항 총 33개(Functional), NFR 8개, 가정 8개
+[2026-04-24T01:28:17Z] requirements-analysis APPROVED — 가정 8개 승인. Codex 리뷰 반영 완료 상태로 Pre-Planning Gate 진입
+[2026-04-24T01:34:42Z] pre-planning skipped — C(바로 workflow-planning) 선택. User Stories/NFR 별도 수집 스킵(기 도출된 F-33/NFR-8로 충분)
+[2026-04-24T01:36:48Z] workflow-planning — 2안 생성(A안 점진적 TDD 9-phase/B안 설계우선+application-design). A안 권장(Brownfield 패턴 재현). application-design/units-generation 모두 스킵 권장
+[2026-04-24T01:38:04Z] approach-selected — A안(점진적 TDD 9-phase). application-design/units-generation 모두 스킵. CONSTRUCTION은 code-generation(Standard) + build-and-test(Standard)
