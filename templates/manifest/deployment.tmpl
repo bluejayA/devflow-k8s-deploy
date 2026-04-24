@@ -19,9 +19,9 @@ spec:
       # Pod securityContext — 컨테이너 권한 분리 — privileged escalation 방지 (F-31)
       securityContext:
         runAsNonRoot: true
-        runAsUser: 1000
-        runAsGroup: 1000
-        fsGroup: 1000
+        runAsUser: {{ run_as_user }}
+        runAsGroup: {{ run_as_user }}
+        fsGroup: {{ run_as_user }}
         seccompProfile:
           type: RuntimeDefault
       containers:
@@ -74,16 +74,14 @@ spec:
             periodSeconds: 5
           # emptyDir 마운트 — readOnlyRootFilesystem 공존 + JVM 런타임 쓰기 경로 (F-32)
           volumeMounts:
-            - name: tmp
-              mountPath: /tmp
-            - name: var-log
-              mountPath: /var/log
+{% for vm in writable_volume_mounts %}
+            - name: {{ vm.name }}
+              mountPath: {{ vm.mount_path }}
+{% endfor %}
       volumes:
-        - name: tmp
-          # DoS 방어 — 노드 디스크 소진 방지 (Tomcat work dir, JVM temp files)
+{% for v in writable_volumes %}
+        - name: {{ v.name }}
+          # {{ v.comment }}
           emptyDir:
-            sizeLimit: 50Mi
-        - name: var-log
-          # DoS 방어 + Spring Boot 런타임 로그 경로
-          emptyDir:
-            sizeLimit: 100Mi
+            sizeLimit: {{ v.size_limit }}
+{% endfor %}

@@ -892,3 +892,75 @@ def test_generate_deployment_emptydir_sizelimit(
     assert "emptyDir" in varlog_vol
     assert "sizeLimit" in varlog_vol["emptyDir"], "var-log emptyDir에 sizeLimit 없음"
     assert varlog_vol["emptyDir"]["sizeLimit"] == "100Mi"
+
+
+# ---------------------------------------------------------------------------
+# BL-001 Phase 3: manifest 하드코딩 제거 (F-31 run_as_user + F-32 writable_paths)
+# ---------------------------------------------------------------------------
+
+
+def test_generate_deployment_run_as_user_dynamic(
+    generator: ManifestGenerator,
+    user_inputs: UserInputs,
+    analysis_result: AnalysisResult,
+    http_probe_config: ProbeConfig,
+) -> None:
+    """F-31: deployment runAsUser/Group/fsGroup은 defaults.run_as_user 기반."""
+    defaults_go = ResourceDefaults(
+        cpu_request="50m",
+        memory_request="64Mi",
+        cpu_limit="250m",
+        memory_limit="128Mi",
+        writable_paths=["/tmp"],
+        run_as_user=65532,
+    )
+    result = generator.generate_deployment(
+        user_inputs,
+        analysis_result,
+        defaults_go,
+        http_probe_config,
+        image="myrepo/my-app:1.0.0",
+    )
+    doc = yaml.safe_load(result)
+    pod_sec = doc["spec"]["template"]["spec"]["securityContext"]
+
+    assert pod_sec["runAsUser"] == 65532
+    assert pod_sec["runAsGroup"] == 65532
+    assert pod_sec["fsGroup"] == 65532
+
+
+def test_generate_deployment_writable_paths_dynamic(
+    generator: ManifestGenerator,
+    user_inputs: UserInputs,
+    analysis_result: AnalysisResult,
+    http_probe_config: ProbeConfig,
+) -> None:
+    """F-32: writable_paths=['/tmp']만 있으면 /var/log 볼륨 없음."""
+    defaults_go = ResourceDefaults(
+        cpu_request="50m",
+        memory_request="64Mi",
+        cpu_limit="250m",
+        memory_limit="128Mi",
+        writable_paths=["/tmp"],
+        run_as_user=65532,
+    )
+    result = generator.generate_deployment(
+        user_inputs,
+        analysis_result,
+        defaults_go,
+        http_probe_config,
+        image="myrepo/my-app:1.0.0",
+    )
+    doc = yaml.safe_load(result)
+    pod_spec = doc["spec"]["template"]["spec"]
+    volumes_by_name = {v["name"]: v for v in pod_spec["volumes"]}
+    mounts_by_name = {m["name"]: m for m in pod_spec["containers"][0]["volumeMounts"]}
+
+    # /tmp만 있고 /var/log 없음
+    assert "tmp" in volumes_by_name
+    assert "var-log" not in volumes_by_name
+    assert "tmp" in mounts_by_name
+    assert "var-log" not in mounts_by_name
+    assert mounts_by_name["tmp"]["mountPath"] == "/tmp"
+    # 기본 sizeLimit 50Mi (JVM /tmp 관례값 보존)
+    assert volumes_by_name["tmp"]["emptyDir"]["sizeLimit"] == "50Mi"
