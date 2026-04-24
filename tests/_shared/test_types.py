@@ -209,6 +209,33 @@ def test_resource_defaults_run_as_user_default() -> None:
     assert defaults_go.run_as_user == 65532
 
 
+def test_resource_defaults_run_as_user_range_validation() -> None:
+    """ResourceDefaults.__post_init__: run_as_user 범위(1-65535) 검증 안전장치.
+
+    Codex Phase 2 리뷰 P1 완화 — 명백한 오값(0, 음수, 경계 초과) 차단.
+    """
+    import pytest
+
+    from scripts._shared.types import ResourceDefaults
+
+    common_kwargs = dict(
+        cpu_request="100m",
+        memory_request="512Mi",
+        cpu_limit="1000m",
+        memory_limit="1Gi",
+        writable_paths=["/tmp"],
+    )
+
+    # 경계 유효값 — 생성 성공
+    ResourceDefaults(**common_kwargs, run_as_user=1)
+    ResourceDefaults(**common_kwargs, run_as_user=65535)
+
+    # 무효값 — ValueError raise
+    for bad in (0, -1, 65536, 100000):
+        with pytest.raises(ValueError, match="run_as_user"):
+            ResourceDefaults(**common_kwargs, run_as_user=bad)
+
+
 def test_resolved_config_layer_raws_explicit() -> None:
     """ResolvedConfig.layer_raws 명시 설정 — project_config/org_config/builtin_default 키."""
     from scripts._shared.types import ResolvedConfig

@@ -124,6 +124,13 @@ class ResourceDefaults:
     # 누락 시 NFR-04 (r) UID 정합성 테스트 실패로 감지.
     run_as_user: int = 1000
 
+    def __post_init__(self) -> None:
+        # Codex Phase 2 리뷰 P1 완화 — 명백한 오값 차단.
+        if not (1 <= self.run_as_user <= 65535):
+            raise ValueError(
+                f"run_as_user 범위 초과 (1-65535): {self.run_as_user}"
+            )
+
 
 @dataclass(frozen=True)
 class ModuleInfo:
