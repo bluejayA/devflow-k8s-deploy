@@ -642,9 +642,9 @@ class SkillPipeline:
         config: ResolvedConfig,
         inputs: UserInputs,
     ) -> AnalysisResult:
-        """STEP 2: ProjectAnalyzer.analyze() 호출. resource_hint 전달(v0.2.0+)."""
+        """STEP 2: ProjectAnalyzer.analyze() 호출. resource_hint + inputs(F-27) 전달."""
         return self._deps.project_analyzer.analyze(
-            project_dir, config, resource_hint=inputs.resource_hint
+            project_dir, config, resource_hint=inputs.resource_hint, inputs=inputs
         )
 
     # ─── STEP 3: 아티팩트 생성 ───────────────────────────────────────────────

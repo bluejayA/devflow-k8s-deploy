@@ -1225,3 +1225,112 @@ class TestIsWithinRootCorrection:
             analyzer.analyze(tmp_path, config)
 
         assert analyzer._project_root is None
+
+
+# ---------------------------------------------------------------------------
+# BL-001 Phase 5: Analyzer/Pipeline 통합 + ConfigLoader stack overrides
+# ---------------------------------------------------------------------------
+
+
+class TestPhase5InputsChainAndOverrides:
+    """F-27 / F-19 / F-33 통합 검증."""
+
+    def test_analyze_passes_inputs_to_build_plan(self, tmp_path: Path) -> None:
+        """NFR-04 (k): analyze(inputs=...)이 stack.build_plan(inputs=...)으로 전달."""
+        from scripts._shared.types import UserInputs
+
+        mock_module = MagicMock()
+        mock_module.detect.return_value = StackDetectResult(
+            port=8080, entrypoint="", framework="go-generic", version="1.22"
+        )
+        mock_module.build_plan.return_value = BuildPlan(
+            builder_image="b", runner_image="r", build_cmd="c", artifact_path="a",
+        )
+        mock_module.probe_plan.return_value = ProbeConfig(
+            liveness=ProbeSpec(kind="tcp", path=None, port=8080),
+            readiness=ProbeSpec(kind="tcp", path=None, port=8080),
+        )
+        mock_module.defaults.return_value = ResourceDefaults(
+            cpu_request="50m",
+            memory_request="64Mi",
+            cpu_limit="250m",
+            memory_limit="128Mi",
+            writable_paths=["/tmp"],
+            run_as_user=65532,
+        )
+        mock_module.artifact_locator.return_value = []
+
+        analyzer = ProjectAnalyzer(
+            config_loader=_make_config_loader_auto(),
+            stack_registry={"go": mock_module},
+        )
+        config = _make_resolved_config()
+        inputs = UserInputs(
+            app_name="kube-api",
+            port=8080,
+            exposure="ClusterIP",
+            namespace="default",
+            output_dir=Path("/tmp/out"),
+            resource_hint="medium",
+        )
+
+        analyzer.analyze(tmp_path, config, inputs=inputs)
+
+        mock_module.build_plan.assert_called_once()
+        call_args = mock_module.build_plan.call_args
+        assert call_args.kwargs.get("inputs") is inputs
+
+    def test_apply_stack_overrides_entrypoint(self) -> None:
+        """F-27/A-08: config의 stack.<name>.entrypoint가 detect_result.entrypoint를 override."""
+        detect_before = StackDetectResult(
+            port=None,
+            entrypoint="",
+            framework="go-generic",
+            version="1.22",
+            cmd_candidates=["api", "scheduler"],
+        )
+        detect_after = ProjectAnalyzer._apply_stack_overrides(
+            detect_before, {"entrypoint": "./cmd/api"}
+        )
+
+        assert detect_after.entrypoint == "./cmd/api"
+        assert detect_after.cmd_candidates == ["api", "scheduler"]  # 다른 필드 보존
+        # 원본 불변 (frozen)
+        assert detect_before.entrypoint == ""
+
+    def test_apply_stack_overrides_no_entrypoint_passthrough(self) -> None:
+        """stack_config에 entrypoint 키 없으면 detect_result 그대로 통과."""
+        detect_before = StackDetectResult(
+            port=8080, entrypoint=".", framework="go-generic", version="1.22"
+        )
+        detect_after = ProjectAnalyzer._apply_stack_overrides(detect_before, {})
+
+        assert detect_after is detect_before  # 동일 인스턴스 반환
+
+    def test_apply_probe_overrides_path(self) -> None:
+        """F-19/F-27: config의 stack.<name>.probe.path가 ProbeConfig 양쪽 path를 override."""
+        probe_before = ProbeConfig(
+            liveness=ProbeSpec(kind="http", path="/healthz", port=8080),
+            readiness=ProbeSpec(kind="http", path="/healthz", port=8080),
+        )
+        probe_after = ProjectAnalyzer._apply_probe_overrides(
+            probe_before, {"probe": {"path": "/custom-health"}}
+        )
+
+        assert probe_after.liveness.path == "/custom-health"
+        assert probe_after.readiness.path == "/custom-health"
+        # port 보존
+        assert probe_after.liveness.port == 8080
+        assert probe_after.readiness.port == 8080
+
+    def test_apply_probe_overrides_skips_tcp(self) -> None:
+        """TCP probe는 path 무관 — override 영향 없음."""
+        probe_before = ProbeConfig(
+            liveness=ProbeSpec(kind="tcp", path=None, port=8080),
+            readiness=ProbeSpec(kind="tcp", path=None, port=8080),
+        )
+        probe_after = ProjectAnalyzer._apply_probe_overrides(
+            probe_before, {"probe": {"path": "/custom-health"}}
+        )
+        assert probe_after.liveness.path is None
+        assert probe_after.readiness.path is None

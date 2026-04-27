@@ -8,11 +8,12 @@ multi-module 감지 + 비개발자 한국어 힌트 (F-39).
 
 from __future__ import annotations
 
+import dataclasses
 import re
 import unicodedata
 import xml.etree.ElementTree as StdET
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 import yaml
 from defusedxml import ElementTree as ET
@@ -22,11 +23,14 @@ from scripts._shared.fileio import check_yaml_refs, is_within, read_text_limited
 from scripts._shared.types import (
     AnalysisResult,
     ModuleInfo,
+    ProbeConfig,
+    ProbeSpec,
     PromptCallback,
     PromptRequest,
     ResolvedConfig,
     StackDetectResult,
     StatefulnessSignal,
+    UserInputs,
 )
 from scripts.config_loader import ConfigLoader
 from scripts.stacks.base import StackModule
@@ -217,11 +221,52 @@ class ProjectAnalyzer:
 
     # ── Public API ────────────────────────────────────────────────────────────
 
+    @staticmethod
+    def _apply_stack_overrides(
+        detect_result: StackDetectResult, stack_config: dict[str, Any]
+    ) -> StackDetectResult:
+        """F-27/A-08: config의 `stack.<name>.entrypoint`를 detect_result에 반영.
+
+        A-08 우선순위 1단계: config entrypoint > app_name 매칭 > 단일 후보.
+        config_loader.resolve_stack_config 결과(빈 dict 가능)를 받아 frozen dataclass replace.
+        """
+        entrypoint = stack_config.get("entrypoint")
+        if isinstance(entrypoint, str) and entrypoint:
+            return dataclasses.replace(detect_result, entrypoint=entrypoint)
+        return detect_result
+
+    @staticmethod
+    def _apply_probe_overrides(
+        probe_config: ProbeConfig, stack_config: dict[str, Any]
+    ) -> ProbeConfig:
+        """F-19/F-27: config의 `stack.<name>.probe.path`로 ProbeConfig HTTP path를 override.
+
+        TCP probe는 path 무관으로 영향 없음.
+        """
+        probe_section = stack_config.get("probe")
+        if not isinstance(probe_section, dict):
+            return probe_config
+        path_override = probe_section.get("path")
+        if not isinstance(path_override, str) or not path_override:
+            return probe_config
+
+        def _override(spec: ProbeSpec) -> ProbeSpec:
+            if spec.kind == "http":
+                return dataclasses.replace(spec, path=path_override)
+            return spec
+
+        return ProbeConfig(
+            liveness=_override(probe_config.liveness),
+            readiness=_override(probe_config.readiness),
+        )
+
     def analyze(
         self,
         project_dir: Path,
         config: ResolvedConfig,
         resource_hint: Literal["small", "medium", "large"] = "medium",
+        *,
+        inputs: UserInputs | None = None,
     ) -> AnalysisResult:
         """전체 분석 흐름.
 
@@ -247,7 +292,7 @@ class ProjectAnalyzer:
         # is_within 검사에 사용할 project_root 저장
         self._project_root = project_dir.resolve()
         try:
-            return self._analyze_impl(project_dir, config, resource_hint)
+            return self._analyze_impl(project_dir, config, resource_hint, inputs)
         finally:
             self._project_root = None
 
@@ -256,6 +301,7 @@ class ProjectAnalyzer:
         project_dir: Path,
         config: ResolvedConfig,
         resource_hint: Literal["small", "medium", "large"],
+        inputs: UserInputs | None,
     ) -> AnalysisResult:
         """analyze() 실제 구현 (project_root 설정 후 호출)."""
         gaps: list[str] = []
@@ -298,12 +344,19 @@ class ProjectAnalyzer:
                 detect_result = re_detected
             # else: 모듈 디렉토리에 빌드 파일 없으면 상위 detect_result 유지
 
-        # 4. 선택된 module의 plan 생성
+        # 4. config override 추출 (F-33) + detect_result에 stack.<name>.entrypoint 적용 (F-27)
+        stack_config = self._config_loader.resolve_stack_config(config, stack_name)
+        detect_result = self._apply_stack_overrides(detect_result, stack_config)
+
+        # 5. 선택된 module의 plan 생성
         # 분석 대상 디렉토리: multi-module이면 모듈 디렉토리, 아니면 project_dir
         analysis_dir = selected_module.path if selected_module else project_dir
 
-        build_plan = module.build_plan(detect_result)
+        # F-24: build_plan에 inputs 전달 (Optional). Phase 5 이후 명시 전달.
+        build_plan = module.build_plan(detect_result, inputs=inputs)
         probe_config = module.probe_plan(detect_result)
+        # F-19: probe_config에 stack.<name>.probe.path override 적용
+        probe_config = self._apply_probe_overrides(probe_config, stack_config)
         resource_defaults = module.defaults(resource_hint)
         artifact_paths = module.artifact_locator(detect_result, analysis_dir)
 

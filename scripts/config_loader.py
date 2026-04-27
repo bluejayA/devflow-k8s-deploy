@@ -192,10 +192,22 @@ class ConfigLoader:
         - go/python/react: UnsupportedStackError raise (v0.1.0 미지원)
         - 알 수 없는 값: UnsupportedStackError
 
+        BL-001 F-33: `stack`이 dict이면 `forced_stack` 키에서 값 읽기.
+        ```yaml
+        stack:
+          forced_stack: auto
+          go:
+            entrypoint: ./cmd/api
+        ```
+
         source는 config.source_map["stack"] 반영.
         """
         stack_val = config.raw.get("stack", "auto")
         source = config.source_map.get("stack", _SRC_BUILTIN)
+
+        # F-33: stack이 dict이면 forced_stack에서 값 읽기 (backward-compat)
+        if isinstance(stack_val, dict):
+            stack_val = stack_val.get("forced_stack", "auto")
 
         # _SUPPORTED_STACKS를 단일 출처로 사용 (Important 1)
         if stack_val not in _SUPPORTED_STACKS:
@@ -210,6 +222,32 @@ class ConfigLoader:
 
         # stack_val == "jvm" (지원 목록 내 나머지 값)
         return StackDecision(forced_stack="jvm", source=source)
+
+    def resolve_stack_config(
+        self, config: ResolvedConfig, stack_name: str
+    ) -> dict[str, Any]:
+        """F-33: `stack.<stack_name>` 하위 설정 dict를 반환.
+
+        예시 YAML:
+        ```yaml
+        stack:
+          go:
+            entrypoint: ./cmd/api
+            probe:
+              path: /custom-health
+        ```
+
+        - `stack`이 string(예: "auto")이면 빈 dict 반환 (backward-compat).
+        - `stack[stack_name]`이 dict가 아니면 빈 dict 반환.
+        - 이 dict는 ProjectAnalyzer._apply_stack_overrides / _apply_probe_overrides에 전달.
+        """
+        stack_section = config.raw.get("stack")
+        if not isinstance(stack_section, dict):
+            return {}
+        sub = stack_section.get(stack_name)
+        if not isinstance(sub, dict):
+            return {}
+        return sub
 
     def resolve_cluster_config(
         self,
