@@ -1334,3 +1334,70 @@ class TestPhase5InputsChainAndOverrides:
         )
         assert probe_after.liveness.path is None
         assert probe_after.readiness.path is None
+
+
+class TestPhase5SecurityGuards:
+    """BL-001 Phase 5 보안 보강 — Codex/security-reviewer P1 대응.
+
+    Phase 6 validate_go_entrypoint(F-29) 도입 전 trust boundary 닫는 선제 가드.
+    """
+
+    @pytest.mark.parametrize(
+        "bad_entrypoint",
+        [
+            "; rm -rf /",
+            "$(echo)",
+            "`whoami`",
+            "./cmd/api\nFROM scratch",
+            "../etc/passwd",
+            "./cmd/../../etc",
+            "x" * 300,  # 길이 초과
+            " ./cmd/api",  # 선행 공백
+            "./cmd/api;",  # 세미콜론
+        ],
+    )
+    def test_apply_stack_overrides_rejects_unsafe_entrypoint(self, bad_entrypoint: str) -> None:
+        """entrypoint shell injection / path traversal / 길이 초과 거부."""
+        detect = StackDetectResult(
+            port=None, entrypoint="", framework="go-generic", version="1.22"
+        )
+        with pytest.raises(ValueError, match="entrypoint"):
+            ProjectAnalyzer._apply_stack_overrides(detect, {"entrypoint": bad_entrypoint})
+
+    def test_apply_stack_overrides_accepts_safe_entrypoint(self) -> None:
+        """정상 entrypoint는 통과."""
+        detect = StackDetectResult(
+            port=None, entrypoint="", framework="go-generic", version="1.22"
+        )
+        for safe in [".", "./cmd/api", "./cmd/kube-controller-manager", "./bin/x_y"]:
+            result = ProjectAnalyzer._apply_stack_overrides(detect, {"entrypoint": safe})
+            assert result.entrypoint == safe
+
+    @pytest.mark.parametrize(
+        "bad_path",
+        [
+            "/h\nbody: pwn",  # 개행
+            "/h\x00\x01",  # 제어문자
+            "no-leading-slash",
+            "/" + ("a" * 600),  # 길이 초과
+            "/h<script>",  # 비허용 문자
+        ],
+    )
+    def test_apply_probe_overrides_rejects_unsafe_path(self, bad_path: str) -> None:
+        """probe.path YAML/HTTP path injection 거부."""
+        probe = ProbeConfig(
+            liveness=ProbeSpec(kind="http", path="/healthz", port=8080),
+            readiness=ProbeSpec(kind="http", path="/healthz", port=8080),
+        )
+        with pytest.raises(ValueError, match="probe"):
+            ProjectAnalyzer._apply_probe_overrides(probe, {"probe": {"path": bad_path}})
+
+    def test_apply_probe_overrides_accepts_safe_path(self) -> None:
+        """정상 probe.path 통과."""
+        probe = ProbeConfig(
+            liveness=ProbeSpec(kind="http", path="/healthz", port=8080),
+            readiness=ProbeSpec(kind="http", path="/healthz", port=8080),
+        )
+        for safe in ["/healthz", "/api/v1/health", "/health?ready=true"]:
+            result = ProjectAnalyzer._apply_probe_overrides(probe, {"probe": {"path": safe}})
+            assert result.liveness.path == safe

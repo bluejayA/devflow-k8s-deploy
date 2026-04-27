@@ -596,3 +596,57 @@ def test_config_loader_app_replicas_override(tmp_path: Path) -> None:
     loader = ConfigLoader(org_config_path=tmp_path / "no_org.yml")
     result = loader.load(tmp_path)
     assert result.raw["app"]["replicas"] == 5
+
+
+class TestResolveStackConfig:
+    """BL-001 F-33 — quality-reviewer P2-3 대응."""
+
+    def test_string_stack_returns_empty_dict(self) -> None:
+        """`stack: auto` 같은 string 형태는 stack overrides 없음 → 빈 dict."""
+        from scripts._shared.types import ResolvedConfig
+
+        loader = ConfigLoader(org_config_path=Path("/no_org.yml"))
+        config = ResolvedConfig(raw={"stack": "auto"}, source_map={})
+        result = loader.resolve_stack_config(config, "go")
+
+        assert result == {}
+
+    def test_dict_stack_with_substack_returns_subdict(self) -> None:
+        """`stack.go: {entrypoint: ./cmd/api}` → {"entrypoint": "./cmd/api"}."""
+        from scripts._shared.types import ResolvedConfig
+
+        loader = ConfigLoader(org_config_path=Path("/no_org.yml"))
+        config = ResolvedConfig(
+            raw={
+                "stack": {
+                    "forced_stack": "auto",
+                    "go": {"entrypoint": "./cmd/api"},
+                }
+            },
+            source_map={},
+        )
+        result = loader.resolve_stack_config(config, "go")
+
+        assert result == {"entrypoint": "./cmd/api"}
+
+    def test_dict_stack_without_substack_returns_empty_dict(self) -> None:
+        """`stack.go`가 dict가 아닌 경우(예: string scalar) → 빈 dict."""
+        from scripts._shared.types import ResolvedConfig
+
+        loader = ConfigLoader(org_config_path=Path("/no_org.yml"))
+        config = ResolvedConfig(
+            raw={"stack": {"go": "string-not-dict"}}, source_map={}
+        )
+        result = loader.resolve_stack_config(config, "go")
+
+        assert result == {}
+
+    def test_missing_stack_key_returns_empty_dict(self) -> None:
+        """`stack` 키 자체가 없으면 빈 dict."""
+        from scripts._shared.types import ResolvedConfig
+
+        loader = ConfigLoader(org_config_path=Path("/no_org.yml"))
+        config = ResolvedConfig(raw={}, source_map={})
+        result = loader.resolve_stack_config(config, "go")
+
+        assert result == {}
