@@ -71,3 +71,7 @@
 [2026-04-24T01:34:42Z] pre-planning skipped — C(바로 workflow-planning) 선택. User Stories/NFR 별도 수집 스킵(기 도출된 F-33/NFR-8로 충분)
 [2026-04-24T01:36:48Z] workflow-planning — 2안 생성(A안 점진적 TDD 9-phase/B안 설계우선+application-design). A안 권장(Brownfield 패턴 재현). application-design/units-generation 모두 스킵 권장
 [2026-04-24T01:38:04Z] approach-selected — A안(점진적 TDD 9-phase). application-design/units-generation 모두 스킵. CONSTRUCTION은 code-generation(Standard) + build-and-test(Standard)
+[2026-04-24T06:34:56Z] worktree-created — feature/go-stack-support @ d64a911, baseline 695 passed, path=.worktrees/feature-go-stack-support
+[2026-04-24T06:41:23Z] Phase transition: INCEPTION → CONSTRUCTION — commit: d64a911
+[2026-04-27T+09:00] Session resumed — A/B 게이트 B 선택 → Phase 6 시작. Resume 컨텍스트: HEAD 3ee64db, 734 tests
+[2026-04-27T+09:00] Phase 6 완료 — GoStackModule + 4 헬퍼 신규. 786 tests pass (+52: 14 text_safety + 38 test_go). ruff clean, mypy clean. JVM 골든/단위/context 62 tests 회귀 PASS (byte-identical). 신규 파일: scripts/stacks/go.py, tests/stacks/test_go.py. 수정: scripts/_shared/text_safety.py(+validate_go_entrypoint), tests/_shared/test_text_safety.py(+14)
