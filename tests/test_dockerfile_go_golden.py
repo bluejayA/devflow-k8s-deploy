@@ -150,6 +150,36 @@ def test_golden_go_cmd_subpath(
     _assert_golden("go_cmd_subpath.Dockerfile", result)
 
 
+def test_local_replace_friendly_layer_order(
+    generator: DockerfileGenerator,
+    go_build_plan_root: BuildPlan,
+    inputs: UserInputs,
+    go_defaults: ResourceDefaults,
+    go_module: GoStackModule,
+    go_detect_root: StackDetectResult,
+    tmp_path: Path,
+) -> None:
+    """Codex P2: local `replace ./libs/foo` 모노레포 빌드 실패 방지.
+
+    `go mod download`가 `COPY . .` 이후에 실행되어야 replace 경로가 존재.
+    """
+    result = generator.generate(
+        go_build_plan_root,
+        inputs,
+        go_defaults,
+        stack_module=go_module,
+        detect_result=go_detect_root,
+        project_dir=tmp_path,
+    )
+    copy_all_idx = result.find("COPY . .")
+    download_idx = result.find("go mod download")
+    assert copy_all_idx != -1, "COPY . . 부재"
+    assert download_idx != -1, "go mod download 부재"
+    assert copy_all_idx < download_idx, (
+        "COPY . . 이 go mod download 이후에 위치 — local replace 빌드 실패 위험"
+    )
+
+
 def test_required_security_directives(
     generator: DockerfileGenerator,
     go_build_plan_root: BuildPlan,

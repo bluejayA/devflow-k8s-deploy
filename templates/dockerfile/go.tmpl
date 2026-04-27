@@ -3,16 +3,13 @@ FROM {{ builder_image }} AS builder
 
 WORKDIR /build
 
-# 의존성 캐시 레이어 — go.mod/go.sum 만 먼저 복사해 소스 변경 시 재사용
-# go.sum은 vendor 미사용 신규 프로젝트에서 부재할 수 있어 와일드카드 사용
-COPY go.mod go.sum* ./
-RUN go mod download
-
-# 소스 전체 복사 — `.dockerignore`(k8s-output/, .git/, vendor/, .env 등)로 오염 차단
+# 소스 + 모듈 메타 전체 복사 — `.dockerignore`(k8s-output/, .git/, vendor/, .env 등)로
+# 오염 차단. local `replace ./libs/foo` 디렉티브를 쓰는 모노레포 호환을 위해 의존성
+# 다운로드 전에 전체 트리가 존재해야 함 (Codex review P2).
 COPY . .
 
-# 정적 링크 + 심볼/디버그 정보 제거 (-s -w)로 distroless 호환 + 바이너리 크기 최소화
-RUN {{ build_cmd }}
+# 의존성 다운로드 + 정적 링크 빌드 (-s -w로 심볼/디버그 제거 → distroless 호환 + 사이즈 ↓)
+RUN go mod download && {{ build_cmd }}
 
 # 런타임 단계: distroless static (UID 65532 nonroot 내장)
 # 비root + 셸 부재 + 최소 surface = 컨테이너 탈출 시 호스트 root 권한 차단

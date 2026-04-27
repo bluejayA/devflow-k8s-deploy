@@ -174,3 +174,59 @@ def test_orchestrator_registers_go(tmp_path: Path) -> None:
     # 등록 순서가 JVM → Go 임을 보장 (F-16 우선순위)
     keys = list(deps.stack_registry.keys())
     assert keys.index("jvm") < keys.index("go")
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Codex P1 회귀 — probe.port 정합성
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+def test_go_probe_port_follows_inputs_port(tmp_path: Path) -> None:
+    """Codex P1: Go의 detect_result.port=None일 때 probe.port가 inputs.port를 따라가야 함.
+
+    container/service port는 inputs.port를 쓰는데 probe만 8080 fallback이면
+    readiness 영구 실패. Analyzer가 detect 직후 port를 채워 정합성 확보.
+    """
+    _go_only_project(tmp_path)
+    analyzer = ProjectAnalyzer(
+        config_loader=_make_loader_auto(),
+        stack_registry={"jvm": JvmStackModule(), "go": GoStackModule()},
+    )
+    inputs = UserInputs(
+        app_name="myapp",
+        port=9090,  # ← 8080 아닌 값
+        exposure="ClusterIP",
+        namespace="default",
+        output_dir=Path("/tmp/out"),
+        resource_hint="medium",
+    )
+    result = analyzer.analyze(tmp_path, _make_resolved_config(), inputs=inputs)
+
+    assert result.probe_config.liveness.port == 9090
+    assert result.probe_config.readiness.port == 9090
+    # detect_result.port도 채워졌는지 (build_plan 등 다른 단계도 정합)
+    assert result.detect_result.port == 9090
+
+
+def test_jvm_detect_port_takes_priority_over_inputs(tmp_path: Path) -> None:
+    """JVM은 application.yml에서 port를 읽으면 inputs.port에 의해 덮이지 않음.
+
+    detect_result.port가 이미 채워졌으면(JVM 경로) 기존 동작 유지 — 회귀 방지.
+    """
+    _spring_boot_project(tmp_path)  # application.yml에 server.port: 8080
+    analyzer = ProjectAnalyzer(
+        config_loader=_make_loader_auto(),
+        stack_registry={"jvm": JvmStackModule(), "go": GoStackModule()},
+    )
+    # inputs는 9090이지만 JVM detect는 application.yml의 8080을 발견
+    inputs = UserInputs(
+        app_name="myapp",
+        port=9090,
+        exposure="ClusterIP",
+        namespace="default",
+        output_dir=Path("/tmp/out"),
+        resource_hint="medium",
+    )
+    result = analyzer.analyze(tmp_path, _make_resolved_config(), inputs=inputs)
+    # JVM detect 결과(8080)가 우선 — port fill 로직은 None일 때만 동작
+    assert result.detect_result.port == 8080

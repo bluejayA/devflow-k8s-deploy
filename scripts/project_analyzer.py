@@ -390,6 +390,12 @@ class ProjectAnalyzer:
         stack_config = self._config_loader.resolve_stack_config(config, stack_name)
         detect_result = self._apply_stack_overrides(detect_result, stack_config)
 
+        # Codex P1: detect_result.port가 None이면 inputs.port로 채워 plan 단계 정합성 보장.
+        # Go는 detect 단계에서 port 추론 불가(소스 정적 분석 한계) — inputs가 진실의 출처.
+        # JVM은 application.yml 추론 성공 시 detect_result.port가 채워져 영향 없음.
+        if detect_result.port is None and inputs is not None:
+            detect_result = dataclasses.replace(detect_result, port=inputs.port)
+
         # 5. 선택된 module의 plan 생성
         # 분석 대상 디렉토리: multi-module이면 모듈 디렉토리, 아니면 project_dir
         analysis_dir = selected_module.path if selected_module else project_dir
