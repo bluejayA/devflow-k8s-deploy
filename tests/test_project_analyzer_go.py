@@ -139,6 +139,43 @@ def test_empty_dir_still_raises_unknown_stack(tmp_path: Path) -> None:
         )
 
 
+def test_jvm_detect_failure_falls_back_to_go_in_mixed_repo(
+    tmp_path: Path,
+) -> None:
+    """BL-001 Phase 9 Round 2 — Codex P1 (Strangler 의도 위반).
+
+    `pom.xml`이 깨져 `JvmDetectionError`를 던지는 mixed repo에서도 다음 등록 스택
+    (Go)으로 폴백하여 정상 분석돼야 한다. 1차 구현은 try/except 누락으로
+    `JvmDetectionError`가 그대로 전파돼 Strangler 확장성이 깨졌었다.
+
+    `base.py:35` 계약: "ProjectAnalyzer가 catch하여 gaps에 기록".
+    """
+    # 깨진 pom.xml — JVM detect 단계에서 XML 파싱 예외 유발
+    _write(
+        tmp_path / "pom.xml",
+        "<project><parent><artifactId>spring-boot-starter-parent</artifactId>",
+    )
+    # 정상 go.mod — Go 폴백 대상
+    _write(tmp_path / "go.mod", "module example.com/x\n\ngo 1.22\n")
+    _write(tmp_path / "main.go", "package main\nfunc main() {}\n")
+
+    analyzer = ProjectAnalyzer(
+        config_loader=_make_loader_auto(),
+        stack_registry={"jvm": JvmStackModule(), "go": GoStackModule()},
+    )
+    result = analyzer.analyze(
+        tmp_path, _make_resolved_config(), inputs=_make_inputs()
+    )
+
+    assert result.stack == "go", (
+        "JVM detect 실패 시 Go로 폴백돼야 함 (Strangler 계약)"
+    )
+    # 폴백 사실이 gaps에 한국어로 기록됐는지 확인
+    assert any("jvm" in gap.lower() for gap in result.gaps), (
+        f"폴백 사실이 gaps에 기록돼야 함: {result.gaps}"
+    )
+
+
 def test_forced_go_with_go_mod(tmp_path: Path) -> None:
     """forced_stack=go + go.mod 있음 → Go 사용."""
     _go_only_project(tmp_path)

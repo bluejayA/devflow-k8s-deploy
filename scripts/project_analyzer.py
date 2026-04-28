@@ -18,7 +18,13 @@ from typing import Any, Literal
 import yaml
 from defusedxml import ElementTree as ET
 
-from scripts._shared.errors import MultiModuleAbort, UnknownStackError, UnsupportedStackError
+from scripts._shared.errors import (
+    GoDetectionError,
+    JvmDetectionError,
+    MultiModuleAbort,
+    UnknownStackError,
+    UnsupportedStackError,
+)
 from scripts._shared.fileio import check_yaml_refs, is_within, read_text_limited
 from scripts._shared.text_safety import reject_unsafe_chars
 from scripts._shared.types import (
@@ -368,7 +374,7 @@ class ProjectAnalyzer:
                     f"프로젝트 디렉토리를 확인하세요: {project_dir}"
                 )
         else:
-            stack_detect = self._detect_stack(project_dir)
+            stack_detect = self._detect_stack(project_dir, gaps)
             stack_name = stack_detect.stack_name
             module = stack_detect.module
             detect_result = stack_detect.detect_result
@@ -423,17 +429,29 @@ class ProjectAnalyzer:
             gaps=gaps,
         )
 
-    def _detect_stack(self, project_dir: Path) -> _StackDetectBundle:
+    def _detect_stack(
+        self, project_dir: Path, gaps: list[str]
+    ) -> _StackDetectBundle:
         """v0.1.0: 등록된 stack 모듈 중 detect()가 성공하는 것 중 첫 매치.
+
+        BL-001 Phase 9 Round 2 (Codex P1): `StackModule.detect`가 detect 단계
+        예외(`JvmDetectionError` / `GoDetectionError`)를 던지면 catch하여 gaps에
+        기록하고 다음 스택으로 폴백한다 (base.py:35 Strangler 계약).
 
         Returns:
             _StackDetectBundle — (stack_name, module, detect_result)
 
         Raises:
-            UnknownStackError: 아무 것도 감지 못하면 raise.
+            UnknownStackError: 모든 스택이 None 반환 또는 detect 예외라 매치 없으면 raise.
         """
         for stack_name, module in self._stack_registry.items():
-            result = module.detect(project_dir)
+            try:
+                result = module.detect(project_dir)
+            except (JvmDetectionError, GoDetectionError) as exc:
+                gaps.append(
+                    f"stack '{stack_name}' detect 실패 — 다음 스택으로 폴백: {exc}"
+                )
+                continue
             if result is not None:
                 return _StackDetectBundle(
                     stack_name=stack_name,
