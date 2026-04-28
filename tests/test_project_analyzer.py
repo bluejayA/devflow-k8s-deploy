@@ -681,7 +681,8 @@ class TestDetectStack:
             stack_registry=registry,
         )
 
-        bundle = analyzer._detect_stack(tmp_path)
+        gaps: list[str] = []
+        bundle = analyzer._detect_stack(tmp_path, gaps)
         assert bundle.stack_name == "second_stack"
         mock_first.detect.assert_called_once_with(tmp_path)
         mock_second.detect.assert_called_once_with(tmp_path)
@@ -697,8 +698,9 @@ class TestDetectStack:
             config_loader=_make_config_loader_auto(),
             stack_registry={"jvm": mock_module},
         )
+        gaps: list[str] = []
         with pytest.raises(UnknownStackError):
-            analyzer._detect_stack(tmp_path)
+            analyzer._detect_stack(tmp_path, gaps)
 
 
 # ──────────────────────────────────────────────────────────────────────────────

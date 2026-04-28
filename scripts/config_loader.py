@@ -24,10 +24,10 @@ BUILTIN_CLUSTER_PRESETS: dict[str, dict[str, object]] = {
     "orbstack": {"storage_class": "local-path", "network_policy": True},
 }
 
-# v0.1.0에서 지원하는 stack 목록 (단일 출처)
-_SUPPORTED_STACKS: frozenset[str] = frozenset({"auto", "jvm"})
+# BL-001 Phase 9 (Codex P1): 'go' 추가. mixed repo에서 stack.forced_stack=go 선택 가능.
+_SUPPORTED_STACKS: frozenset[str] = frozenset({"auto", "jvm", "go"})
 # v0.1.0에서 명시하면 UnsupportedStackError를 발생시킬 stack
-_KNOWN_UNSUPPORTED_STACKS: frozenset[str] = frozenset({"go", "python", "react"})
+_KNOWN_UNSUPPORTED_STACKS: frozenset[str] = frozenset({"python", "react"})
 
 # 조직 설정 기본 경로
 _DEFAULT_ORG_CONFIG_PATH = Path.home() / ".claude" / "devflow-k8s-deploy.yml"
@@ -189,7 +189,8 @@ class ConfigLoader:
 
         - auto: forced_stack=None (ProjectAnalyzer가 감지)
         - jvm: forced_stack="jvm"
-        - go/python/react: UnsupportedStackError raise (v0.1.0 미지원)
+        - go: forced_stack="go" (BL-001 Phase 9 Codex P1 — mixed repo escape hatch)
+        - python/react: UnsupportedStackError raise (v0.2+ 예정)
         - 알 수 없는 값: UnsupportedStackError
 
         BL-001 F-33: `stack`이 dict이면 `forced_stack` 키에서 값 읽기.
@@ -220,8 +221,8 @@ class ConfigLoader:
         if stack_val == "auto":
             return StackDecision(forced_stack=None, source=source)
 
-        # stack_val == "jvm" (지원 목록 내 나머지 값)
-        return StackDecision(forced_stack="jvm", source=source)
+        # stack_val ∈ {"jvm", "go"} (지원 목록 내 나머지 값 — Codex P1 반영)
+        return StackDecision(forced_stack=stack_val, source=source)
 
     def resolve_stack_config(
         self, config: ResolvedConfig, stack_name: str

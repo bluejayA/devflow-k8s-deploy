@@ -202,11 +202,12 @@ class ManifestGenerator:
           - spec.replicas = inputs.replicas
           - spec.template.spec.serviceAccountName = '{app_name}-sa'
           - spec.template.spec.automountServiceAccountToken: false
-          - Pod securityContext (F-31): runAsNonRoot, runAsUser=1000,
-            fsGroup=1000, seccompProfile=RuntimeDefault
+          - Pod securityContext (F-31): runAsNonRoot, runAsUser/fsGroup은
+            defaults.run_as_user 기반 동적 주입 (JVM 관례 1000, Go distroless 65532),
+            seccompProfile=RuntimeDefault
           - Container securityContext (F-32): readOnlyRootFilesystem,
             allowPrivilegeEscalation=false, capabilities.drop=[ALL], privileged=false
-          - emptyDir 볼륨 [/tmp, /var/log] 자동 마운트 (F-32)
+          - emptyDir 볼륨은 defaults.writable_paths 기반 동적 마운트 (F-32)
           - resources (F-33): requests/limits cpu+memory from defaults
           - probes (F-34): liveness + readiness from ProbeConfig
           - 보안 근거 주석 (F-37)

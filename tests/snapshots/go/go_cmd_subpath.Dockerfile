@@ -1,0 +1,30 @@
+# 빌드 단계: Go toolchain (alpine 기반)
+FROM golang:1.22-alpine AS builder
+
+WORKDIR /build
+
+# 소스 + 모듈 메타 전체 복사 — `.dockerignore`(k8s-output/, .git/, vendor/, .env 등)로
+# 오염 차단. local `replace ./libs/foo` 디렉티브를 쓰는 모노레포 호환을 위해 의존성
+# 다운로드 전에 전체 트리가 존재해야 함 (Codex review P2).
+COPY . .
+
+# 의존성 다운로드 + 정적 링크 빌드 (-s -w로 심볼/디버그 제거 → distroless 호환 + 사이즈 ↓)
+RUN go mod download && CGO_ENABLED=0 go build -ldflags="-s -w" -o myapp ./cmd/myapp
+
+# 런타임 단계: distroless static (UID 65532 nonroot 내장)
+# 비root + 셸 부재 + 최소 surface = 컨테이너 탈출 시 호스트 root 권한 차단
+FROM gcr.io/distroless/static-debian12:nonroot
+
+WORKDIR /app
+
+# distroless는 USER/addgroup 불필요 (nonroot 내장 UID 65532).
+# COPY --chown — UID 65532:65532 명시
+COPY --from=builder --chown=65532:65532 /build/myapp /app/myapp
+
+# latest 태그 금지 — 재현성 + 공급망 공격 방지
+
+EXPOSE 8080
+
+USER nonroot
+
+ENTRYPOINT ["/app/myapp"]

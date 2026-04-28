@@ -903,6 +903,7 @@ def _build_default_dependencies(project_dir: Path) -> PipelineDependencies:
     from scripts.output_packager import OutputPackager
     from scripts.pipeline.build_runner import BuildRunner
     from scripts.project_analyzer import ProjectAnalyzer
+    from scripts.stacks.go import GoStackModule
     from scripts.stacks.jvm import JvmStackModule
     from scripts.template_renderer import TemplateRenderer
     from scripts.validate_k8s import K8sValidator
@@ -916,8 +917,11 @@ def _build_default_dependencies(project_dir: Path) -> PipelineDependencies:
     template_root = plugin_root / "templates"
     template_renderer = TemplateRenderer(template_root)
 
-    # StackRegistry: v0.1.0은 JVM만
-    stack_registry: dict[str, StackModule] = {"jvm": JvmStackModule()}
+    # StackRegistry: 자동 감지 시 등록 순서대로 시도 — JVM 우선 → Go (F-16)
+    stack_registry: dict[str, StackModule] = {
+        "jvm": JvmStackModule(),
+        "go": GoStackModule(),
+    }
 
     # config 미리 로드하여 build engine/timeout 추출
     config = config_loader.load(project_dir)
