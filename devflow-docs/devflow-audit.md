@@ -71,8 +71,16 @@
 [2026-04-24T01:34:42Z] pre-planning skipped — C(바로 workflow-planning) 선택. User Stories/NFR 별도 수집 스킵(기 도출된 F-33/NFR-8로 충분)
 [2026-04-24T01:36:48Z] workflow-planning — 2안 생성(A안 점진적 TDD 9-phase/B안 설계우선+application-design). A안 권장(Brownfield 패턴 재현). application-design/units-generation 모두 스킵 권장
 [2026-04-24T01:38:04Z] approach-selected — A안(점진적 TDD 9-phase). application-design/units-generation 모두 스킵. CONSTRUCTION은 code-generation(Standard) + build-and-test(Standard)
+[2026-04-24T04:02:02Z] Branch: feature/go-stack-support — INCEPTION 산출물 커밋 d64a911 후 워크트리 생성 진행
 [2026-04-24T06:34:56Z] worktree-created — feature/go-stack-support @ d64a911, baseline 695 passed, path=.worktrees/feature-go-stack-support
 [2026-04-24T06:41:23Z] Phase transition: INCEPTION → CONSTRUCTION — commit: d64a911
+[2026-04-24T08:53:07Z] Phase 1 complete — commit 2afe7d5 (feature/go-stack-support). JVM manifest 4종 골든 락다운 + yaml.dump 안정화. Codex Phase 1 리뷰 조건부 승인(P1 StatefulSet+yaml옵션) 반영. 695 → 699 tests passing, ruff clean
+[2026-04-24T13:30:24Z] Phase 2 complete — commit 43f91c9. 타입/예외 확장(cmd_candidates, run_as_user, Go errors). run_as_user default=1000 채택 결정. 699 → 703 passing, ruff clean
+[2026-04-24T13:44:37Z] Phase 2 reinforced — commit b0b8a6d. Codex Phase 2 리뷰 조건부 승인 → __post_init__ range validation 추가. Phase 순서 뒤집기 제안은 기각(원안 유지). 703 → 704 passing
+[2026-04-24T13:57:18Z] Phase 3 complete — commit 2ebb1c5. manifest 하드코딩 제거(F-31 UID, F-32 writable_paths Deployment 한정). Phase 1 JVM 골든 4종 byte-identical 유지(안전망 정확성 증명). 704 → 707 passing
+[2026-04-24T14:06:43Z] Phase 4 complete — commit b93f3a2. Protocol F-24 확장(inputs Optional). Codex P2-3 수용(requirements UPDATE 3). 기존 호출부 9곳 변경 없이 호환. 707 → 709 passing
+[2026-04-27T01:03:54Z] Phase 5 complete — commit 452a596. Analyzer/Pipeline 통합(F-27 inputs 체인 + override 헬퍼) + ConfigLoader resolve_stack_config(F-33). 책임 분리 3단 완성. 709 → 714 passing
+[2026-04-27T01:41:42Z] Phase 5 reinforced — commit 3ee64db. 3자 리뷰(code/quality/security) 반영: security P1 2건(entrypoint/probe.path 화이트리스트) + quality P2-3(ConfigLoader 단위 테스트). 714 → 734 passing
 [2026-04-27T+09:00] Session resumed — A/B 게이트 B 선택 → Phase 6 시작. Resume 컨텍스트: HEAD 3ee64db, 734 tests
 [2026-04-27T+09:00] Phase 6 완료 — GoStackModule + 4 헬퍼 신규. 786 tests pass (+52: 14 text_safety + 38 test_go). ruff clean, mypy clean. JVM 골든/단위/context 62 tests 회귀 PASS (byte-identical). 신규 파일: scripts/stacks/go.py, tests/stacks/test_go.py. 수정: scripts/_shared/text_safety.py(+validate_go_entrypoint), tests/_shared/test_text_safety.py(+14). commit f79a836
 [2026-04-27T+09:00] Phase 7 완료 — Dockerfile 템플릿 + 골든 + 레지스트리 + auto-선택 + E2E smoke. 796 tests pass (+10: 3 dockerfile golden + 6 analyzer Go + 1 E2E). 신규 파일: templates/dockerfile/go.tmpl, tests/snapshots/go/{go_root_main,go_cmd_subpath}.Dockerfile, tests/test_dockerfile_go_golden.py, tests/test_project_analyzer_go.py, tests/test_e2e_go_smoke.py. 수정: scripts/pipeline/orchestrator.py(stack_registry에 GoStackModule 추가). E2E smoke 통과: Go 프로젝트 fixture → Dockerfile + deployment.yaml 생성, runAsUser 65532 + distroless nonroot 확인. commit 46c2cc5
@@ -81,3 +89,7 @@
 [2026-04-27T+09:00] Codex P2 반영 — Dockerfile go.tmpl 레이어 순서 수정. COPY . . 이후 go mod download 실행 → local replace ./libs/* 모노레포 빌드 호환. 골든 갱신(go_root_main + go_cmd_subpath). 레이어 캐시 일부 손실 vs 정확성 트레이드오프 — 정확성 우선. 회귀 테스트 +1 (COPY . . 위치 검증)
 [2026-04-27T+09:00] 799 tests pass (+3 회귀), ruff/mypy clean, JVM 골든 byte-identical 유지. commit 7110d25
 [2026-04-27T+09:00] Phase 8 완료 — 통합 회귀 + NFR-EXT-01 가드. 807 tests pass (+8). 신규 파일: tests/test_e2e_go_config_override.py(3 — NFR-04 (l)(m)(k) Go config override + 기본 체인), tests/test_e2e_jvm_smoke.py(1 — NFR-04 (r)(s) JVM 측 보강), tests/test_no_stack_hardcoding.py(4 — NFR-EXT-01 회귀 가드: deployment.tmpl/statefulset.tmpl Jinja 변수 사용 + manifest_generator 코드 경로 stack-specific UID/이미지 토큰 부재). 부수: scripts/manifest_generator.py docstring 갱신(F-31 Phase 3 후 stale 주석 정리). ruff/mypy clean, JVM 골든 byte-identical 유지.
+[2026-04-28T00:00:00Z] Phase 9 R1 — `/codex:review` (review-mohxi453-uhdapy) 결과: P1 1건. forced_stack=go 화이트리스트 누락 (config_loader.py:213-214). 반영 commit 89bb6a1, 807 → 810 passing(+3)
+[2026-04-28T00:30:00Z] Phase 9 R2 — agent-council(codex 단독 deep timeout 600s): P1 Strangler 폴백 위반(_detect_stack try/except 누락) + P2 entrypoint 검증 이원화. P1 반영 commit ffa5c0c, 810 → 811 passing(+1). P2 → BL-019(#31) 분리. 원문 보존: ~/projects/docs/reviews/2026-04-28-bl001-go-phase9-final-round2-feat-go-stack-support-codex.md
+[2026-04-28T00:35:00Z] CONSTRUCTION 완료 — PR 분할 머지 stacked: PR #29(Phase 1-5 refactor) + PR #30(Phase 6-9 R2 feat). devflow-state: complete + Finishing Choice B(PR pending)
+[2026-04-28T14:11:33Z] PR #29 + #30 둘 다 MERGED on origin (main: 208d774 → e1e4c60). devflow finishing 진행
