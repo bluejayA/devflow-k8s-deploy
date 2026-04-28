@@ -1,38 +1,38 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: {{ app_name }}
-  namespace: {{ namespace }}
+  name: jvm-app
+  namespace: default
 spec:
-  replicas: {{ replicas }}
+  replicas: 2
   selector:
     matchLabels:
-      app: {{ app_name }}
+      app: jvm-app
   template:
     metadata:
       labels:
-        app: {{ app_name }}
+        app: jvm-app
     spec:
-      serviceAccountName: {{ app_name }}-sa
+      serviceAccountName: jvm-app-sa
       # 기본 토큰 자동 마운트 차단 — RBAC 최소권한
       automountServiceAccountToken: false
       # Pod securityContext — 컨테이너 권한 분리 — privileged escalation 방지 (F-31)
       securityContext:
         runAsNonRoot: true
-        runAsUser: {{ run_as_user }}
-        runAsGroup: {{ run_as_user }}
-        fsGroup: {{ run_as_user }}
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
         seccompProfile:
           type: RuntimeDefault
       containers:
-        - name: {{ app_name }}
-          image: {{ image }}
+        - name: jvm-app
+          image: local/test:1.0.0
           # imagePullPolicy 명시 — non-mutable tag 전제(동일 태그 재사용 금지).
           # 공급망 방어 강화: CI/CD에서 digest(`image@sha256:...`) pinning 권장.
           imagePullPolicy: IfNotPresent
           ports:
             - name: http
-              containerPort: {{ port }}
+              containerPort: 8080
           # Container securityContext — 컨테이너 권한 분리 — privileged escalation 방지 (F-32)
           securityContext:
             readOnlyRootFilesystem: true
@@ -44,44 +44,36 @@ spec:
           # 리소스 한도 — OOMKill로 다른 Pod 영향 방지 (F-33)
           resources:
             requests:
-              cpu: {{ cpu_request }}
-              memory: {{ memory_request }}
+              cpu: 100m
+              memory: 512Mi
             limits:
-              cpu: {{ cpu_limit }}
-              memory: {{ memory_limit }}
+              cpu: 1000m
+              memory: 1Gi
           # 프로브 — 헬스체크 — 비정상 인스턴스 자동 제거 (F-34)
           livenessProbe:
-            {% if liveness_http %}
             httpGet:
-              path: {{ liveness_http.path }}
-              port: {{ liveness_http.port }}
-            {% else %}
-            tcpSocket:
-              port: {{ liveness_tcp_port }}
-            {% endif %}
+              path: /actuator/health/liveness
+              port: 8080
             initialDelaySeconds: 10
             periodSeconds: 10
           readinessProbe:
-            {% if readiness_http %}
             httpGet:
-              path: {{ readiness_http.path }}
-              port: {{ readiness_http.port }}
-            {% else %}
-            tcpSocket:
-              port: {{ readiness_tcp_port }}
-            {% endif %}
+              path: /actuator/health/readiness
+              port: 8080
             initialDelaySeconds: 5
             periodSeconds: 5
           # emptyDir 마운트 — readOnlyRootFilesystem 공존 + JVM 런타임 쓰기 경로 (F-32)
           volumeMounts:
-{% for vm in writable_volume_mounts %}
-            - name: {{ vm.name }}
-              mountPath: {{ vm.mount_path }}
-{% endfor %}
+            - name: tmp
+              mountPath: /tmp
+            - name: var-log
+              mountPath: /var/log
       volumes:
-{% for v in writable_volumes %}
-        - name: {{ v.name }}
-          # {{ v.comment }}
+        - name: tmp
+          # DoS 방어 — 노드 디스크 소진 방지 (Tomcat work dir, JVM temp files)
           emptyDir:
-            sizeLimit: {{ v.size_limit }}
-{% endfor %}
+            sizeLimit: 50Mi
+        - name: var-log
+          # DoS 방어 + Spring Boot 런타임 로그 경로
+          emptyDir:
+            sizeLimit: 100Mi

@@ -11,6 +11,7 @@ from scripts._shared.errors import InvalidImageError
 from scripts._shared.text_safety import (
     redact_sensitive,
     reject_unsafe_chars,
+    validate_go_entrypoint,
 )
 
 # ---------------------------------------------------------------------------
@@ -144,3 +145,78 @@ class TestRedactSensitive:
         result = redact_sensitive(text)
         assert "[REDACTED]" in result
         assert "sk-proj-abcdefghijklmnop123" not in result
+
+
+# ---------------------------------------------------------------------------
+# validate_go_entrypoint 테스트 (BL-001 F-29)
+# ---------------------------------------------------------------------------
+
+
+class TestValidateGoEntrypoint:
+    """Go entrypoint 문자열 검증 — shell 주입 / path traversal 방어."""
+
+    # 19. 루트 단일 점 "." 허용
+    def test_single_dot_allowed(self) -> None:
+        validate_go_entrypoint(".")  # 예외 없음
+
+    # 20. ./cmd/foo 허용
+    def test_cmd_subpath_allowed(self) -> None:
+        validate_go_entrypoint("./cmd/foo")  # 예외 없음
+
+    # 21. ./cmd/foo-bar.baz_qux (허용 문자 셋 전부)
+    def test_allowed_charset(self) -> None:
+        validate_go_entrypoint("./cmd/foo-bar.baz_qux")  # 예외 없음
+
+    # 22. 깊은 경로 ./cmd/foo/bar (cmd 깊이 제한 없음 — 정규식 허용 범위)
+    def test_deep_path_allowed(self) -> None:
+        validate_go_entrypoint("./cmd/foo/bar")  # 예외 없음
+
+    # 23. ./ 접두 없음 (절대 경로 거부)
+    def test_absolute_path_rejected(self) -> None:
+        with pytest.raises(ValueError, match="entrypoint"):
+            validate_go_entrypoint("/etc/passwd")
+
+    # 24. 상위 경로 트래버설 (..로 시작)
+    def test_parent_traversal_rejected(self) -> None:
+        with pytest.raises(ValueError, match="entrypoint"):
+            validate_go_entrypoint("../etc/passwd")
+
+    # 25. ./ 안의 .. 세그먼트 (path traversal)
+    def test_embedded_parent_rejected(self) -> None:
+        with pytest.raises(ValueError, match="entrypoint"):
+            validate_go_entrypoint("./../etc/passwd")
+
+    # 26. 공백 포함
+    def test_whitespace_rejected(self) -> None:
+        with pytest.raises(ValueError, match="entrypoint"):
+            validate_go_entrypoint("./cmd/foo bar")
+
+    # 27. 세미콜론 (shell 명령 분리자)
+    def test_semicolon_rejected(self) -> None:
+        with pytest.raises(ValueError, match="entrypoint"):
+            validate_go_entrypoint("./cmd/foo;rm -rf /")
+
+    # 28. 쉘 메타문자 $
+    def test_dollar_rejected(self) -> None:
+        with pytest.raises(ValueError, match="entrypoint"):
+            validate_go_entrypoint("./cmd/$(whoami)")
+
+    # 29. 백틱
+    def test_backtick_rejected(self) -> None:
+        with pytest.raises(ValueError, match="entrypoint"):
+            validate_go_entrypoint("./cmd/`whoami`")
+
+    # 30. 따옴표
+    def test_quote_rejected(self) -> None:
+        with pytest.raises(ValueError, match="entrypoint"):
+            validate_go_entrypoint('./cmd/"foo"')
+
+    # 31. 개행 (reject_unsafe_chars 동등 보호)
+    def test_newline_rejected(self) -> None:
+        with pytest.raises(ValueError, match="entrypoint"):
+            validate_go_entrypoint("./cmd/foo\nbar")
+
+    # 32. 빈 문자열 거부 (미결정 sentinel은 build_plan 단계에서 처리, 검증 시점에는 거부)
+    def test_empty_rejected(self) -> None:
+        with pytest.raises(ValueError, match="entrypoint"):
+            validate_go_entrypoint("")

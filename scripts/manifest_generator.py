@@ -36,6 +36,45 @@ _DNS1123_LABEL_RE = re.compile(r"^[a-z0-9]([a-z0-9\-]{0,61}[a-z0-9])?$")
 # exposure 허용 목록 — 런타임 검증 (Literal 타입은 런타임 강제 안 됨)
 _ALLOWED_EXPOSURES: frozenset[str] = frozenset({"ClusterIP", "NodePort", "LoadBalancer"})
 
+# BL-001 Phase 3 (F-32): writable_paths 경로별 emptyDir sizeLimit + 주석 매핑.
+# JVM 관례 보존 — /tmp(Tomcat work, 50Mi), /var/log(Spring Boot log, 100Mi).
+# 미매핑 경로는 _DEFAULT_SIZE_LIMIT / _DEFAULT_VOLUME_COMMENT fallback.
+_WRITABLE_SIZE_LIMITS: dict[str, str] = {
+    "/tmp": "50Mi",
+    "/var/log": "100Mi",
+}
+_DEFAULT_SIZE_LIMIT = "50Mi"
+
+_WRITABLE_VOLUME_COMMENTS: dict[str, str] = {
+    "/tmp": "DoS 방어 — 노드 디스크 소진 방지 (Tomcat work dir, JVM temp files)",
+    "/var/log": "DoS 방어 + Spring Boot 런타임 로그 경로",
+}
+_DEFAULT_VOLUME_COMMENT = "DoS 방어 — emptyDir sizeLimit"
+
+
+def _volume_name_for_path(path: str) -> str:
+    """K8s DNS-1123 label 호환 volume 이름. 예: `/var/log` → `var-log`, `/` → `root`."""
+    return path.lstrip("/").replace("/", "-") or "root"
+
+
+def _writable_volume_mounts(paths: list[str]) -> list[dict[str, str]]:
+    """volumeMounts 컨텍스트 리스트 (F-32)."""
+    return [
+        {"name": _volume_name_for_path(p), "mount_path": p} for p in paths
+    ]
+
+
+def _writable_volumes(paths: list[str]) -> list[dict[str, str]]:
+    """volumes 컨텍스트 리스트 (F-32). 경로별 sizeLimit + 주석."""
+    return [
+        {
+            "name": _volume_name_for_path(p),
+            "size_limit": _WRITABLE_SIZE_LIMITS.get(p, _DEFAULT_SIZE_LIMIT),
+            "comment": _WRITABLE_VOLUME_COMMENTS.get(p, _DEFAULT_VOLUME_COMMENT),
+        }
+        for p in paths
+    ]
+
 
 def _validate_manifest_field(value: str, field_name: str) -> None:
     """YAML 컨텍스트에 삽입될 문자열에서 개행/NUL 차단.
@@ -163,11 +202,12 @@ class ManifestGenerator:
           - spec.replicas = inputs.replicas
           - spec.template.spec.serviceAccountName = '{app_name}-sa'
           - spec.template.spec.automountServiceAccountToken: false
-          - Pod securityContext (F-31): runAsNonRoot, runAsUser=1000,
-            fsGroup=1000, seccompProfile=RuntimeDefault
+          - Pod securityContext (F-31): runAsNonRoot, runAsUser/fsGroup은
+            defaults.run_as_user 기반 동적 주입 (JVM 관례 1000, Go distroless 65532),
+            seccompProfile=RuntimeDefault
           - Container securityContext (F-32): readOnlyRootFilesystem,
             allowPrivilegeEscalation=false, capabilities.drop=[ALL], privileged=false
-          - emptyDir 볼륨 [/tmp, /var/log] 자동 마운트 (F-32)
+          - emptyDir 볼륨은 defaults.writable_paths 기반 동적 마운트 (F-32)
           - resources (F-33): requests/limits cpu+memory from defaults
           - probes (F-34): liveness + readiness from ProbeConfig
           - 보안 근거 주석 (F-37)
@@ -209,6 +249,10 @@ class ManifestGenerator:
             "namespace": inputs.namespace,
             "port": inputs.port,
             "replicas": inputs.replicas,
+            # BL-001 Phase 3 (F-31/F-32): UID + writable_paths 동적화
+            "run_as_user": defaults.run_as_user,
+            "writable_volume_mounts": _writable_volume_mounts(defaults.writable_paths),
+            "writable_volumes": _writable_volumes(defaults.writable_paths),
             **liveness_ctx,
             **readiness_ctx,
         }
@@ -318,9 +362,10 @@ class ManifestGenerator:
                         "automountServiceAccountToken": False,
                         "securityContext": {
                             "runAsNonRoot": True,
-                            "runAsUser": 1000,
-                            "runAsGroup": 1000,
-                            "fsGroup": 1000,
+                            # BL-001 Phase 3 (F-31): UID 동적화 — defaults.run_as_user 기반
+                            "runAsUser": defaults.run_as_user,
+                            "runAsGroup": defaults.run_as_user,
+                            "fsGroup": defaults.run_as_user,
                             "seccompProfile": {"type": "RuntimeDefault"},
                         },
                         "containers": [
@@ -364,7 +409,14 @@ class ManifestGenerator:
                 ],
             },
         }
-        return yaml.dump(doc, default_flow_style=False, allow_unicode=True)
+        return yaml.dump(
+            doc,
+            default_flow_style=False,
+            allow_unicode=True,
+            sort_keys=False,
+            indent=2,
+            width=1000,
+        )
 
 
     def generate_networkpolicy(
@@ -455,7 +507,14 @@ class ManifestGenerator:
                 "egress": egress_rules,
             },
         }
-        return yaml.dump(doc, default_flow_style=False, allow_unicode=True)
+        return yaml.dump(
+            doc,
+            default_flow_style=False,
+            allow_unicode=True,
+            sort_keys=False,
+            indent=2,
+            width=1000,
+        )
 
 
 def _validate_k8s_quantity(value: str) -> None:

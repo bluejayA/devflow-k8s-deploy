@@ -1143,3 +1143,44 @@ class TestValueErrorCatchSymmetry:
             port = JvmStackModule._read_port_from_properties(props_file)
 
         assert port is None
+
+
+class TestBuildPlanInputsKeyword:
+    """NFR-04 (j): JvmStackModule.build_plan이 inputs 키워드(F-24 Protocol 확장) 수용해도
+    기존 결과 동일 — 골든 byte-identical 보장."""
+
+    def test_build_plan_accepts_inputs_keyword_noop(self, tmp_path: Path) -> None:
+        from scripts._shared.types import UserInputs
+        from scripts.stacks.jvm import JvmStackModule
+
+        proj = make_gradle_kts_spring3(tmp_path)
+        detect_result = JvmStackModule().detect(proj)
+        assert detect_result is not None
+
+        plan_without = JvmStackModule().build_plan(detect_result)
+        plan_with = JvmStackModule().build_plan(
+            detect_result,
+            inputs=UserInputs(
+                app_name="any-name",
+                port=9999,
+                exposure="ClusterIP",
+                namespace="ns",
+                output_dir=Path("/tmp/out"),
+                resource_hint="medium",
+            ),
+        )
+
+        # inputs는 JVM에선 무시 — 결과 완전 동일
+        assert plan_with == plan_without
+
+    def test_build_plan_inputs_none_default(self, tmp_path: Path) -> None:
+        """inputs 생략 시 기본값(None) 허용 — 기존 호출부 호환성."""
+        from scripts.stacks.jvm import JvmStackModule
+
+        proj = make_gradle_kts_spring3(tmp_path)
+        detect_result = JvmStackModule().detect(proj)
+        assert detect_result is not None
+
+        # inputs 키워드 생략
+        plan = JvmStackModule().build_plan(detect_result)
+        assert plan.build_cmd == "gradle --no-daemon bootJar"

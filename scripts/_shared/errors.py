@@ -34,6 +34,22 @@ class JvmDetectionError(DevflowError):
     """JVM 스택 분석 중 필수 정보(포트/엔트리포인트 등) 추론 실패."""
 
 
+class GoDetectionError(DevflowError):
+    """Go 스택 감지 중 필수 정보(go.mod 파싱) 실패 (F-20).
+
+    `JvmDetectionError`와 동일 단계(감지) 예외. 엔트리포인트 resolve 실패는
+    `GoBuildPlanError` 로 분리.
+    """
+
+
+class GoBuildPlanError(DevflowError):
+    """Go 스택 엔트리포인트 resolve 실패 (F-26).
+
+    감지 자체는 성공했으나 `build_plan()`에서 cmd 후보 모호성 해결 실패 등
+    (예: 복수 `cmd/*/main.go` + `app_name` 매칭 실패 + config 미지정).
+    """
+
+
 class InvalidImageError(DevflowError):
     """'latest' 태그 또는 유효하지 않은 이미지 레퍼런스 감지."""
 

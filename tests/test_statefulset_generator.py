@@ -188,3 +188,27 @@ class TestGenerateStatefulset:
 
         with pytest.raises(ValueError):
             gen.generate_statefulset(inputs, analysis, cluster, image="myrepo/app:1.0.0")
+
+    def test_generate_statefulset_run_as_user_dynamic(self) -> None:
+        """F-31: statefulset runAsUser/Group/fsGroup은 defaults.run_as_user 기반."""
+        gen = self._make_generator()
+        inputs = _make_inputs()
+        analysis = _make_analysis(
+            defaults=ResourceDefaults(
+                cpu_request="50m",
+                memory_request="64Mi",
+                cpu_limit="250m",
+                memory_limit="128Mi",
+                writable_paths=["/tmp"],
+                run_as_user=65532,
+            )
+        )
+        cluster = _make_cluster_config()
+
+        yaml_str = gen.generate_statefulset(inputs, analysis, cluster, image="myrepo/app:1.0.0")
+        doc = yaml.safe_load(yaml_str)
+        pod_sec = doc["spec"]["template"]["spec"]["securityContext"]
+
+        assert pod_sec["runAsUser"] == 65532
+        assert pod_sec["runAsGroup"] == 65532
+        assert pod_sec["fsGroup"] == 65532

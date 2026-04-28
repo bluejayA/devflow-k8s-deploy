@@ -322,15 +322,30 @@ class TestStackDecision:
 
         assert result.forced_stack == "jvm"
 
-    def test_stack_go_raises_unsupported_error(self, tmp_path: Path) -> None:
-        """`stack: go` → UnsupportedStackError raise."""
+    def test_stack_go_returns_forced_go(self, tmp_path: Path) -> None:
+        """`stack: go` → forced_stack='go' (BL-001 Phase 9 — Codex P1)."""
         proj_dir = _make_project_config(tmp_path / "proj", {"stack": "go"})
 
         loader = _loader_with_org(None)
         config = loader.load(proj_dir)
+        result = loader.stack_decision(config, proj_dir)
 
-        with pytest.raises(UnsupportedStackError):
-            loader.stack_decision(config, proj_dir)
+        assert result.forced_stack == "go"
+        assert result.source == "project_config"
+
+    def test_stack_dict_forced_go_returns_forced_go(self, tmp_path: Path) -> None:
+        """F-33 + Codex P1: `stack: {forced_stack: go}` → forced_stack='go'."""
+        proj_dir = _make_project_config(
+            tmp_path / "proj",
+            {"stack": {"forced_stack": "go", "go": {"entrypoint": "./cmd/api"}}},
+        )
+
+        loader = _loader_with_org(None)
+        config = loader.load(proj_dir)
+        result = loader.stack_decision(config, proj_dir)
+
+        assert result.forced_stack == "go"
+        assert result.source == "project_config"
 
     def test_stack_python_raises_unsupported_error(self, tmp_path: Path) -> None:
         """`stack: python` → UnsupportedStackError raise."""
@@ -596,3 +611,57 @@ def test_config_loader_app_replicas_override(tmp_path: Path) -> None:
     loader = ConfigLoader(org_config_path=tmp_path / "no_org.yml")
     result = loader.load(tmp_path)
     assert result.raw["app"]["replicas"] == 5
+
+
+class TestResolveStackConfig:
+    """BL-001 F-33 — quality-reviewer P2-3 대응."""
+
+    def test_string_stack_returns_empty_dict(self) -> None:
+        """`stack: auto` 같은 string 형태는 stack overrides 없음 → 빈 dict."""
+        from scripts._shared.types import ResolvedConfig
+
+        loader = ConfigLoader(org_config_path=Path("/no_org.yml"))
+        config = ResolvedConfig(raw={"stack": "auto"}, source_map={})
+        result = loader.resolve_stack_config(config, "go")
+
+        assert result == {}
+
+    def test_dict_stack_with_substack_returns_subdict(self) -> None:
+        """`stack.go: {entrypoint: ./cmd/api}` → {"entrypoint": "./cmd/api"}."""
+        from scripts._shared.types import ResolvedConfig
+
+        loader = ConfigLoader(org_config_path=Path("/no_org.yml"))
+        config = ResolvedConfig(
+            raw={
+                "stack": {
+                    "forced_stack": "auto",
+                    "go": {"entrypoint": "./cmd/api"},
+                }
+            },
+            source_map={},
+        )
+        result = loader.resolve_stack_config(config, "go")
+
+        assert result == {"entrypoint": "./cmd/api"}
+
+    def test_dict_stack_without_substack_returns_empty_dict(self) -> None:
+        """`stack.go`가 dict가 아닌 경우(예: string scalar) → 빈 dict."""
+        from scripts._shared.types import ResolvedConfig
+
+        loader = ConfigLoader(org_config_path=Path("/no_org.yml"))
+        config = ResolvedConfig(
+            raw={"stack": {"go": "string-not-dict"}}, source_map={}
+        )
+        result = loader.resolve_stack_config(config, "go")
+
+        assert result == {}
+
+    def test_missing_stack_key_returns_empty_dict(self) -> None:
+        """`stack` 키 자체가 없으면 빈 dict."""
+        from scripts._shared.types import ResolvedConfig
+
+        loader = ConfigLoader(org_config_path=Path("/no_org.yml"))
+        config = ResolvedConfig(raw={}, source_map={})
+        result = loader.resolve_stack_config(config, "go")
+
+        assert result == {}

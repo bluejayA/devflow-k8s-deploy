@@ -24,10 +24,10 @@ BUILTIN_CLUSTER_PRESETS: dict[str, dict[str, object]] = {
     "orbstack": {"storage_class": "local-path", "network_policy": True},
 }
 
-# v0.1.0에서 지원하는 stack 목록 (단일 출처)
-_SUPPORTED_STACKS: frozenset[str] = frozenset({"auto", "jvm"})
+# BL-001 Phase 9 (Codex P1): 'go' 추가. mixed repo에서 stack.forced_stack=go 선택 가능.
+_SUPPORTED_STACKS: frozenset[str] = frozenset({"auto", "jvm", "go"})
 # v0.1.0에서 명시하면 UnsupportedStackError를 발생시킬 stack
-_KNOWN_UNSUPPORTED_STACKS: frozenset[str] = frozenset({"go", "python", "react"})
+_KNOWN_UNSUPPORTED_STACKS: frozenset[str] = frozenset({"python", "react"})
 
 # 조직 설정 기본 경로
 _DEFAULT_ORG_CONFIG_PATH = Path.home() / ".claude" / "devflow-k8s-deploy.yml"
@@ -189,13 +189,26 @@ class ConfigLoader:
 
         - auto: forced_stack=None (ProjectAnalyzer가 감지)
         - jvm: forced_stack="jvm"
-        - go/python/react: UnsupportedStackError raise (v0.1.0 미지원)
+        - go: forced_stack="go" (BL-001 Phase 9 Codex P1 — mixed repo escape hatch)
+        - python/react: UnsupportedStackError raise (v0.2+ 예정)
         - 알 수 없는 값: UnsupportedStackError
+
+        BL-001 F-33: `stack`이 dict이면 `forced_stack` 키에서 값 읽기.
+        ```yaml
+        stack:
+          forced_stack: auto
+          go:
+            entrypoint: ./cmd/api
+        ```
 
         source는 config.source_map["stack"] 반영.
         """
         stack_val = config.raw.get("stack", "auto")
         source = config.source_map.get("stack", _SRC_BUILTIN)
+
+        # F-33: stack이 dict이면 forced_stack에서 값 읽기 (backward-compat)
+        if isinstance(stack_val, dict):
+            stack_val = stack_val.get("forced_stack", "auto")
 
         # _SUPPORTED_STACKS를 단일 출처로 사용 (Important 1)
         if stack_val not in _SUPPORTED_STACKS:
@@ -208,8 +221,34 @@ class ConfigLoader:
         if stack_val == "auto":
             return StackDecision(forced_stack=None, source=source)
 
-        # stack_val == "jvm" (지원 목록 내 나머지 값)
-        return StackDecision(forced_stack="jvm", source=source)
+        # stack_val ∈ {"jvm", "go"} (지원 목록 내 나머지 값 — Codex P1 반영)
+        return StackDecision(forced_stack=stack_val, source=source)
+
+    def resolve_stack_config(
+        self, config: ResolvedConfig, stack_name: str
+    ) -> dict[str, Any]:
+        """F-33: `stack.<stack_name>` 하위 설정 dict를 반환.
+
+        예시 YAML:
+        ```yaml
+        stack:
+          go:
+            entrypoint: ./cmd/api
+            probe:
+              path: /custom-health
+        ```
+
+        - `stack`이 string(예: "auto")이면 빈 dict 반환 (backward-compat).
+        - `stack[stack_name]`이 dict가 아니면 빈 dict 반환.
+        - 이 dict는 ProjectAnalyzer._apply_stack_overrides / _apply_probe_overrides에 전달.
+        """
+        stack_section = config.raw.get("stack")
+        if not isinstance(stack_section, dict):
+            return {}
+        sub = stack_section.get(stack_name)
+        if not isinstance(sub, dict):
+            return {}
+        return sub
 
     def resolve_cluster_config(
         self,

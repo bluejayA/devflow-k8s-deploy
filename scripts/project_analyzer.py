@@ -8,25 +8,36 @@ multi-module 감지 + 비개발자 한국어 힌트 (F-39).
 
 from __future__ import annotations
 
+import dataclasses
 import re
 import unicodedata
 import xml.etree.ElementTree as StdET
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 import yaml
 from defusedxml import ElementTree as ET
 
-from scripts._shared.errors import MultiModuleAbort, UnknownStackError, UnsupportedStackError
+from scripts._shared.errors import (
+    GoDetectionError,
+    JvmDetectionError,
+    MultiModuleAbort,
+    UnknownStackError,
+    UnsupportedStackError,
+)
 from scripts._shared.fileio import check_yaml_refs, is_within, read_text_limited
+from scripts._shared.text_safety import reject_unsafe_chars
 from scripts._shared.types import (
     AnalysisResult,
     ModuleInfo,
+    ProbeConfig,
+    ProbeSpec,
     PromptCallback,
     PromptRequest,
     ResolvedConfig,
     StackDetectResult,
     StatefulnessSignal,
+    UserInputs,
 )
 from scripts.config_loader import ConfigLoader
 from scripts.stacks.base import StackModule
@@ -46,6 +57,17 @@ _MULTI_MODULE_HINT = (
 
 # 취소 키워드
 _CANCEL_KEYWORDS = {"취소", "cancel", "q", "quit", "exit", "없음", "아니요"}
+
+# BL-001 Phase 5 보안 가드 — Codex/security-reviewer P1 대응.
+# entrypoint: 영숫자 + `_./-`만 허용, 길이 ≤ 256, `..` segment 금지(path traversal),
+# 선행 공백/세미콜론/$/백틱/개행 등 shell metachar 차단.
+# Phase 6의 F-29 `validate_go_entrypoint`와 동일 정책 (정식 헬퍼는 Phase 6에서 분리).
+_GO_ENTRYPOINT_RE = re.compile(r"^[A-Za-z0-9_./-]+$")
+_MAX_ENTRYPOINT_LEN = 256
+
+# probe.path: HTTP path 화이트리스트. 슬래시 시작 + 안전 문자만 + 길이 ≤ 512.
+# manifest YAML 무검증 삽입 차단(개행/제어문자/`<>` 등).
+_PROBE_PATH_RE = re.compile(r"^/[A-Za-z0-9._\-/?=&%]{0,512}$")
 
 # 상태성 — HIGH 시그널 패턴 (Gradle/Maven 텍스트 검색)
 _HIGH_STATEFUL_PATTERNS: list[tuple[str, str]] = [
@@ -217,11 +239,82 @@ class ProjectAnalyzer:
 
     # ── Public API ────────────────────────────────────────────────────────────
 
+    @staticmethod
+    def _apply_stack_overrides(
+        detect_result: StackDetectResult, stack_config: dict[str, Any]
+    ) -> StackDetectResult:
+        """F-27/A-08: config의 `stack.<name>.entrypoint`를 detect_result에 반영.
+
+        A-08 우선순위 1단계: config entrypoint > app_name 매칭 > 단일 후보.
+        config_loader.resolve_stack_config 결과(빈 dict 가능)를 받아 frozen dataclass replace.
+
+        보안 가드 (Codex/security-reviewer P1, Phase 6 F-29 사전 격리):
+          - 화이트리스트 정규식 `^[A-Za-z0-9_./-]+$` (shell metachar 차단)
+          - 길이 ≤ 256
+          - `..` segment 금지 (path traversal 차단)
+          - 위반 시 `ValueError` raise — Phase 6 `go build` 합성 전 trust boundary 닫음.
+        """
+        entrypoint = stack_config.get("entrypoint")
+        if isinstance(entrypoint, str) and entrypoint:
+            if (
+                len(entrypoint) > _MAX_ENTRYPOINT_LEN
+                or not _GO_ENTRYPOINT_RE.match(entrypoint)
+                or ".." in entrypoint
+            ):
+                raise ValueError(
+                    f"stack.<name>.entrypoint 형식이 올바르지 않음: {entrypoint!r}. "
+                    f"허용: ^[A-Za-z0-9_./-]+$, 길이 ≤ {_MAX_ENTRYPOINT_LEN}, "
+                    f"'..' segment 금지"
+                )
+            return dataclasses.replace(detect_result, entrypoint=entrypoint)
+        return detect_result
+
+    @staticmethod
+    def _apply_probe_overrides(
+        probe_config: ProbeConfig, stack_config: dict[str, Any]
+    ) -> ProbeConfig:
+        """F-19/F-27: config의 `stack.<name>.probe.path`로 ProbeConfig HTTP path를 override.
+
+        TCP probe는 path 무관으로 영향 없음.
+
+        보안 가드 (Codex/security-reviewer P1):
+          - 개행/NUL/제어문자 차단 (`reject_unsafe_chars` — manifest YAML 오염 방지)
+          - 화이트리스트 정규식 `^/[A-Za-z0-9._\\-/?=&%]{0,512}$`
+          - 위반 시 `ValueError` raise.
+        """
+        probe_section = stack_config.get("probe")
+        if not isinstance(probe_section, dict):
+            return probe_config
+        path_override = probe_section.get("path")
+        if not isinstance(path_override, str) or not path_override:
+            return probe_config
+
+        # 1차 가드: 개행/NUL/제어문자
+        reject_unsafe_chars(path_override, "stack.<name>.probe.path")
+        # 2차 가드: 화이트리스트 정규식
+        if not _PROBE_PATH_RE.match(path_override):
+            raise ValueError(
+                f"stack.<name>.probe.path 형식이 올바르지 않음: {path_override!r}. "
+                f"허용: ^/[A-Za-z0-9._\\-/?=&%]{{0,512}}$"
+            )
+
+        def _override(spec: ProbeSpec) -> ProbeSpec:
+            if spec.kind == "http":
+                return dataclasses.replace(spec, path=path_override)
+            return spec
+
+        return ProbeConfig(
+            liveness=_override(probe_config.liveness),
+            readiness=_override(probe_config.readiness),
+        )
+
     def analyze(
         self,
         project_dir: Path,
         config: ResolvedConfig,
         resource_hint: Literal["small", "medium", "large"] = "medium",
+        *,
+        inputs: UserInputs | None = None,
     ) -> AnalysisResult:
         """전체 분석 흐름.
 
@@ -247,7 +340,7 @@ class ProjectAnalyzer:
         # is_within 검사에 사용할 project_root 저장
         self._project_root = project_dir.resolve()
         try:
-            return self._analyze_impl(project_dir, config, resource_hint)
+            return self._analyze_impl(project_dir, config, resource_hint, inputs)
         finally:
             self._project_root = None
 
@@ -256,6 +349,7 @@ class ProjectAnalyzer:
         project_dir: Path,
         config: ResolvedConfig,
         resource_hint: Literal["small", "medium", "large"],
+        inputs: UserInputs | None,
     ) -> AnalysisResult:
         """analyze() 실제 구현 (project_root 설정 후 호출)."""
         gaps: list[str] = []
@@ -280,7 +374,7 @@ class ProjectAnalyzer:
                     f"프로젝트 디렉토리를 확인하세요: {project_dir}"
                 )
         else:
-            stack_detect = self._detect_stack(project_dir)
+            stack_detect = self._detect_stack(project_dir, gaps)
             stack_name = stack_detect.stack_name
             module = stack_detect.module
             detect_result = stack_detect.detect_result
@@ -298,12 +392,25 @@ class ProjectAnalyzer:
                 detect_result = re_detected
             # else: 모듈 디렉토리에 빌드 파일 없으면 상위 detect_result 유지
 
-        # 4. 선택된 module의 plan 생성
+        # 4. config override 추출 (F-33) + detect_result에 stack.<name>.entrypoint 적용 (F-27)
+        stack_config = self._config_loader.resolve_stack_config(config, stack_name)
+        detect_result = self._apply_stack_overrides(detect_result, stack_config)
+
+        # Codex P1: detect_result.port가 None이면 inputs.port로 채워 plan 단계 정합성 보장.
+        # Go는 detect 단계에서 port 추론 불가(소스 정적 분석 한계) — inputs가 진실의 출처.
+        # JVM은 application.yml 추론 성공 시 detect_result.port가 채워져 영향 없음.
+        if detect_result.port is None and inputs is not None:
+            detect_result = dataclasses.replace(detect_result, port=inputs.port)
+
+        # 5. 선택된 module의 plan 생성
         # 분석 대상 디렉토리: multi-module이면 모듈 디렉토리, 아니면 project_dir
         analysis_dir = selected_module.path if selected_module else project_dir
 
-        build_plan = module.build_plan(detect_result)
+        # F-24: build_plan에 inputs 전달 (Optional). Phase 5 이후 명시 전달.
+        build_plan = module.build_plan(detect_result, inputs=inputs)
         probe_config = module.probe_plan(detect_result)
+        # F-19: probe_config에 stack.<name>.probe.path override 적용
+        probe_config = self._apply_probe_overrides(probe_config, stack_config)
         resource_defaults = module.defaults(resource_hint)
         artifact_paths = module.artifact_locator(detect_result, analysis_dir)
 
@@ -322,17 +429,29 @@ class ProjectAnalyzer:
             gaps=gaps,
         )
 
-    def _detect_stack(self, project_dir: Path) -> _StackDetectBundle:
+    def _detect_stack(
+        self, project_dir: Path, gaps: list[str]
+    ) -> _StackDetectBundle:
         """v0.1.0: 등록된 stack 모듈 중 detect()가 성공하는 것 중 첫 매치.
+
+        BL-001 Phase 9 Round 2 (Codex P1): `StackModule.detect`가 detect 단계
+        예외(`JvmDetectionError` / `GoDetectionError`)를 던지면 catch하여 gaps에
+        기록하고 다음 스택으로 폴백한다 (base.py:35 Strangler 계약).
 
         Returns:
             _StackDetectBundle — (stack_name, module, detect_result)
 
         Raises:
-            UnknownStackError: 아무 것도 감지 못하면 raise.
+            UnknownStackError: 모든 스택이 None 반환 또는 detect 예외라 매치 없으면 raise.
         """
         for stack_name, module in self._stack_registry.items():
-            result = module.detect(project_dir)
+            try:
+                result = module.detect(project_dir)
+            except (JvmDetectionError, GoDetectionError) as exc:
+                gaps.append(
+                    f"stack '{stack_name}' detect 실패 — 다음 스택으로 폴백: {exc}"
+                )
+                continue
             if result is not None:
                 return _StackDetectBundle(
                     stack_name=stack_name,

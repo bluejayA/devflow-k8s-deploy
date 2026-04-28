@@ -146,3 +146,9 @@ JVM 단일 지원이었던 devflow-k8s-deploy에 **Go 백엔드 프로젝트 지
   - NFR-05 UID 정책 통일 명시화
   - A-07 `stack.forced_stack` 키명 실제와 일치 설명 (Codex P3-1)
   - A-08 우선순위 재정의: **config > app_name > 단일 > 에러** (Codex P1-4), 루트 선택 rationale gap 기록, Go cmd/* ↔ JVM multi-module 레이어 분리
+- 2026-04-24T17:30:00+09:00 UPDATE 3 — Phase 4 구현 중 Protocol 의존성 조정:
+  - F-24 `StackModule.build_plan` 시그니처를 `inputs: UserInputs` 필수 → `inputs: UserInputs | None = None` Optional로 변경
+  - 이유: Phase 5(F-27 Analyzer 시그니처 확장) 완료 전까지 project_analyzer.py 호출부가 깨지지 않도록 점진적 이행
+  - Codex Phase 2 리뷰 P2-3 제안(기각했던 "optional 선택 대안")을 실제 구현 단계에서 자연스럽게 수용
+  - JVM은 `inputs` 무시 — 기존 골든 byte-identical 유지 (NFR-04 j로 검증)
+  - Go는 `inputs.app_name` 필요 시 `None` 체크 후 `GoBuildPlanError` raise
