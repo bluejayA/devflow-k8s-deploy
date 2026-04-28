@@ -1,6 +1,6 @@
 # Backlog
 
-_Last updated: 2026-04-28 — BL-001 완료 (PR #29 + #30 머지) + BL-019 신규 생성_
+_Last updated: 2026-04-29 — BL-020/021/022 신규 생성 (BL-001 머지 후 Go 샘플 검증에서 발견)_
 
 ---
 
@@ -31,6 +31,7 @@ BL-001(Go 스택) 완료. BL-019(entrypoint 검증 일원화)는 Codex round 2 �
 |----|------|------|---------|
 | **BL-008** | Helm chart 생성 지원 | [#15](https://github.com/bluejayA/devflow-k8s-deploy/issues/15) | v0.4 |
 | **BL-009** | 프리셋/프로파일 (웹 API / 내부 서비스 / 데모) | [#16](https://github.com/bluejayA/devflow-k8s-deploy/issues/16) | v0.4 |
+| **BL-022** | k8s-output 디렉토리 구조 — meta vs manifest 분리 | [#34](https://github.com/bluejayA/devflow-k8s-deploy/issues/34) | medium |
 
 ### 검증 강화
 
@@ -45,6 +46,8 @@ BL-001(Go 스택) 완료. BL-019(entrypoint 검증 일원화)는 Codex round 2 �
 | **BL-016** | SKILL.md STEP 4-1 ↔ orchestrator 검증 경로 drift | [#25](https://github.com/bluejayA/devflow-k8s-deploy/issues/25) | low-medium |
 | **BL-018** | manifest 생성 방식 일관성 복원 (Jinja2 vs dict+yaml.dump 혼용 해소) | [#28](https://github.com/bluejayA/devflow-k8s-deploy/issues/28) | medium |
 | **BL-019** | entrypoint 검증 정책 일원화 — ProjectAnalyzer ↔ text_safety 통합 | [#31](https://github.com/bluejayA/devflow-k8s-deploy/issues/31) | medium |
+| **BL-020** | SKILL.md description Go 지원 반영 — 트리거/메타데이터 stale | [#32](https://github.com/bluejayA/devflow-k8s-deploy/issues/32) | medium |
+| **BL-021** | manifest/rationale 주석 stack-aware — JVM 잔재 제거 | [#33](https://github.com/bluejayA/devflow-k8s-deploy/issues/33) | low-medium |
 
 ### JVM 제약 / 정확도
 
