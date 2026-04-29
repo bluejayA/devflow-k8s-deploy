@@ -164,7 +164,11 @@ class OutputPackager:
         workload_files = manifest_filenames if manifest_filenames is not None else [
             "deployment.yaml", "service.yaml", "serviceaccount.yaml"
         ]
-        generated_files: list[str] = ["Dockerfile", *workload_files, "summary.json", "rationale.md"]
+        # BL-022 (#34): K8s 자원 YAML은 manifests/ 서브디렉토리에 위치 → files 목록에도 prefix 반영
+        manifest_entries = [f"manifests/{name}" for name in workload_files]
+        generated_files: list[str] = [
+            "Dockerfile", *manifest_entries, "summary.json", "rationale.md"
+        ]
 
         summary_path = staging_dir / "summary.json"
         rationale_path = staging_dir / "rationale.md"

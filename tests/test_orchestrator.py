@@ -394,9 +394,9 @@ class TestAtomicWriterIntegration:
         assert result.final_path is not None
         final = result.final_path
         assert (final / "Dockerfile").exists()
-        assert (final / "deployment.yaml").exists()
-        assert (final / "service.yaml").exists()
-        assert (final / "serviceaccount.yaml").exists()
+        assert (final / "manifests" / "deployment.yaml").exists()
+        assert (final / "manifests" / "service.yaml").exists()
+        assert (final / "manifests" / "serviceaccount.yaml").exists()
 
     def test_exception_propagates_and_staging_cleaned(self, tmp_path: Path) -> None:
         """예외 발생 시 AtomicWriter cleanup 후 전파 — staging_dir가 남지 않음."""
