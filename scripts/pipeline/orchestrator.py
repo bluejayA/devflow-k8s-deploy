@@ -84,12 +84,12 @@ class HelpCatalog:
             term_id="port",
             ko_short="앱이 어떤 포트를 쓰나요?",
             ko_detail=(
-                "앱이 요청을 받는 네트워크 포트예요. "
-                "Spring Boot는 보통 8080입니다. "
-                "application.yml에 server.port가 적혀 있으면 그 값을 쓰세요."
+                "앱이 요청을 받는 네트워크 포트예요. 보통 8080을 씁니다. "
+                "JVM은 `application.yml`의 `server.port`, "
+                "Go는 코드 또는 환경변수(`PORT`)로 설정합니다."
             ),
             original="Container port + Service.spec.ports[].targetPort",
-            example="8080 (Spring Boot 기본) / 9000 (커스텀)",
+            example="8080 (Spring Boot/Go 기본) / 9000 (커스텀)",
             step=1,
         ),
         "exposure": HelpEntry(

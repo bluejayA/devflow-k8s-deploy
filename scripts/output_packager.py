@@ -438,7 +438,9 @@ class OutputPackager:
         lines.append("## 포트")
         lines.append(f"- 값: {inputs.port}")
         if detect.port == inputs.port:
-            lines.append("- 근거: application.yml의 `server.port` 또는 기본값")
+            lines.append(
+                "- 근거: 스택별 자동 감지 (예: JVM `server.port`) 또는 기본값"
+            )
         else:
             lines.append("- 근거: 사용자 직접 입력")
         lines.append("")

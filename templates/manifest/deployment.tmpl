@@ -72,7 +72,7 @@ spec:
             {% endif %}
             initialDelaySeconds: 5
             periodSeconds: 5
-          # emptyDir 마운트 — readOnlyRootFilesystem 공존 + JVM 런타임 쓰기 경로 (F-32)
+          # emptyDir 마운트 — readOnlyRootFilesystem 공존 + 런타임 쓰기 경로 (F-32, 스택별 컨벤션)
           volumeMounts:
 {% for vm in writable_volume_mounts %}
             - name: {{ vm.name }}
