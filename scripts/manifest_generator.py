@@ -37,7 +37,7 @@ _DNS1123_LABEL_RE = re.compile(r"^[a-z0-9]([a-z0-9\-]{0,61}[a-z0-9])?$")
 _ALLOWED_EXPOSURES: frozenset[str] = frozenset({"ClusterIP", "NodePort", "LoadBalancer"})
 
 # BL-001 Phase 3 (F-32): writable_paths 경로별 emptyDir sizeLimit + 주석 매핑.
-# JVM 관례 보존 — /tmp(Tomcat work, 50Mi), /var/log(Spring Boot log, 100Mi).
+# 공통 컨벤션 — /tmp(런타임 임시, 50Mi), /var/log(런타임 로그, 100Mi). JVM·Go 모두 호환.
 # 미매핑 경로는 _DEFAULT_SIZE_LIMIT / _DEFAULT_VOLUME_COMMENT fallback.
 _WRITABLE_SIZE_LIMITS: dict[str, str] = {
     "/tmp": "50Mi",
@@ -46,8 +46,8 @@ _WRITABLE_SIZE_LIMITS: dict[str, str] = {
 _DEFAULT_SIZE_LIMIT = "50Mi"
 
 _WRITABLE_VOLUME_COMMENTS: dict[str, str] = {
-    "/tmp": "DoS 방어 — 노드 디스크 소진 방지 (Tomcat work dir, JVM temp files)",
-    "/var/log": "DoS 방어 + Spring Boot 런타임 로그 경로",
+    "/tmp": "DoS 방어 — 노드 디스크 소진 방지 (런타임 임시 파일, 예: Tomcat work / JVM temp)",
+    "/var/log": "DoS 방어 + 런타임 로그 경로 (예: Spring Boot, syslog)",
 }
 _DEFAULT_VOLUME_COMMENT = "DoS 방어 — emptyDir sizeLimit"
 
