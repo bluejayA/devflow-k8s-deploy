@@ -685,6 +685,12 @@ class SkillPipeline:
 
         manifest_paths: list[Path] = []
 
+        # BL-022 (#34): K8s 자원 YAML은 manifests/ 서브디렉토리. 메타(summary.json/
+        # rationale.md)와 Dockerfile은 root. `kubectl apply -f manifests/` 단일 명령
+        # 적용 + meta 파일 validation 충돌 회피.
+        manifests_dir = staging_dir / "manifests"
+        manifests_dir.mkdir(exist_ok=True)
+
         # Workload YAML — statefulness HIGH → StatefulSet, 그 외 → Deployment
         app_image = _resolve_app_image_tag(config)
         is_stateful_high = (
@@ -695,7 +701,7 @@ class SkillPipeline:
             workload_content = self._deps.manifest_generator.generate_statefulset(
                 inputs, analysis, cluster_config, image=app_image
             )
-            workload_path = staging_dir / "statefulset.yaml"
+            workload_path = manifests_dir / "statefulset.yaml"
         else:
             workload_content = self._deps.manifest_generator.generate_deployment(
                 inputs,
@@ -704,19 +710,19 @@ class SkillPipeline:
                 analysis.probe_config,
                 image=app_image,
             )
-            workload_path = staging_dir / "deployment.yaml"
+            workload_path = manifests_dir / "deployment.yaml"
         workload_path.write_text(workload_content, encoding="utf-8")
         manifest_paths.append(workload_path)
 
         # Service YAML
         service_content = self._deps.manifest_generator.generate_service(inputs)
-        service_path = staging_dir / "service.yaml"
+        service_path = manifests_dir / "service.yaml"
         service_path.write_text(service_content, encoding="utf-8")
         manifest_paths.append(service_path)
 
         # ServiceAccount YAML
         sa_content = self._deps.manifest_generator.generate_serviceaccount(inputs)
-        sa_path = staging_dir / "serviceaccount.yaml"
+        sa_path = manifests_dir / "serviceaccount.yaml"
         sa_path.write_text(sa_content, encoding="utf-8")
         manifest_paths.append(sa_path)
 
@@ -732,7 +738,7 @@ class SkillPipeline:
                 allow_egress_to=allow_egress,
             )
             if np_content is not None:
-                np_path = staging_dir / "networkpolicy.yaml"
+                np_path = manifests_dir / "networkpolicy.yaml"
                 np_path.write_text(np_content, encoding="utf-8")
                 manifest_paths.append(np_path)
 
@@ -798,10 +804,10 @@ class SkillPipeline:
                 message="K8s manifest validation bailed out",
             )
 
-        # kubectl dry-run
+        # kubectl dry-run — BL-022: K8s 자원은 staging_dir/manifests/에 있음
         dry_run_result = run_dry_run_loop(
             self._deps.kubectl_dry_runner,
-            staging_dir,
+            staging_dir / "manifests",
             _fix_dry_run_failures,
         )
 

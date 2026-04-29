@@ -781,8 +781,10 @@ class TestWrite:
             )
         data = json.loads((staging_dir / "summary.json").read_text())
         files = data["files"]
-        assert "statefulset.yaml" in files
-        assert "deployment.yaml" not in files
+        # BL-022: K8s 자원 entry는 manifests/ prefix
+        assert "manifests/statefulset.yaml" in files
+        assert "manifests/deployment.yaml" not in files
+        assert "deployment.yaml" not in files  # bare 형식도 없어야 함
 
 
 # ---------------------------------------------------------------------------
