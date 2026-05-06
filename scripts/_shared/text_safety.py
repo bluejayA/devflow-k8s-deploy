@@ -1,9 +1,10 @@
 """텍스트 안전 유틸리티 — 주입 방어 + 민감정보 redact.
 
-개행/제어문자 차단 (reject_unsafe_chars) 및
-subprocess stderr 등 자유 텍스트의 민감정보 치환 (redact_sensitive) 제공.
+개행/제어문자 차단 (reject_unsafe_chars), subprocess stderr 등 자유 텍스트의
+민감정보 치환 (redact_sensitive), Go entrypoint / probe.path 화이트리스트
+검증 (validate_go_entrypoint / validate_probe_path) 제공.
 
-DockerfileGenerator, ManifestGenerator, OutputPackager 세 곳이 공유한다.
+DockerfileGenerator, ManifestGenerator, OutputPackager, ProjectAnalyzer가 공유한다.
 """
 
 from __future__ import annotations
@@ -16,6 +17,13 @@ _UNSAFE_CHARS = ("\n", "\r", "\x00")
 # Go entrypoint 정규식: '.' 또는 './seg(/seg)*'. seg 문자셋은 [a-zA-Z0-9._-] (F-29).
 # `..` 세그먼트는 정규식만으로 거부할 수 없어 별도 검사로 처리한다.
 _GO_ENTRYPOINT_RE = re.compile(r"^\.(/[a-zA-Z0-9._-]+)*$")
+# BL-019: ReDoS / DoS 방어. 일반 Go 프로젝트 경로는 100자 이내로 충분.
+_MAX_GO_ENTRYPOINT_LEN = 256
+
+# BL-019: probe.path HTTP 화이트리스트 (manifest YAML 주입 방어).
+# 슬래시 시작 + URL-safe 문자만. project_analyzer.py에서 이관 — 단일 정책으로 통합.
+# 문자셋 길이를 정규식 quantifier(0,512)에 직접 인코딩.
+_PROBE_PATH_RE = re.compile(r"^/[A-Za-z0-9._\-/?=&%]{0,512}$")
 
 # 민감정보 redact 패턴 목록 (kubectl stderr / kubeconfig 경로 / JWT 등)
 _REDACT_PATTERNS: list[re.Pattern[str]] = [
@@ -58,22 +66,30 @@ def reject_unsafe_chars(
 
 
 def validate_go_entrypoint(value: str) -> None:
-    """Go `build_plan`이 build_cmd에 삽입하기 전 entrypoint 문자열 안전 검증 (F-29).
+    """Go entrypoint 단일 정책 (BL-019): config override + build_plan 공통 게이트.
 
     허용:
       - "." (루트 main.go)
       - "./cmd/<name>" 형태 (필요 시 깊은 경로)
 
-    거부 (공백/세미콜론/$/백틱/따옴표/개행 등 shell 메타문자, 절대경로, `..` 세그먼트):
-      이는 `build_cmd = f'go build -o {app_name} {entrypoint}'` 문자열 합성 시
-      shell 토큰 분리/명령 분리/path traversal로 이어질 수 있다.
+    거부:
+      - 길이 > 256 (DoS / ReDoS 방어)
+      - 정규식 불일치 — 공백/세미콜론/$/백틱/따옴표/개행 등 shell 메타문자, 절대경로
+      - `..` 세그먼트 (path traversal)
+
+    `build_cmd = f'go build -o {app_name} {entrypoint}'` 문자열 합성 시
+    shell 토큰 분리/명령 분리/path traversal로 이어질 수 있어 trust boundary에서 차단.
 
     Args:
         value: 검증할 entrypoint 문자열.
 
     Raises:
-        ValueError: 정규식 불일치 또는 `..` 세그먼트 포함 시.
+        ValueError: 길이 초과, 정규식 불일치, 또는 `..` 세그먼트 포함 시.
     """
+    if len(value) > _MAX_GO_ENTRYPOINT_LEN:
+        raise ValueError(
+            f"Go entrypoint 길이 초과 (>{_MAX_GO_ENTRYPOINT_LEN}): entrypoint={value!r}"
+        )
     if not _GO_ENTRYPOINT_RE.fullmatch(value):
         raise ValueError(f"Go entrypoint 형식 오류: entrypoint={value!r}")
     # 정규식이 [a-zA-Z0-9._-]를 허용하므로 `..` 세그먼트가 통과 가능 — 별도 차단.
@@ -82,6 +98,39 @@ def validate_go_entrypoint(value: str) -> None:
             raise ValueError(
                 f"Go entrypoint path traversal 금지: entrypoint={value!r}"
             )
+
+
+def validate_probe_path(value: str) -> None:
+    """probe.path 단일 정책 (BL-019): config override 게이트.
+
+    manifest YAML 삽입 시점에 개행/제어문자/HTML 메타가 들어가면 출력 무결성이 깨진다.
+    Trust boundary에서 화이트리스트로 차단.
+
+    허용:
+      - 슬래시 시작 + URL-safe 문자셋 `[A-Za-z0-9._\\-/?=&%]`
+      - 길이 ≤ 513 (`/` + 512)
+
+    거부:
+      - 빈 문자열, 슬래시 시작 아님, 개행/CR/NUL, 비허용 문자 (`<`, `>` 등), 길이 초과
+
+    Args:
+        value: 검증할 probe path 문자열.
+
+    Raises:
+        ValueError: 위 조건 위반 시.
+    """
+    # 1차: 개행/CR/NUL — 명시적 메시지 위해 reject_unsafe_chars 위임
+    reject_unsafe_chars(
+        value,
+        "probe.path",
+        message_prefix="probe.path 제어문자 금지",
+    )
+    # 2차: 화이트리스트 정규식 (빈 문자열은 슬래시 시작 위반으로 자동 거부)
+    if not _PROBE_PATH_RE.fullmatch(value):
+        raise ValueError(
+            f"probe.path 형식이 올바르지 않음: probe.path={value!r}. "
+            f"허용: ^/[A-Za-z0-9._\\-/?=&%]{{0,512}}$"
+        )
 
 
 def redact_sensitive(text: str) -> str:

@@ -12,6 +12,7 @@ from scripts._shared.text_safety import (
     redact_sensitive,
     reject_unsafe_chars,
     validate_go_entrypoint,
+    validate_probe_path,
 )
 
 # ---------------------------------------------------------------------------
@@ -220,3 +221,56 @@ class TestValidateGoEntrypoint:
     def test_empty_rejected(self) -> None:
         with pytest.raises(ValueError, match="entrypoint"):
             validate_go_entrypoint("")
+
+    # 33. BL-019: 길이 ≤ 256 가드 (ReDoS / DoS 방어 — 256 초과 거부)
+    def test_length_over_limit_rejected(self) -> None:
+        too_long = "./cmd/" + ("x" * 260)
+        with pytest.raises(ValueError, match="entrypoint"):
+            validate_go_entrypoint(too_long)
+
+    # 34. BL-019 회귀: `./` 누락 'cmd/api' 거부 (BL-001 지연 실패 케이스)
+    def test_missing_leading_dot_slash_rejected(self) -> None:
+        with pytest.raises(ValueError, match="entrypoint"):
+            validate_go_entrypoint("cmd/api")
+
+
+# ---------------------------------------------------------------------------
+# validate_probe_path 테스트 (BL-019: project_analyzer에서 일원화 이관)
+# ---------------------------------------------------------------------------
+
+
+class TestValidateProbePath:
+    """probe.path HTTP 화이트리스트 검증 — manifest YAML 주입 방어."""
+
+    def test_simple_path_allowed(self) -> None:
+        validate_probe_path("/healthz")  # 예외 없음
+
+    def test_nested_path_allowed(self) -> None:
+        validate_probe_path("/api/v1/health")  # 예외 없음
+
+    def test_query_string_allowed(self) -> None:
+        validate_probe_path("/health?ready=true")  # 예외 없음
+
+    def test_no_leading_slash_rejected(self) -> None:
+        with pytest.raises(ValueError, match="probe"):
+            validate_probe_path("no-leading-slash")
+
+    def test_newline_rejected(self) -> None:
+        with pytest.raises(ValueError, match="probe"):
+            validate_probe_path("/h\nbody: pwn")
+
+    def test_control_char_rejected(self) -> None:
+        with pytest.raises(ValueError, match="probe"):
+            validate_probe_path("/h\x00\x01")
+
+    def test_length_over_limit_rejected(self) -> None:
+        with pytest.raises(ValueError, match="probe"):
+            validate_probe_path("/" + ("a" * 600))
+
+    def test_html_meta_rejected(self) -> None:
+        with pytest.raises(ValueError, match="probe"):
+            validate_probe_path("/h<script>")
+
+    def test_empty_rejected(self) -> None:
+        with pytest.raises(ValueError, match="probe"):
+            validate_probe_path("")
