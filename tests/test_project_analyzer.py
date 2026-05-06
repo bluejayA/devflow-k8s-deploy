@@ -1403,3 +1403,148 @@ class TestPhase5SecurityGuards:
         for safe in ["/healthz", "/api/v1/health", "/health?ready=true"]:
             result = ProjectAnalyzer._apply_probe_overrides(probe, {"probe": {"path": safe}})
             assert result.liveness.path == safe
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# BL-019: entrypoint / probe.path 정책 일원화 가드
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+class TestBL019PolicyConsistency:
+    """BL-019: text_safety의 단일 정책을 ProjectAnalyzer 호출부가 위임하는지 가드.
+
+    이전 상태: ProjectAnalyzer 자체 정규식 + go.py validate_go_entrypoint 이원화.
+    `cmd/api`(./ 누락)는 Analyzer 통과 → build_plan 지연 실패.
+    BL-019: text_safety로 일원화 → fail-fast.
+
+    4분기 시나리오:
+      1. text_safety 직접 호출 — 거부
+      2. text_safety 직접 호출 — 허용
+      3. Analyzer override — 거부 (text_safety와 동일 결과)
+      4. Analyzer override — 허용 (text_safety와 동일 결과)
+    """
+
+    @pytest.mark.parametrize(
+        "invalid",
+        [
+            "cmd/api",  # BL-001 회귀: ./ 누락
+            "../etc/passwd",
+            "./cmd/../../etc",
+            "./cmd/$(whoami)",
+            "./cmd/`id`",
+            "./cmd/foo;bar",
+            "./cmd/foo bar",
+            "./cmd/foo\nbar",
+            " ./cmd/api",
+            "./cmd/" + ("x" * 260),  # 길이 초과
+        ],
+    )
+    def test_entrypoint_invalid_rejected_by_both_layers(self, invalid: str) -> None:
+        """동일 invalid 입력을 text_safety와 Analyzer 모두 거부."""
+        from scripts._shared.text_safety import validate_go_entrypoint
+
+        with pytest.raises(ValueError):
+            validate_go_entrypoint(invalid)
+
+        detect = StackDetectResult(
+            port=None, entrypoint="", framework="go-generic", version="1.22"
+        )
+        with pytest.raises(ValueError):
+            ProjectAnalyzer._apply_stack_overrides(detect, {"entrypoint": invalid})
+
+    @pytest.mark.parametrize(
+        "valid",
+        [
+            ".",
+            "./cmd/api",
+            "./cmd/kube-controller-manager",
+            "./bin/x_y",
+            "./cmd/v1.beta",
+        ],
+    )
+    def test_entrypoint_valid_accepted_by_both_layers(self, valid: str) -> None:
+        """동일 valid 입력을 text_safety와 Analyzer 모두 허용."""
+        from scripts._shared.text_safety import validate_go_entrypoint
+
+        validate_go_entrypoint(valid)  # 예외 없음
+
+        detect = StackDetectResult(
+            port=None, entrypoint="", framework="go-generic", version="1.22"
+        )
+        result = ProjectAnalyzer._apply_stack_overrides(detect, {"entrypoint": valid})
+        assert result.entrypoint == valid
+
+    @pytest.mark.parametrize(
+        "invalid",
+        [
+            "no-leading-slash",
+            "/h\nbody: pwn",
+            "/h\x00\x01",
+            "/" + ("a" * 600),
+            "/h<script>",
+        ],
+    )
+    def test_probe_path_invalid_rejected_by_both_layers(self, invalid: str) -> None:
+        """동일 invalid probe.path를 text_safety와 Analyzer 모두 거부."""
+        from scripts._shared.text_safety import validate_probe_path
+
+        with pytest.raises(ValueError):
+            validate_probe_path(invalid)
+
+        probe = ProbeConfig(
+            liveness=ProbeSpec(kind="http", path="/healthz", port=8080),
+            readiness=ProbeSpec(kind="http", path="/healthz", port=8080),
+        )
+        with pytest.raises(ValueError):
+            ProjectAnalyzer._apply_probe_overrides(probe, {"probe": {"path": invalid}})
+
+    @pytest.mark.parametrize(
+        "valid",
+        ["/healthz", "/api/v1/health", "/health?ready=true"],
+    )
+    def test_probe_path_valid_accepted_by_both_layers(self, valid: str) -> None:
+        """동일 valid probe.path를 text_safety와 Analyzer 모두 허용."""
+        from scripts._shared.text_safety import validate_probe_path
+
+        validate_probe_path(valid)  # 예외 없음
+
+        probe = ProbeConfig(
+            liveness=ProbeSpec(kind="http", path="/healthz", port=8080),
+            readiness=ProbeSpec(kind="http", path="/healthz", port=8080),
+        )
+        result = ProjectAnalyzer._apply_probe_overrides(probe, {"probe": {"path": valid}})
+        assert result.liveness.path == valid
+
+    def test_cmd_api_regression_fail_fast(self) -> None:
+        """BL-001 회귀: 'cmd/api' (./ 없음)는 Analyzer 단계에서 즉시 거부.
+
+        이전: Analyzer 통과 → go.py:270 build_plan 지연 실패.
+        BL-019: 정책 일원화로 _apply_stack_overrides에서 fail-fast.
+        """
+        detect = StackDetectResult(
+            port=None, entrypoint="", framework="go-generic", version="1.22"
+        )
+        with pytest.raises(ValueError, match="entrypoint"):
+            ProjectAnalyzer._apply_stack_overrides(detect, {"entrypoint": "cmd/api"})
+
+    def test_empty_entrypoint_config_is_passthrough(self) -> None:
+        """빈 문자열 entrypoint config는 'no override' 의미로 passthrough.
+
+        text_safety.validate_go_entrypoint('')은 직접 호출시 raise (정책 일관성).
+        Analyzer는 user config 미설정으로 해석하여 검증 트리거 없이 detect 결과 유지.
+        두 의미는 호환됨: Analyzer가 검증을 우회하는 게 아니라, 검증 대상 자체가 없음.
+        """
+        detect = StackDetectResult(
+            port=None, entrypoint="./auto", framework="go-generic", version="1.22"
+        )
+        result = ProjectAnalyzer._apply_stack_overrides(detect, {"entrypoint": ""})
+        assert result == detect  # passthrough, 검증 미트리거
+
+    def test_empty_probe_path_config_is_passthrough(self) -> None:
+        """빈 문자열 probe.path config도 passthrough."""
+        probe = ProbeConfig(
+            liveness=ProbeSpec(kind="http", path="/healthz", port=8080),
+            readiness=ProbeSpec(kind="http", path="/healthz", port=8080),
+        )
+        result = ProjectAnalyzer._apply_probe_overrides(probe, {"probe": {"path": ""}})
+        assert result == probe  # passthrough
