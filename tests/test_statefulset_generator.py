@@ -212,3 +212,114 @@ class TestGenerateStatefulset:
         assert pod_sec["runAsUser"] == 65532
         assert pod_sec["runAsGroup"] == 65532
         assert pod_sec["fsGroup"] == 65532
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# BL-018: parsed YAML deep-equality baseline (Jinja2 전환 안전망)
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+_BL018_STATEFULSET_BASELINE: dict[str, object] = {
+    "apiVersion": "apps/v1",
+    "kind": "StatefulSet",
+    "metadata": {"name": "my-app", "namespace": "default"},
+    "spec": {
+        "replicas": 1,
+        "serviceName": "my-app",
+        "selector": {"matchLabels": {"app": "my-app"}},
+        "template": {
+            "metadata": {"labels": {"app": "my-app"}},
+            "spec": {
+                "serviceAccountName": "my-app-sa",
+                "automountServiceAccountToken": False,
+                "securityContext": {
+                    "runAsNonRoot": True,
+                    "runAsUser": 1000,
+                    "runAsGroup": 1000,
+                    "fsGroup": 1000,
+                    "seccompProfile": {"type": "RuntimeDefault"},
+                },
+                "containers": [
+                    {
+                        "name": "my-app",
+                        "image": "myrepo/app:1.0.0",
+                        "ports": [{"containerPort": 8080, "protocol": "TCP"}],
+                        "livenessProbe": {
+                            "httpGet": {"path": "/actuator/health/liveness", "port": 8080},
+                            "initialDelaySeconds": 10,
+                            "periodSeconds": 10,
+                        },
+                        "readinessProbe": {
+                            "httpGet": {"path": "/actuator/health/readiness", "port": 8080},
+                            "initialDelaySeconds": 5,
+                            "periodSeconds": 5,
+                        },
+                        "securityContext": {
+                            "allowPrivilegeEscalation": False,
+                            "privileged": False,
+                            "readOnlyRootFilesystem": True,
+                            "capabilities": {"drop": ["ALL"]},
+                        },
+                        "resources": {
+                            "requests": {"cpu": "125m", "memory": "256Mi"},
+                            "limits": {"cpu": "500m", "memory": "512Mi"},
+                        },
+                        "volumeMounts": [
+                            {"name": "tmp", "mountPath": "/tmp"},
+                            {"name": "data", "mountPath": "/data"},
+                        ],
+                    }
+                ],
+                "volumes": [{"name": "tmp", "emptyDir": {}}],
+            },
+        },
+        "volumeClaimTemplates": [
+            {
+                "metadata": {"name": "data"},
+                "spec": {
+                    "accessModes": ["ReadWriteOnce"],
+                    "resources": {"requests": {"storage": "1Gi"}},
+                    "storageClassName": "local-path",
+                },
+            }
+        ],
+    },
+}
+
+
+class TestBL018StatefulsetParsedEquivalence:
+    """BL-018: dict+yaml.dump → Jinja2 전환 시 parsed dict 의미 보존 가드.
+
+    이전 출력의 parsed 결과를 baseline으로 박제. 신규 statefulset.tmpl이
+    동일 시멘틱(deep-equality)을 유지하는지 회귀 보호.
+    """
+
+    def test_statefulset_parsed_equivalent_to_baseline(self) -> None:
+        renderer = TemplateRenderer(PROJECT_ROOT / "templates")
+        gen = ManifestGenerator(renderer)
+        inputs = _make_inputs()
+        analysis = _make_analysis()
+        cluster = _make_cluster_config()
+
+        yaml_str = gen.generate_statefulset(inputs, analysis, cluster, image="myrepo/app:1.0.0")
+        doc = yaml.safe_load(yaml_str)
+
+        assert doc == _BL018_STATEFULSET_BASELINE
+
+    def test_statefulset_parsed_storage_class_none_baseline(self) -> None:
+        """storage_class=None 시 storageClassName 키 자체가 부재해야 함."""
+        renderer = TemplateRenderer(PROJECT_ROOT / "templates")
+        gen = ManifestGenerator(renderer)
+        inputs = _make_inputs()
+        analysis = _make_analysis()
+        cluster = _make_cluster_config(storage_class=None)
+
+        yaml_str = gen.generate_statefulset(inputs, analysis, cluster, image="myrepo/app:1.0.0")
+        doc = yaml.safe_load(yaml_str)
+
+        vct_spec = doc["spec"]["volumeClaimTemplates"][0]["spec"]
+        assert vct_spec == {
+            "accessModes": ["ReadWriteOnce"],
+            "resources": {"requests": {"storage": "1Gi"}},
+        }
+        assert "storageClassName" not in vct_spec

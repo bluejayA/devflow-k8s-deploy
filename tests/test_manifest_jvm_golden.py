@@ -159,3 +159,18 @@ def test_jvm_serviceaccount_golden(generator: ManifestGenerator) -> None:
 def test_jvm_statefulset_golden(generator: ManifestGenerator) -> None:
     actual = generator.generate_statefulset(_INPUTS, _ANALYSIS, _CLUSTER, image=_IMAGE)
     _assert_golden("statefulset.yaml", actual)
+
+
+def test_jvm_networkpolicy_golden(generator: ManifestGenerator) -> None:
+    """BL-018: networkpolicy 첫 골든 — Jinja2 전환과 함께 도입.
+
+    fixture는 deny-all + 단일 ingress + 단일 egress 조합으로 `{% for %}` 루프 커버.
+    """
+    actual = generator.generate_networkpolicy(
+        _INPUTS,
+        _CLUSTER,
+        allow_ingress_from=[{"namespace": "frontend", "port": 8080}],
+        allow_egress_to=[{"namespace": "db", "port": 5432}],
+    )
+    assert actual is not None
+    _assert_golden("networkpolicy.yaml", actual)

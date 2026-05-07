@@ -1,6 +1,7 @@
 """ManifestGenerator — Kubernetes YAML 생성기.
 
-Deployment / Service / ServiceAccount YAML 생성.
+Deployment / Service / ServiceAccount / StatefulSet / NetworkPolicy YAML 생성.
+BL-018: 5개 매니페스트 모두 단일 Jinja2 렌더 경로(`templates/manifest/*.tmpl`) 사용 — ADR-0001.
 Pod/Container securityContext + probes + 리소스 + 근거 주석(F-37).
 emptyDir 기본 마운트 (/tmp, /var/log) (F-32).
 automountServiceAccountToken: false (F-30, F-35).
@@ -9,8 +10,6 @@ automountServiceAccountToken: false (F-30, F-35).
 from __future__ import annotations
 
 import re
-
-import yaml
 
 from scripts._shared.image_ref import validate_image_reference
 from scripts._shared.text_safety import reject_unsafe_chars
@@ -112,15 +111,6 @@ def _validate_dns1123_label(value: str, field_name: str) -> None:
             f"k8s DNS-1123 label 위반: {field_name}={value!r}. "
             "소문자 알파뉴메릭·하이픈만 허용, 63자 이하, 시작/끝은 알파뉴메릭."
         )
-
-
-def _build_probe_dict(probe: ProbeSpec, initial_delay: int, period: int) -> dict[str, object]:
-    """ProbeSpec을 K8s probe dict로 변환 (yaml.dump 직접 사용용)."""
-    if probe.kind == "http":
-        handler: dict[str, object] = {"httpGet": {"path": probe.path, "port": probe.port}}
-    else:
-        handler = {"tcpSocket": {"port": probe.port}}
-    return {**handler, "initialDelaySeconds": initial_delay, "periodSeconds": period}
 
 
 def _build_probe_context(probe: ProbeSpec, prefix: str) -> dict[str, object]:
@@ -327,96 +317,41 @@ class ManifestGenerator:
     ) -> str:
         """statefulset.yaml 문자열 반환.
 
-        volumeClaimTemplates에 storage_size와 cluster.storage_class를 적용한다.
-        cluster.storage_class가 None이면 storageClassName 필드를 생략한다.
+        BL-018: dict+yaml.dump → Jinja2(`templates/manifest/statefulset.tmpl`) 일원화.
+        cluster.storage_class가 None이면 `storageClassName` 필드를 템플릿에서 생략한다.
 
         Raises:
             ValueError: storage_size가 K8s quantity 형식이 아닌 경우.
             ValueError: cluster.storage_class에 개행/제어문자 포함 시.
         """
         self._validate_inputs_common(inputs)
+        self._validate_port(inputs.port)
+        validate_image_reference(image)
         _validate_k8s_quantity(storage_size)
         if cluster.storage_class is not None:
             _validate_manifest_field(cluster.storage_class, "storage_class")
 
         defaults = analysis.defaults
-        vct_spec: dict[str, object] = {
-            "accessModes": ["ReadWriteOnce"],
-            "resources": {"requests": {"storage": storage_size}},
-        }
-        if cluster.storage_class is not None:
-            vct_spec["storageClassName"] = cluster.storage_class
+        liveness_ctx = _build_probe_context(analysis.probe_config.liveness, "liveness")
+        readiness_ctx = _build_probe_context(analysis.probe_config.readiness, "readiness")
 
-        doc: dict[str, object] = {
-            "apiVersion": "apps/v1",
-            "kind": "StatefulSet",
-            "metadata": {"name": inputs.app_name, "namespace": inputs.namespace},
-            "spec": {
-                "replicas": inputs.replicas,
-                "serviceName": inputs.app_name,
-                "selector": {"matchLabels": {"app": inputs.app_name}},
-                "template": {
-                    "metadata": {"labels": {"app": inputs.app_name}},
-                    "spec": {
-                        "serviceAccountName": f"{inputs.app_name}-sa",
-                        "automountServiceAccountToken": False,
-                        "securityContext": {
-                            "runAsNonRoot": True,
-                            # BL-001 Phase 3 (F-31): UID 동적화 — defaults.run_as_user 기반
-                            "runAsUser": defaults.run_as_user,
-                            "runAsGroup": defaults.run_as_user,
-                            "fsGroup": defaults.run_as_user,
-                            "seccompProfile": {"type": "RuntimeDefault"},
-                        },
-                        "containers": [
-                            {
-                                "name": inputs.app_name,
-                                "image": image,
-                                "ports": [{"containerPort": inputs.port, "protocol": "TCP"}],
-                                "livenessProbe": _build_probe_dict(
-                                    analysis.probe_config.liveness, 10, 10
-                                ),
-                                "readinessProbe": _build_probe_dict(
-                                    analysis.probe_config.readiness, 5, 5
-                                ),
-                                "securityContext": {
-                                    "allowPrivilegeEscalation": False,
-                                    "privileged": False,
-                                    "readOnlyRootFilesystem": True,
-                                    "capabilities": {"drop": ["ALL"]},
-                                },
-                                "resources": {
-                                    "requests": {
-                                        "cpu": defaults.cpu_request,
-                                        "memory": defaults.memory_request,
-                                    },
-                                    "limits": {
-                                        "cpu": defaults.cpu_limit,
-                                        "memory": defaults.memory_limit,
-                                    },
-                                },
-                                "volumeMounts": [
-                                    {"name": "tmp", "mountPath": "/tmp"},
-                                    {"name": "data", "mountPath": "/data"},
-                                ],
-                            }
-                        ],
-                        "volumes": [{"name": "tmp", "emptyDir": {}}],
-                    },
-                },
-                "volumeClaimTemplates": [
-                    {"metadata": {"name": "data"}, "spec": vct_spec}
-                ],
-            },
+        context: dict[str, object] = {
+            "app_name": inputs.app_name,
+            "cpu_limit": defaults.cpu_limit,
+            "cpu_request": defaults.cpu_request,
+            "image": image,
+            "memory_limit": defaults.memory_limit,
+            "memory_request": defaults.memory_request,
+            "namespace": inputs.namespace,
+            "port": inputs.port,
+            "replicas": inputs.replicas,
+            "run_as_user": defaults.run_as_user,
+            "storage_class": cluster.storage_class,
+            "storage_size": storage_size,
+            **liveness_ctx,
+            **readiness_ctx,
         }
-        return yaml.dump(
-            doc,
-            default_flow_style=False,
-            allow_unicode=True,
-            sort_keys=False,
-            indent=2,
-            width=1000,
-        )
+        return self._renderer.render_manifest("statefulset", context)
 
 
     def generate_networkpolicy(
@@ -429,8 +364,9 @@ class ManifestGenerator:
     ) -> str | None:
         """networkpolicy.yaml 문자열 반환. network_policy=False 시 None.
 
+        BL-018: dict+yaml.dump → Jinja2(`templates/manifest/networkpolicy.tmpl`) 일원화.
         기본 정책: deny-all ingress/egress.
-        CoreDNS egress(kube-system namespace, port 53 UDP+TCP)는 항상 포함.
+        CoreDNS egress(kube-system namespace, port 53 UDP+TCP)는 템플릿에서 항상 포함.
 
         allow_ingress_from / allow_egress_to 형식:
             [{"namespace": "ns-name", "port": 8080}, ...]
@@ -443,78 +379,22 @@ class ManifestGenerator:
 
         self._validate_inputs_common(inputs)
 
-        coredns_egress: dict[str, object] = {
-            "to": [
-                {
-                    "namespaceSelector": {
-                        "matchLabels": {
-                            "kubernetes.io/metadata.name": "kube-system"
-                        }
-                    }
-                }
-            ],
-            "ports": [
-                {"port": 53, "protocol": "UDP"},
-                {"port": 53, "protocol": "TCP"},
-            ],
+        # 호출자 입력 정규화 — 빈 목록은 None과 동일하게 처리.
+        # namespace 값은 DNS-1123 컨벤션 준수가 호출자 책임이지만, 방어적으로 개행/제어문자 차단.
+        ingress_rules = list(allow_ingress_from or [])
+        extra_egress = list(allow_egress_to or [])
+        for entry in (*ingress_rules, *extra_egress):
+            ns = entry.get("namespace")
+            if isinstance(ns, str):
+                _validate_manifest_field(ns, "namespace")
+
+        context: dict[str, object] = {
+            "app_name": inputs.app_name,
+            "extra_egress": extra_egress,
+            "ingress_rules": ingress_rules,
+            "namespace": inputs.namespace,
         }
-
-        egress_rules: list[dict[str, object]] = [coredns_egress]
-        if allow_egress_to:
-            for entry in allow_egress_to:
-                rule: dict[str, object] = {
-                    "to": [
-                        {
-                            "namespaceSelector": {
-                                "matchLabels": {
-                                    "kubernetes.io/metadata.name": entry["namespace"]
-                                }
-                            }
-                        }
-                    ],
-                    "ports": [{"port": entry["port"], "protocol": "TCP"}],
-                }
-                egress_rules.append(rule)
-
-        ingress_rules: list[dict[str, object]] = []
-        if allow_ingress_from:
-            for entry in allow_ingress_from:
-                ingress_rule: dict[str, object] = {
-                    "from": [
-                        {
-                            "namespaceSelector": {
-                                "matchLabels": {
-                                    "kubernetes.io/metadata.name": entry["namespace"]
-                                }
-                            }
-                        }
-                    ],
-                    "ports": [{"port": entry["port"], "protocol": "TCP"}],
-                }
-                ingress_rules.append(ingress_rule)
-
-        doc: dict[str, object] = {
-            "apiVersion": "networking.k8s.io/v1",
-            "kind": "NetworkPolicy",
-            "metadata": {
-                "name": f"{inputs.app_name}-netpol",
-                "namespace": inputs.namespace,
-            },
-            "spec": {
-                "podSelector": {"matchLabels": {"app": inputs.app_name}},
-                "policyTypes": ["Ingress", "Egress"],
-                "ingress": ingress_rules,
-                "egress": egress_rules,
-            },
-        }
-        return yaml.dump(
-            doc,
-            default_flow_style=False,
-            allow_unicode=True,
-            sort_keys=False,
-            indent=2,
-            width=1000,
-        )
+        return self._renderer.render_manifest("networkpolicy", context)
 
 
 def _validate_k8s_quantity(value: str) -> None:
