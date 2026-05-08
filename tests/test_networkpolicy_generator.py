@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
 import yaml
 
 from scripts._shared.types import ClusterConfig, UserInputs
@@ -240,3 +241,145 @@ class TestBL018NetworkpolicyParsedEquivalence:
         doc = yaml.safe_load(yaml_str)
 
         assert doc == _BL018_NETWORKPOLICY_FULL_BASELINE
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# BL-018 R2: NetworkPolicy 입력 schema 가드 (Codex adversarial finding HIGH)
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+class TestBL018NetworkpolicyEntrySchema:
+    """BL-018 R2 (Codex adversarial HIGH): allow_*_from/to 입력 schema fail-fast.
+
+    이전 회귀: namespace는 _validate_manifest_field(개행/CR/NUL만)만 통과,
+    port type/range 미검증. unquoted Jinja 치환이라 YAML metachar(`#`, `:`)가
+    구조를 바꿈 — yaml.dump의 자동 quoting 안전성 회귀.
+    """
+
+    @pytest.mark.parametrize(
+        "bad_namespace",
+        [
+            "frontend #shadow",  # YAML 주석 → 'frontend' 로 잘림
+            "frontend: bad",     # YAML key:value 구조 깨짐 (ScannerError)
+            "frontend\"quote",   # quote injection
+            "Frontend",          # 대문자 (DNS-1123 위반)
+            "frontend_under",    # underscore (DNS-1123 위반)
+            "-leading-hyphen",   # 시작 하이픈 (DNS-1123 위반)
+            "trailing-hyphen-",  # 끝 하이픈
+            "",                  # 빈 문자열
+            "x" * 64,            # 길이 초과 (>63)
+        ],
+    )
+    def test_ingress_invalid_namespace_rejected(self, bad_namespace: str) -> None:
+        gen = _make_generator()
+        inputs = _make_inputs()
+        cluster = _make_cluster_config()
+
+        with pytest.raises(ValueError):
+            gen.generate_networkpolicy(
+                inputs,
+                cluster,
+                allow_ingress_from=[{"namespace": bad_namespace, "port": 8080}],
+            )
+
+    @pytest.mark.parametrize(
+        "bad_namespace",
+        ["frontend #x", "frontend: bad", "Frontend", "", "x" * 64],
+    )
+    def test_egress_invalid_namespace_rejected(self, bad_namespace: str) -> None:
+        gen = _make_generator()
+        inputs = _make_inputs()
+        cluster = _make_cluster_config()
+
+        with pytest.raises(ValueError):
+            gen.generate_networkpolicy(
+                inputs,
+                cluster,
+                allow_egress_to=[{"namespace": bad_namespace, "port": 8080}],
+            )
+
+    @pytest.mark.parametrize(
+        "bad_port",
+        [
+            0,                # 0번 포트 (범위 위반)
+            -1,               # 음수
+            65536,            # 범위 초과
+            "8080",           # 문자열
+            "53 #x",          # 문자열 + YAML metachar
+            8080.5,           # float
+            None,             # None
+        ],
+    )
+    def test_invalid_port_rejected(self, bad_port: object) -> None:
+        gen = _make_generator()
+        inputs = _make_inputs()
+        cluster = _make_cluster_config()
+
+        with pytest.raises((ValueError, TypeError)):
+            gen.generate_networkpolicy(
+                inputs,
+                cluster,
+                allow_ingress_from=[{"namespace": "frontend", "port": bad_port}],
+            )
+
+    def test_entry_missing_namespace_rejected(self) -> None:
+        gen = _make_generator()
+        inputs = _make_inputs()
+        cluster = _make_cluster_config()
+
+        with pytest.raises((ValueError, KeyError)):
+            gen.generate_networkpolicy(
+                inputs, cluster, allow_ingress_from=[{"port": 8080}]
+            )
+
+    def test_entry_missing_port_rejected(self) -> None:
+        gen = _make_generator()
+        inputs = _make_inputs()
+        cluster = _make_cluster_config()
+
+        with pytest.raises((ValueError, KeyError)):
+            gen.generate_networkpolicy(
+                inputs, cluster, allow_ingress_from=[{"namespace": "frontend"}]
+            )
+
+    def test_entry_extra_key_rejected(self) -> None:
+        """unexpected key는 거부 — 향후 schema 진화 시 silent drop 방지."""
+        gen = _make_generator()
+        inputs = _make_inputs()
+        cluster = _make_cluster_config()
+
+        with pytest.raises(ValueError):
+            gen.generate_networkpolicy(
+                inputs,
+                cluster,
+                allow_ingress_from=[
+                    {"namespace": "frontend", "port": 8080, "unknown": "x"}
+                ],
+            )
+
+    def test_entry_not_dict_rejected(self) -> None:
+        gen = _make_generator()
+        inputs = _make_inputs()
+        cluster = _make_cluster_config()
+
+        with pytest.raises((ValueError, TypeError, AttributeError)):
+            gen.generate_networkpolicy(
+                inputs, cluster, allow_ingress_from=["not-a-dict"]  # type: ignore[list-item]
+            )
+
+    def test_valid_port_boundaries_accepted(self) -> None:
+        """경계값(1, 65535) 허용 회귀 가드."""
+        gen = _make_generator()
+        inputs = _make_inputs()
+        cluster = _make_cluster_config()
+
+        for port in (1, 65535):
+            yaml_str = gen.generate_networkpolicy(
+                inputs,
+                cluster,
+                allow_ingress_from=[{"namespace": "frontend", "port": port}],
+            )
+            assert yaml_str is not None
+            doc = yaml.safe_load(yaml_str)
+            ingress_port = doc["spec"]["ingress"][0]["ports"][0]["port"]
+            assert ingress_port == port

@@ -335,10 +335,15 @@ class ManifestGenerator:
         liveness_ctx = _build_probe_context(analysis.probe_config.liveness, "liveness")
         readiness_ctx = _build_probe_context(analysis.probe_config.readiness, "readiness")
 
+        # BL-018 R2 (Codex adversarial MEDIUM): None vs '' 시맨틱 보존.
+        # K8s PVC: missing field → cluster default StorageClass / '' → 동적 프로비저닝 비활성화.
+        # 템플릿이 falsy 체크(`{% if storage_class %}`)면 ''에서도 키 누락 → 의미 drift.
+        # 명시 has_storage_class 플래그로 None만 누락하도록 분기.
         context: dict[str, object] = {
             "app_name": inputs.app_name,
             "cpu_limit": defaults.cpu_limit,
             "cpu_request": defaults.cpu_request,
+            "has_storage_class": cluster.storage_class is not None,
             "image": image,
             "memory_limit": defaults.memory_limit,
             "memory_request": defaults.memory_request,
@@ -346,7 +351,7 @@ class ManifestGenerator:
             "port": inputs.port,
             "replicas": inputs.replicas,
             "run_as_user": defaults.run_as_user,
-            "storage_class": cluster.storage_class,
+            "storage_class": cluster.storage_class if cluster.storage_class is not None else "",
             "storage_size": storage_size,
             **liveness_ctx,
             **readiness_ctx,
@@ -379,14 +384,14 @@ class ManifestGenerator:
 
         self._validate_inputs_common(inputs)
 
-        # 호출자 입력 정규화 — 빈 목록은 None과 동일하게 처리.
-        # namespace 값은 DNS-1123 컨벤션 준수가 호출자 책임이지만, 방어적으로 개행/제어문자 차단.
         ingress_rules = list(allow_ingress_from or [])
         extra_egress = list(allow_egress_to or [])
+
+        # BL-018 R2 (Codex adversarial HIGH): unquoted Jinja 치환 → trust boundary.
+        # entry는 정확히 {"namespace": str, "port": int} 형태만 허용. 위반 시 fail-fast.
+        # yaml.dump의 자동 quoting 안전성 회귀를 막기 위한 explicit schema 검증.
         for entry in (*ingress_rules, *extra_egress):
-            ns = entry.get("namespace")
-            if isinstance(ns, str):
-                _validate_manifest_field(ns, "namespace")
+            self._validate_netpol_entry(entry)
 
         context: dict[str, object] = {
             "app_name": inputs.app_name,
@@ -395,6 +400,49 @@ class ManifestGenerator:
             "namespace": inputs.namespace,
         }
         return self._renderer.render_manifest("networkpolicy", context)
+
+    @staticmethod
+    def _validate_netpol_entry(entry: object) -> None:
+        """BL-018 R2: NetworkPolicy allow_*_from/to entry schema 가드.
+
+        허용 형태: dict, exact keys = {"namespace", "port"}.
+        - namespace: DNS-1123 label (소문자 알파뉴메릭+하이픈, 시작/끝 알파뉴메릭, ≤63자).
+        - port: int, 1 ≤ port ≤ 65535.
+
+        Raises:
+            ValueError: dict 아님 / 키 부재 / 추가 키 / 검증 실패 시.
+        """
+        if not isinstance(entry, dict):
+            raise ValueError(
+                f"NetworkPolicy entry는 dict여야 함: type={type(entry).__name__}, value={entry!r}"
+            )
+        allowed_keys = {"namespace", "port"}
+        actual_keys = set(entry.keys())
+        if actual_keys != allowed_keys:
+            missing = allowed_keys - actual_keys
+            extra = actual_keys - allowed_keys
+            raise ValueError(
+                f"NetworkPolicy entry 키 불일치: missing={sorted(missing)}, "
+                f"extra={sorted(extra)}, entry={entry!r}"
+            )
+
+        ns = entry["namespace"]
+        if not isinstance(ns, str):
+            raise ValueError(
+                f"NetworkPolicy entry.namespace는 str: type={type(ns).__name__}, value={ns!r}"
+            )
+        _validate_dns1123_label(ns, "namespace")
+
+        port = entry["port"]
+        # bool은 int 서브클래스 → 명시 차단
+        if isinstance(port, bool) or not isinstance(port, int):
+            raise ValueError(
+                f"NetworkPolicy entry.port는 int: type={type(port).__name__}, value={port!r}"
+            )
+        if not (1 <= port <= 65535):
+            raise ValueError(
+                f"NetworkPolicy entry.port는 [1, 65535] 범위: port={port}"
+            )
 
 
 def _validate_k8s_quantity(value: str) -> None:

@@ -323,3 +323,31 @@ class TestBL018StatefulsetParsedEquivalence:
             "resources": {"requests": {"storage": "1Gi"}},
         }
         assert "storageClassName" not in vct_spec
+
+    def test_statefulset_storage_class_empty_string_emits_field(self) -> None:
+        """BL-018 R2 (Codex adversarial MEDIUM): storage_class='' vs None 분리.
+
+        K8s PVC semantics:
+          - missing field: cluster default StorageClass 사용
+          - storageClassName: '': 동적 프로비저닝 비활성화 (다른 의미)
+
+        이전 dict 경로는 `is not None` 분기로 ''에서 storageClassName 키를 emit했으나
+        Jinja2 전환 시 `{% if storage_class %}` falsy 검사로 변경되어 ''에서 키 누락.
+        해당 분기를 명시 None 검사로 교정 + 회귀 가드.
+        """
+        renderer = TemplateRenderer(PROJECT_ROOT / "templates")
+        gen = ManifestGenerator(renderer)
+        inputs = _make_inputs()
+        analysis = _make_analysis()
+        cluster = _make_cluster_config(storage_class="")
+
+        yaml_str = gen.generate_statefulset(inputs, analysis, cluster, image="myrepo/app:1.0.0")
+        doc = yaml.safe_load(yaml_str)
+
+        vct_spec = doc["spec"]["volumeClaimTemplates"][0]["spec"]
+        # 키가 emit되어야 함 (None과 구분)
+        assert "storageClassName" in vct_spec, (
+            "storage_class=''는 storageClassName: '' 형태로 emit되어야 함 — "
+            "K8s 동적 프로비저닝 비활성화 의미 보존"
+        )
+        assert vct_spec["storageClassName"] == ""
