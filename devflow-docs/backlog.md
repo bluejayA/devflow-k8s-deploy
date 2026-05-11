@@ -1,17 +1,16 @@
 # Backlog
 
-_Last updated: 2026-05-06 — BL-019 머지 완료 (PR #37)_
+_Last updated: 2026-05-11 — BL-018 머지 완료 (PR #38, Codex adversarial 3 라운드 통과)_
 
 ---
 
 ## Next
 
-BL-019 (entrypoint 정책 일원화) 완료 — Python 스택(BL-006) 추가 전 권장 선행 작업이었음.
-다음 권장 순서: **BL-018(manifest 일관성 ADR) → BL-017(Go 프레임워크 probe) → BL-006(Python 스택)**.
+BL-018 (manifest 렌더링 Jinja2 일원화 + ADR-0001) 완료 — Python 스택(BL-006) 직전 마지막 선행 작업.
+다음 권장 순서: **BL-017(Go 프레임워크 probe) → BL-006(Python 스택)**.
 
 | ID | 제목 | 이슈 | 분류 |
 |----|------|------|------|
-| **BL-018** | manifest 생성 방식 일관성 복원 (Jinja2 vs dict+yaml.dump) | [#28](https://github.com/bluejayA/devflow-k8s-deploy/issues/28) | 문서/일관성 (Python 선행) |
 | **BL-017** | Go 프레임워크 probe 자동 감지 — gin/echo/fiber | [#27](https://github.com/bluejayA/devflow-k8s-deploy/issues/27) | 스택 확장 (Python 선행 패턴) |
 | **BL-006** | Python 스택 지원 | [#9](https://github.com/bluejayA/devflow-k8s-deploy/issues/9) | 스택 확장 (목표) |
 | **BL-002** | auto-fix 루프 (검증 실패 시 자동 수정 3회) | [#12](https://github.com/bluejayA/devflow-k8s-deploy/issues/12) | DX |
@@ -45,7 +44,6 @@ BL-019 (entrypoint 정책 일원화) 완료 — Python 스택(BL-006) 추가 전
 | ID | 제목 | 이슈 | 우선순위 |
 |----|------|------|---------|
 | **BL-016** | SKILL.md STEP 4-1 ↔ orchestrator 검증 경로 drift | [#25](https://github.com/bluejayA/devflow-k8s-deploy/issues/25) | low-medium |
-| **BL-018** | manifest 생성 방식 일관성 복원 (Jinja2 vs dict+yaml.dump 혼용 해소) | [#28](https://github.com/bluejayA/devflow-k8s-deploy/issues/28) | medium |
 
 ### JVM 제약 / 정확도
 
@@ -74,3 +72,4 @@ BL-019 (entrypoint 정책 일원화) 완료 — Python 스택(BL-006) 추가 전
 | [#33](https://github.com/bluejayA/devflow-k8s-deploy/issues/33) | manifest/rationale 주석 stack-aware (BL-021) | [#35](https://github.com/bluejayA/devflow-k8s-deploy/pull/35) | 2026-04-29 |
 | [#34](https://github.com/bluejayA/devflow-k8s-deploy/issues/34) | k8s-output 디렉토리 구조 — manifests/ 분리 (BL-022) | [#36](https://github.com/bluejayA/devflow-k8s-deploy/pull/36) | 2026-04-29 |
 | [#31](https://github.com/bluejayA/devflow-k8s-deploy/issues/31) | entrypoint 검증 정책 일원화 (BL-019) | [#37](https://github.com/bluejayA/devflow-k8s-deploy/pull/37) | 2026-05-06 |
+| [#28](https://github.com/bluejayA/devflow-k8s-deploy/issues/28) | manifest 렌더링 Jinja2 일원화 + ADR-0001 (BL-018, Codex adversarial 3 라운드 통과) | [#38](https://github.com/bluejayA/devflow-k8s-deploy/pull/38) | 2026-05-11 |
