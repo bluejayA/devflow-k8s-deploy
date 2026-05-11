@@ -94,7 +94,8 @@ class TemplateRenderer:
     def render_manifest(self, kind: str, context: dict[str, object]) -> str:
         """templates/manifest/{kind}.tmpl 렌더링.
 
-        kind는 'deployment' | 'service' | 'serviceaccount' 중 하나.
+        kind는 'deployment' | 'service' | 'serviceaccount' | 'statefulset' | 'networkpolicy' 중 하나
+        (BL-018: 5종 모두 단일 Jinja2 렌더 경로).
         렌더 결과는 _normalize 통과.
 
         Args:

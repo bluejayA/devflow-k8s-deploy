@@ -1,47 +1,57 @@
 apiVersion: apps/v1
 kind: StatefulSet
 metadata:
-  name: jvm-app
-  namespace: default
+  name: {{ app_name }}
+  namespace: {{ namespace }}
 spec:
-  replicas: 2
-  serviceName: jvm-app
+  replicas: {{ replicas }}
+  serviceName: {{ app_name }}
   selector:
     matchLabels:
-      app: jvm-app
+      app: {{ app_name }}
   template:
     metadata:
       labels:
-        app: jvm-app
+        app: {{ app_name }}
     spec:
-      serviceAccountName: jvm-app-sa
+      serviceAccountName: {{ app_name }}-sa
       # 기본 토큰 자동 마운트 차단 — RBAC 최소권한
       automountServiceAccountToken: false
       # Pod securityContext — 컨테이너 권한 분리 — privileged escalation 방지 (F-31)
       securityContext:
         runAsNonRoot: true
-        runAsUser: 1000
-        runAsGroup: 1000
-        fsGroup: 1000
+        runAsUser: {{ run_as_user }}
+        runAsGroup: {{ run_as_user }}
+        fsGroup: {{ run_as_user }}
         seccompProfile:
           type: RuntimeDefault
       containers:
-        - name: jvm-app
-          image: local/test:1.0.0
+        - name: {{ app_name }}
+          image: {{ image }}
           ports:
-            - containerPort: 8080
+            - containerPort: {{ port }}
               protocol: TCP
           # 프로브 — 헬스체크 — 비정상 인스턴스 자동 제거 (F-34)
           livenessProbe:
+            {% if liveness_http %}
             httpGet:
-              path: /actuator/health/liveness
-              port: 8080
+              path: {{ liveness_http.path }}
+              port: {{ liveness_http.port }}
+            {% else %}
+            tcpSocket:
+              port: {{ liveness_tcp_port }}
+            {% endif %}
             initialDelaySeconds: 10
             periodSeconds: 10
           readinessProbe:
+            {% if readiness_http %}
             httpGet:
-              path: /actuator/health/readiness
-              port: 8080
+              path: {{ readiness_http.path }}
+              port: {{ readiness_http.port }}
+            {% else %}
+            tcpSocket:
+              port: {{ readiness_tcp_port }}
+            {% endif %}
             initialDelaySeconds: 5
             periodSeconds: 5
           # Container securityContext — 컨테이너 권한 분리 — privileged escalation 방지 (F-32)
@@ -55,11 +65,11 @@ spec:
           # 리소스 한도 — OOMKill로 다른 Pod 영향 방지 (F-33)
           resources:
             requests:
-              cpu: 100m
-              memory: 512Mi
+              cpu: {{ cpu_request }}
+              memory: {{ memory_request }}
             limits:
-              cpu: 1000m
-              memory: 1Gi
+              cpu: {{ cpu_limit }}
+              memory: {{ memory_limit }}
           # emptyDir 마운트(/tmp) + PVC 마운트(/data) — readOnlyRootFilesystem 공존
           volumeMounts:
             - name: tmp
@@ -78,5 +88,9 @@ spec:
           - ReadWriteOnce
         resources:
           requests:
-            storage: 1Gi
-        storageClassName: "local-path"
+            storage: {{ storage_size }}
+        {# BL-018 R3: storage_class는 generator에서 DNS-1123 subdomain 검증.
+           tojson은 defense-in-depth — 쿼트/이스케이프 안전 직렬화. #}
+        {% if has_storage_class %}
+        storageClassName: {{ storage_class | tojson }}
+        {% endif %}

@@ -212,3 +212,211 @@ class TestGenerateStatefulset:
         assert pod_sec["runAsUser"] == 65532
         assert pod_sec["runAsGroup"] == 65532
         assert pod_sec["fsGroup"] == 65532
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# BL-018: parsed YAML deep-equality baseline (Jinja2 전환 안전망)
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+_BL018_STATEFULSET_BASELINE: dict[str, object] = {
+    "apiVersion": "apps/v1",
+    "kind": "StatefulSet",
+    "metadata": {"name": "my-app", "namespace": "default"},
+    "spec": {
+        "replicas": 1,
+        "serviceName": "my-app",
+        "selector": {"matchLabels": {"app": "my-app"}},
+        "template": {
+            "metadata": {"labels": {"app": "my-app"}},
+            "spec": {
+                "serviceAccountName": "my-app-sa",
+                "automountServiceAccountToken": False,
+                "securityContext": {
+                    "runAsNonRoot": True,
+                    "runAsUser": 1000,
+                    "runAsGroup": 1000,
+                    "fsGroup": 1000,
+                    "seccompProfile": {"type": "RuntimeDefault"},
+                },
+                "containers": [
+                    {
+                        "name": "my-app",
+                        "image": "myrepo/app:1.0.0",
+                        "ports": [{"containerPort": 8080, "protocol": "TCP"}],
+                        "livenessProbe": {
+                            "httpGet": {"path": "/actuator/health/liveness", "port": 8080},
+                            "initialDelaySeconds": 10,
+                            "periodSeconds": 10,
+                        },
+                        "readinessProbe": {
+                            "httpGet": {"path": "/actuator/health/readiness", "port": 8080},
+                            "initialDelaySeconds": 5,
+                            "periodSeconds": 5,
+                        },
+                        "securityContext": {
+                            "allowPrivilegeEscalation": False,
+                            "privileged": False,
+                            "readOnlyRootFilesystem": True,
+                            "capabilities": {"drop": ["ALL"]},
+                        },
+                        "resources": {
+                            "requests": {"cpu": "125m", "memory": "256Mi"},
+                            "limits": {"cpu": "500m", "memory": "512Mi"},
+                        },
+                        "volumeMounts": [
+                            {"name": "tmp", "mountPath": "/tmp"},
+                            {"name": "data", "mountPath": "/data"},
+                        ],
+                    }
+                ],
+                "volumes": [{"name": "tmp", "emptyDir": {}}],
+            },
+        },
+        "volumeClaimTemplates": [
+            {
+                "metadata": {"name": "data"},
+                "spec": {
+                    "accessModes": ["ReadWriteOnce"],
+                    "resources": {"requests": {"storage": "1Gi"}},
+                    "storageClassName": "local-path",
+                },
+            }
+        ],
+    },
+}
+
+
+class TestBL018StatefulsetParsedEquivalence:
+    """BL-018: dict+yaml.dump → Jinja2 전환 시 parsed dict 의미 보존 가드.
+
+    이전 출력의 parsed 결과를 baseline으로 박제. 신규 statefulset.tmpl이
+    동일 시멘틱(deep-equality)을 유지하는지 회귀 보호.
+    """
+
+    def test_statefulset_parsed_equivalent_to_baseline(self) -> None:
+        renderer = TemplateRenderer(PROJECT_ROOT / "templates")
+        gen = ManifestGenerator(renderer)
+        inputs = _make_inputs()
+        analysis = _make_analysis()
+        cluster = _make_cluster_config()
+
+        yaml_str = gen.generate_statefulset(inputs, analysis, cluster, image="myrepo/app:1.0.0")
+        doc = yaml.safe_load(yaml_str)
+
+        assert doc == _BL018_STATEFULSET_BASELINE
+
+    def test_statefulset_parsed_storage_class_none_baseline(self) -> None:
+        """storage_class=None 시 storageClassName 키 자체가 부재해야 함."""
+        renderer = TemplateRenderer(PROJECT_ROOT / "templates")
+        gen = ManifestGenerator(renderer)
+        inputs = _make_inputs()
+        analysis = _make_analysis()
+        cluster = _make_cluster_config(storage_class=None)
+
+        yaml_str = gen.generate_statefulset(inputs, analysis, cluster, image="myrepo/app:1.0.0")
+        doc = yaml.safe_load(yaml_str)
+
+        vct_spec = doc["spec"]["volumeClaimTemplates"][0]["spec"]
+        assert vct_spec == {
+            "accessModes": ["ReadWriteOnce"],
+            "resources": {"requests": {"storage": "1Gi"}},
+        }
+        assert "storageClassName" not in vct_spec
+
+    def test_statefulset_storage_class_empty_string_emits_field(self) -> None:
+        """BL-018 R2 (Codex adversarial MEDIUM): storage_class='' vs None 분리.
+
+        K8s PVC semantics:
+          - missing field: cluster default StorageClass 사용
+          - storageClassName: '': 동적 프로비저닝 비활성화 (다른 의미)
+
+        이전 dict 경로는 `is not None` 분기로 ''에서 storageClassName 키를 emit했으나
+        Jinja2 전환 시 `{% if storage_class %}` falsy 검사로 변경되어 ''에서 키 누락.
+        해당 분기를 명시 None 검사로 교정 + 회귀 가드.
+        """
+        renderer = TemplateRenderer(PROJECT_ROOT / "templates")
+        gen = ManifestGenerator(renderer)
+        inputs = _make_inputs()
+        analysis = _make_analysis()
+        cluster = _make_cluster_config(storage_class="")
+
+        yaml_str = gen.generate_statefulset(inputs, analysis, cluster, image="myrepo/app:1.0.0")
+        doc = yaml.safe_load(yaml_str)
+
+        vct_spec = doc["spec"]["volumeClaimTemplates"][0]["spec"]
+        # 키가 emit되어야 함 (None과 구분)
+        assert "storageClassName" in vct_spec, (
+            "storage_class=''는 storageClassName: '' 형태로 emit되어야 함 — "
+            "K8s 동적 프로비저닝 비활성화 의미 보존"
+        )
+        assert vct_spec["storageClassName"] == ""
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# BL-018 R3: storage_class 입력 검증 + tojson defense-in-depth
+# (Codex adversarial round 2 finding HIGH)
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+class TestBL018StorageClassValidation:
+    """BL-018 R3: storage_class trust boundary 검증.
+
+    이전 R2 회귀: storageClassName: \"{{ storage_class }}\" 수동 quoting은
+    값에 `\"` 또는 `\\\\` 포함 시 YAML 깨뜨림.
+    Codex 재현: storage_class='foo\"bar' → 파서 실패.
+
+    수정: K8s StorageClass name 규칙(DNS-1123 subdomain) 검증 + tojson 안전 직렬화.
+    빈 문자열은 K8s 동적 프로비저닝 비활성화 sentinel로 명시 허용.
+    """
+
+    def _make_generator(self) -> ManifestGenerator:
+        return ManifestGenerator(TemplateRenderer(PROJECT_ROOT / "templates"))
+
+    @pytest.mark.parametrize(
+        "bad_storage_class",
+        [
+            'foo"bar',          # 더블쿼트 — YAML quoted scalar 깨뜨림
+            "back\\slash",      # 백슬래시 — escape 시퀀스
+            "UPPERCASE",        # DNS-1123 위반 (대문자)
+            "starts.with.dot.", # 끝이 점/하이픈
+            ".leading-dot",     # 시작이 점/하이픈
+            "under_score",      # underscore (DNS-1123 위반)
+            "with space",       # 공백
+            "with#comment",     # YAML 메타문자
+            "with:colon",       # YAML 메타문자
+            "x" * 254,          # 길이 초과 (>253 DNS-1123 subdomain 한도)
+        ],
+    )
+    def test_invalid_storage_class_rejected(self, bad_storage_class: str) -> None:
+        gen = self._make_generator()
+        inputs = _make_inputs()
+        analysis = _make_analysis()
+        cluster = _make_cluster_config(storage_class=bad_storage_class)
+
+        with pytest.raises(ValueError, match="storage_class"):
+            gen.generate_statefulset(inputs, analysis, cluster, image="myrepo/app:1.0.0")
+
+    @pytest.mark.parametrize(
+        "valid_storage_class",
+        [
+            "",                           # K8s 동적 프로비저닝 비활성화 sentinel
+            "local-path",                 # 기본 케이스
+            "local-path.production",      # subdomain dot 허용
+            "fast-ssd",                   # 일반 case
+            "a",                          # 최소 1자
+            "a" + ".a" * 126,             # 최대 253자 (다중 세그먼트, 각 ≤63자)
+        ],
+    )
+    def test_valid_storage_class_accepted(self, valid_storage_class: str) -> None:
+        gen = self._make_generator()
+        inputs = _make_inputs()
+        analysis = _make_analysis()
+        cluster = _make_cluster_config(storage_class=valid_storage_class)
+
+        yaml_str = gen.generate_statefulset(inputs, analysis, cluster, image="myrepo/app:1.0.0")
+        doc = yaml.safe_load(yaml_str)
+
+        vct_spec = doc["spec"]["volumeClaimTemplates"][0]["spec"]
+        assert "storageClassName" in vct_spec
+        assert vct_spec["storageClassName"] == valid_storage_class

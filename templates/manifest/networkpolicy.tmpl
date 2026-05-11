@@ -1,0 +1,49 @@
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ app_name }}-netpol
+  namespace: {{ namespace }}
+spec:
+  # 정책 대상 — 동일 namespace 내 app 라벨로 매칭
+  podSelector:
+    matchLabels:
+      app: {{ app_name }}
+  # zero-trust default: Ingress / Egress 모두 명시적 허용 외 차단
+  policyTypes:
+    - Ingress
+    - Egress
+  # 허용 ingress — 명시된 namespace + port만 (목록 비면 deny-all ingress)
+  {% if ingress_rules %}
+  ingress:
+  {% for entry in ingress_rules %}
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ entry.namespace }}
+      ports:
+        - port: {{ entry.port }}
+          protocol: TCP
+  {% endfor %}
+  {% else %}
+  ingress: []
+  {% endif %}
+  # 허용 egress — CoreDNS(kube-system:53)는 항상 포함, 그 외는 명시 목록만
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+      ports:
+        - port: 53
+          protocol: UDP
+        - port: 53
+          protocol: TCP
+{% for entry in extra_egress %}
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ entry.namespace }}
+      ports:
+        - port: {{ entry.port }}
+          protocol: TCP
+{% endfor %}
