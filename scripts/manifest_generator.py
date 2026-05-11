@@ -30,6 +30,13 @@ _K8S_QUANTITY_RE = re.compile(r"^[0-9]+([KMGTPE]i|[KMGTPE])?$")
 # 시작/끝은 알파뉴메릭, 중간에 하이픈 허용
 _DNS1123_LABEL_RE = re.compile(r"^[a-z0-9]([a-z0-9\-]{0,61}[a-z0-9])?$")
 
+# BL-018 R3: k8s DNS-1123 subdomain (StorageClass name 규칙) — 라벨 + dot 허용, 253자 이하.
+# 각 dot-구분 세그먼트는 DNS-1123 label 규칙(시작/끝 알파뉴메릭) 준수.
+_DNS1123_SUBDOMAIN_RE = re.compile(
+    r"^[a-z0-9]([a-z0-9\-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9\-]{0,61}[a-z0-9])?)*$"
+)
+_MAX_DNS1123_SUBDOMAIN_LEN = 253
+
 
 
 # exposure 허용 목록 — 런타임 검증 (Literal 타입은 런타임 강제 안 됨)
@@ -110,6 +117,37 @@ def _validate_dns1123_label(value: str, field_name: str) -> None:
         raise ValueError(
             f"k8s DNS-1123 label 위반: {field_name}={value!r}. "
             "소문자 알파뉴메릭·하이픈만 허용, 63자 이하, 시작/끝은 알파뉴메릭."
+        )
+
+
+def _validate_storage_class_name(value: str) -> None:
+    """BL-018 R3: K8s StorageClass name 검증 (DNS-1123 subdomain).
+
+    빈 문자열 ''는 K8s 동적 프로비저닝 비활성화 sentinel로 명시 허용 — 검증 건너뜀.
+    그 외에는 DNS-1123 subdomain 규칙:
+      - 소문자 알파뉴메릭 + 하이픈, dot 구분 세그먼트
+      - 각 세그먼트는 시작/끝 알파뉴메릭, ≤63자
+      - 전체 길이 ≤253자
+
+    이 검증은 trust boundary에서 fail-fast로 작동. 템플릿 측에는 `| tojson`
+    안전 직렬화가 defense-in-depth로 적용된다 (statefulset.tmpl).
+
+    Args:
+        value: storage_class 값. `None`은 호출자가 분기해 이 함수에 도달하지 않음.
+
+    Raises:
+        ValueError: 빈 문자열 외 입력이 DNS-1123 subdomain 규칙을 위반할 때.
+    """
+    if value == "":
+        return  # K8s 동적 프로비저닝 비활성화 sentinel — 허용
+    if len(value) > _MAX_DNS1123_SUBDOMAIN_LEN:
+        raise ValueError(
+            f"storage_class 길이 초과 (>{_MAX_DNS1123_SUBDOMAIN_LEN}): {value!r}"
+        )
+    if not _DNS1123_SUBDOMAIN_RE.fullmatch(value):
+        raise ValueError(
+            f"storage_class DNS-1123 subdomain 위반: {value!r}. "
+            "소문자 알파뉴메릭·하이픈·dot만 허용, 각 세그먼트 시작/끝 알파뉴메릭."
         )
 
 
@@ -329,7 +367,10 @@ class ManifestGenerator:
         validate_image_reference(image)
         _validate_k8s_quantity(storage_size)
         if cluster.storage_class is not None:
-            _validate_manifest_field(cluster.storage_class, "storage_class")
+            # BL-018 R3: DNS-1123 subdomain 검증 ('' sentinel은 명시 허용).
+            # 이전 R2의 _validate_manifest_field(개행/CR/NUL 차단)는 quote/backslash 통과 →
+            # statefulset.tmpl의 quoted scalar 깨뜨림. trust boundary fail-fast.
+            _validate_storage_class_name(cluster.storage_class)
 
         defaults = analysis.defaults
         liveness_ctx = _build_probe_context(analysis.probe_config.liveness, "liveness")

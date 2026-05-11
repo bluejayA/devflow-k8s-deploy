@@ -351,3 +351,72 @@ class TestBL018StatefulsetParsedEquivalence:
             "K8s 동적 프로비저닝 비활성화 의미 보존"
         )
         assert vct_spec["storageClassName"] == ""
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# BL-018 R3: storage_class 입력 검증 + tojson defense-in-depth
+# (Codex adversarial round 2 finding HIGH)
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+class TestBL018StorageClassValidation:
+    """BL-018 R3: storage_class trust boundary 검증.
+
+    이전 R2 회귀: storageClassName: \"{{ storage_class }}\" 수동 quoting은
+    값에 `\"` 또는 `\\\\` 포함 시 YAML 깨뜨림.
+    Codex 재현: storage_class='foo\"bar' → 파서 실패.
+
+    수정: K8s StorageClass name 규칙(DNS-1123 subdomain) 검증 + tojson 안전 직렬화.
+    빈 문자열은 K8s 동적 프로비저닝 비활성화 sentinel로 명시 허용.
+    """
+
+    def _make_generator(self) -> ManifestGenerator:
+        return ManifestGenerator(TemplateRenderer(PROJECT_ROOT / "templates"))
+
+    @pytest.mark.parametrize(
+        "bad_storage_class",
+        [
+            'foo"bar',          # 더블쿼트 — YAML quoted scalar 깨뜨림
+            "back\\slash",      # 백슬래시 — escape 시퀀스
+            "UPPERCASE",        # DNS-1123 위반 (대문자)
+            "starts.with.dot.", # 끝이 점/하이픈
+            ".leading-dot",     # 시작이 점/하이픈
+            "under_score",      # underscore (DNS-1123 위반)
+            "with space",       # 공백
+            "with#comment",     # YAML 메타문자
+            "with:colon",       # YAML 메타문자
+            "x" * 254,          # 길이 초과 (>253 DNS-1123 subdomain 한도)
+        ],
+    )
+    def test_invalid_storage_class_rejected(self, bad_storage_class: str) -> None:
+        gen = self._make_generator()
+        inputs = _make_inputs()
+        analysis = _make_analysis()
+        cluster = _make_cluster_config(storage_class=bad_storage_class)
+
+        with pytest.raises(ValueError, match="storage_class"):
+            gen.generate_statefulset(inputs, analysis, cluster, image="myrepo/app:1.0.0")
+
+    @pytest.mark.parametrize(
+        "valid_storage_class",
+        [
+            "",                           # K8s 동적 프로비저닝 비활성화 sentinel
+            "local-path",                 # 기본 케이스
+            "local-path.production",      # subdomain dot 허용
+            "fast-ssd",                   # 일반 case
+            "a",                          # 최소 1자
+            "a" + ".a" * 126,             # 최대 253자 (다중 세그먼트, 각 ≤63자)
+        ],
+    )
+    def test_valid_storage_class_accepted(self, valid_storage_class: str) -> None:
+        gen = self._make_generator()
+        inputs = _make_inputs()
+        analysis = _make_analysis()
+        cluster = _make_cluster_config(storage_class=valid_storage_class)
+
+        yaml_str = gen.generate_statefulset(inputs, analysis, cluster, image="myrepo/app:1.0.0")
+        doc = yaml.safe_load(yaml_str)
+
+        vct_spec = doc["spec"]["volumeClaimTemplates"][0]["spec"]
+        assert "storageClassName" in vct_spec
+        assert vct_spec["storageClassName"] == valid_storage_class

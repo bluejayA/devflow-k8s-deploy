@@ -89,6 +89,8 @@ spec:
         resources:
           requests:
             storage: {{ storage_size }}
+        {# BL-018 R3: storage_class는 generator에서 DNS-1123 subdomain 검증.
+           tojson은 defense-in-depth — 쿼트/이스케이프 안전 직렬화. #}
         {% if has_storage_class %}
-        storageClassName: "{{ storage_class }}"
+        storageClassName: {{ storage_class | tojson }}
         {% endif %}
