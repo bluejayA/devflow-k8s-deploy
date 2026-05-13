@@ -697,7 +697,10 @@ class TestDetectFrameworkSafeFallback:
             _BASE_GO_MOD.format(deps="    github.com/gin-gonic/gin v1.9.1")
         )
         try:
-            (tmp_path / "go.mod").symlink_to(outside)
+            try:
+                os.symlink(outside, tmp_path / "go.mod")
+            except OSError:
+                pytest.skip("symlink unsupported on this platform")
             assert _detect_go_framework(tmp_path) == "go-generic"
         finally:
             outside.unlink(missing_ok=True)

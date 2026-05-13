@@ -46,7 +46,11 @@ from scripts.stacks.base import ResourceHint
 _DEFAULT_GO_VERSION = "1.22"  # F-23: go.mod 파싱 실패 또는 go 지시어 부재 시 fallback
 _DEFAULT_PORT = 8080  # F-07: probe 기본 포트
 
-# BL-017 F-07: /health 경로를 채택하는 framework 집합 (version-agnostic, A-07)
+# BL-017 F-07: /health 경로를 채택하는 framework 집합 (version-agnostic, A-07).
+# NOTE: 현재 멤버는 `_match_frameworks`가 식별하는 framework 목록과 우연히 일치하나
+# 의미가 다르다 — `_HEALTH_FRAMEWORKS`는 probe 경로 정책이고, _match_frameworks는
+# 감지 대상이다. 향후 `/healthz`를 쓰는 framework(예: chi)가 감지 대상에 추가되면
+# 두 집합이 자연스럽게 갈라진다.
 _HEALTH_FRAMEWORKS: frozenset[str] = frozenset({"gin", "echo", "fiber"})
 
 _GO_MODULE_RE = re.compile(r"^module\s+(\S+)", re.MULTILINE)
@@ -131,10 +135,35 @@ def _parse_go_mod(go_mod_path: Path) -> tuple[str, str | None]:
     return module_path, go_version
 
 
+def _read_go_file_safe(project_dir: Path, filename: str) -> str:
+    """프로젝트 루트의 파일을 안전하게 읽어 텍스트 반환 (BL-017, F-04/F-06).
+
+    실패 케이스(없음/권한/디코딩/symlink escape) 모두 빈 문자열로 흡수 — 감지는
+    hint(NFR-3)이므로 raise 금지.
+
+    **흡수하지 않는 예외** (시스템 레벨 BaseException):
+      - ``MemoryError``: 파일 크기 5MB 제한(`read_text_limited`)을 통과한 뒤에도
+        시스템 메모리 부족 시 발생 가능. 정상 종료 신호이므로 흡수하지 않음.
+      - ``KeyboardInterrupt`` / ``SystemExit``: 사용자/시스템의 명시적 종료 의도.
+    """
+    target = project_dir / filename
+    if not target.is_file():
+        return ""
+    if not is_within(project_dir, target):
+        return ""
+    try:
+        return read_text_limited(target)
+    except (OSError, UnicodeDecodeError, ValueError):
+        return ""
+
+
 def _looks_like_module_path(value: str) -> bool:
     """Go 모듈 경로 sanity check — host(`.`) + path(`/`) 모두 포함 (BL-017).
 
-    완전한 검증이 아닌 malformed 라인 방어용 휴리스틱.
+    완전한 검증이 아닌 malformed 라인 방어용 휴리스틱. 후속 정규식
+    (`_GIN_RE`/`_ECHO_RE`/`_FIBER_RE`) 매칭이 이중 필터 역할을 하므로
+    false-positive(예: ``localhost.example/anything``)는 framework 검출
+    단계에서 자연스럽게 걸러진다.
     """
     return "/" in value and "." in value
 
@@ -226,6 +255,9 @@ def _detect_go_framework(project_dir: Path) -> str:
     direct_text = _read_go_file_safe(project_dir, "go.mod")
     if direct_text:
         direct_deps = _parse_go_mod_require(direct_text)
+        # go.sum과 동일한 텍스트 기반 인터페이스(_match_frameworks)를 재사용하기
+        # 위해 direct 집합을 다시 줄단위 텍스트로 합성한다. set 멤버십을 따로
+        # 분기하지 않아도 word boundary 정규식이 동일 의미를 보장한다.
         direct_blob = "\n".join(direct_deps)
         matches = _match_frameworks(direct_blob)
         if len(matches) == 1:
@@ -238,22 +270,6 @@ def _detect_go_framework(project_dir: Path) -> str:
     if len(sum_matches) == 1:
         return sum_matches[0]
     return "go-generic"
-
-
-def _read_go_file_safe(project_dir: Path, filename: str) -> str:
-    """프로젝트 루트의 파일을 안전하게 읽어 텍스트 반환 (BL-017, F-04/F-06).
-
-    실패 케이스(없음/권한/디코딩/symlink escape) 모두 빈 문자열로 흡수.
-    """
-    target = project_dir / filename
-    if not target.is_file():
-        return ""
-    if not is_within(project_dir, target):
-        return ""
-    try:
-        return read_text_limited(target)
-    except (OSError, UnicodeDecodeError, ValueError):
-        return ""
 
 
 def _collect_cmd_candidates(project_dir: Path) -> list[str]:
