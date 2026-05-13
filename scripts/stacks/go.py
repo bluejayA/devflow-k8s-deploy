@@ -46,8 +46,36 @@ from scripts.stacks.base import ResourceHint
 _DEFAULT_GO_VERSION = "1.22"  # F-23: go.mod 파싱 실패 또는 go 지시어 부재 시 fallback
 _DEFAULT_PORT = 8080  # F-07: probe 기본 포트
 
+# BL-017 F-07: /health 경로를 채택하는 framework 집합 (version-agnostic, A-07).
+# NOTE: 현재 멤버는 `_match_frameworks`가 식별하는 framework 목록과 우연히 일치하나
+# 의미가 다르다 — `_HEALTH_FRAMEWORKS`는 probe 경로 정책이고, _match_frameworks는
+# 감지 대상이다. 향후 `/healthz`를 쓰는 framework(예: chi)가 감지 대상에 추가되면
+# 두 집합이 자연스럽게 갈라진다.
+_HEALTH_FRAMEWORKS: frozenset[str] = frozenset({"gin", "echo", "fiber"})
+
 _GO_MODULE_RE = re.compile(r"^module\s+(\S+)", re.MULTILINE)
 _GO_VERSION_RE = re.compile(r"^go\s+(\d+(?:\.\d+){0,2})", re.MULTILINE)
+
+# BL-017 F-03: Go HTTP framework 식별 정규식. word boundary(\b) + non-capturing
+# major version suffix(?:/v\d+)?로 echo/v3·v4, fiber/v2·v3 등 모든 메이저 호환.
+# ReDoS-free: 고정 어절 매칭 + 정량 wildcard 없음.
+#
+# 후행 ``(?![\w/-])``는 path boundary negative lookahead — framework 본체 또는
+# ``/vN`` major version suffix 직후에 word/``/``/``-`` 어느 것도 와선 안 된다.
+# 이렇게 하면 ``echo-contrib``, ``gin-extras``(`-` 연결), ``echo/middleware``
+# (sub-path)는 매칭에서 제외되어 framework 본체만 정확히 식별.
+# (Codex P2-2 회귀 가드)
+_GIN_RE = re.compile(r"\bgithub\.com/gin-gonic/gin(?:/v\d+)?(?![\w/-])")
+_ECHO_RE = re.compile(r"\bgithub\.com/labstack/echo(?:/v\d+)?(?![\w/-])")
+_FIBER_RE = re.compile(r"\bgithub\.com/gofiber/fiber(?:/v\d+)?(?![\w/-])")
+
+# BL-017 F-06a: go.mod `require` 블록 파서 보조 정규식
+_REQUIRE_BLOCK_START_RE = re.compile(r"^\s*require\s*\(")
+_REQUIRE_BLOCK_END_RE = re.compile(r"^\s*\)")
+_REQUIRE_SINGLE_LINE_RE = re.compile(r"^\s*require\s+(\S+)\s+\S+")
+
+# Go 표준 `// indirect` 마커 감지 (transitive 의존성 식별, F-02 direct-only).
+_INDIRECT_MARKER_RE = re.compile(r"//\s*indirect\b")
 
 # DNS-1123 subset (UserInputs.app_name 재검증, F-29 (a))
 _DNS_1123_RE = re.compile(r"^[a-z0-9]([-a-z0-9]*[a-z0-9])?$")
@@ -114,6 +142,159 @@ def _parse_go_mod(go_mod_path: Path) -> tuple[str, str | None]:
     go_version = version_match.group(1) if version_match else None
 
     return module_path, go_version
+
+
+def _read_go_file_safe(project_dir: Path, filename: str) -> str:
+    """프로젝트 루트의 파일을 안전하게 읽어 텍스트 반환 (BL-017, F-04/F-06).
+
+    실패 케이스(없음/권한/디코딩/symlink escape) 모두 빈 문자열로 흡수 — 감지는
+    hint(NFR-3)이므로 raise 금지.
+
+    **흡수하지 않는 예외** (시스템 레벨 BaseException):
+      - ``MemoryError``: 파일 크기 5MB 제한(`read_text_limited`)을 통과한 뒤에도
+        시스템 메모리 부족 시 발생 가능. 정상 종료 신호이므로 흡수하지 않음.
+      - ``KeyboardInterrupt`` / ``SystemExit``: 사용자/시스템의 명시적 종료 의도.
+    """
+    target = project_dir / filename
+    if not target.is_file():
+        return ""
+    if not is_within(project_dir, target):
+        return ""
+    try:
+        return read_text_limited(target)
+    except (OSError, UnicodeDecodeError, ValueError):
+        return ""
+
+
+def _looks_like_module_path(value: str) -> bool:
+    """Go 모듈 경로 sanity check — host(`.`) + path(`/`) 모두 포함 (BL-017).
+
+    완전한 검증이 아닌 malformed 라인 방어용 휴리스틱. 후속 정규식
+    (`_GIN_RE`/`_ECHO_RE`/`_FIBER_RE`) 매칭이 이중 필터 역할을 하므로
+    false-positive(예: ``localhost.example/anything``)는 framework 검출
+    단계에서 자연스럽게 걸러진다.
+    """
+    return "/" in value and "." in value
+
+
+def _is_indirect_line(raw: str) -> bool:
+    """`// indirect` 마커가 있는 go.mod require 라인 식별 (F-02, BL-017).
+
+    Go 표준 출력 형식 ``<module> <version> // indirect``를 감지한다.
+    F-02 "Direct dependency wins"에 따라 indirect 라인은 direct 집합에서 제외.
+    """
+    return _INDIRECT_MARKER_RE.search(raw) is not None
+
+
+def _parse_go_mod_require(content: str) -> set[str]:
+    """go.mod `require` 블록과 단일 라인 require에서 **direct** module path 집합 추출 (F-06a).
+
+    지원 형식:
+      - 블록:  ``require ( ... )`` — 괄호 내부 라인의 첫 토큰
+      - 단일:  ``require <module> <version>``
+
+    규칙:
+      - ``//`` 이후는 끝주석으로 제거.
+      - ``// indirect`` 마커 라인은 transitive 의존성이므로 skip (F-02 "Direct
+        dependency wins"). Codex P2-1 회귀 가드.
+      - module path 휴리스틱(`.` + `/` 포함) 미통과 라인은 silent skip.
+      - 텍스트 파싱만 수행, 검증/네트워크 호출 없음.
+
+    Args:
+        content: go.mod 전체 텍스트.
+
+    Returns:
+        direct dependency module path 집합 (예: ``{"github.com/gin-gonic/gin"}``).
+    """
+    deps: set[str] = set()
+    in_block = False
+    for raw in content.splitlines():
+        indirect = _is_indirect_line(raw)
+        line = raw.split("//", 1)[0]
+        stripped = line.strip()
+        if not stripped:
+            continue
+
+        if in_block:
+            if _REQUIRE_BLOCK_END_RE.match(line):
+                in_block = False
+                continue
+            if indirect:
+                continue
+            tokens = stripped.split()
+            if len(tokens) >= 2 and _looks_like_module_path(tokens[0]):
+                deps.add(tokens[0])
+            continue
+
+        if _REQUIRE_BLOCK_START_RE.match(line):
+            in_block = True
+            continue
+
+        single = _REQUIRE_SINGLE_LINE_RE.match(line)
+        if single:
+            if indirect:
+                continue
+            module_path = single.group(1)
+            if _looks_like_module_path(module_path):
+                deps.add(module_path)
+
+    return deps
+
+
+def _match_frameworks(text: str) -> list[str]:
+    """텍스트에서 매칭되는 framework 이름 목록 반환 (BL-017 헬퍼).
+
+    정규식 매칭 결과를 알파벳 안정 순으로 반환하여 테스트 결정성 보장.
+    """
+    matches: list[str] = []
+    if _GIN_RE.search(text):
+        matches.append("gin")
+    if _ECHO_RE.search(text):
+        matches.append("echo")
+    if _FIBER_RE.search(text):
+        matches.append("fiber")
+    return matches
+
+
+def _detect_go_framework(project_dir: Path) -> str:
+    """Go HTTP framework 식별 — "Direct dependency wins" 4단계 (F-02, BL-017).
+
+    알고리즘:
+      1. ``go.mod``의 ``require`` 블록을 파싱하여 direct dependency 집합 구성.
+      2. direct에 gin/echo/fiber 정확히 1개 매치 → 해당 framework 채택.
+      3. direct 복수 매치 → ``"go-generic"`` 폴백 (고정 순서 억지 선택 금지).
+      4. direct 0개 매치 → ``go.sum`` 폴백 (약한 evidence).
+         sum 단일 매치 → 해당 framework / sum 복수 또는 0개 → ``"go-generic"``.
+
+    설계 가치:
+      - **설명 가능성**: developer가 명시적으로 선언한 의존성을 1순위로 신뢰.
+      - **감지는 hint** (NFR-3): 파일 I/O 실패는 raise 금지, ``"go-generic"`` 안전 폴백.
+      - **symlink escape 방어** (F-06): ``is_within`` 가드 적용.
+
+    Args:
+        project_dir: 프로젝트 루트.
+
+    Returns:
+        ``"gin"``, ``"echo"``, ``"fiber"``, 또는 ``"go-generic"``.
+    """
+    direct_text = _read_go_file_safe(project_dir, "go.mod")
+    if direct_text:
+        direct_deps = _parse_go_mod_require(direct_text)
+        # go.sum과 동일한 텍스트 기반 인터페이스(_match_frameworks)를 재사용하기
+        # 위해 direct 집합을 다시 줄단위 텍스트로 합성한다. set 멤버십을 따로
+        # 분기하지 않아도 word boundary 정규식이 동일 의미를 보장한다.
+        direct_blob = "\n".join(direct_deps)
+        matches = _match_frameworks(direct_blob)
+        if len(matches) == 1:
+            return matches[0]
+        if len(matches) >= 2:
+            return "go-generic"
+        # direct 0개 — go.sum 약한 evidence 폴백으로 진행
+    sum_text = _read_go_file_safe(project_dir, "go.sum")
+    sum_matches = _match_frameworks(sum_text)
+    if len(sum_matches) == 1:
+        return sum_matches[0]
+    return "go-generic"
 
 
 def _collect_cmd_candidates(project_dir: Path) -> list[str]:
@@ -229,10 +410,13 @@ class GoStackModule:
             entrypoint = ""  # 미결정 sentinel
             cmd_candidates = _collect_cmd_candidates(project_dir)
 
+        # BL-017 F-05: framework 식별을 _detect_go_framework에 위임
+        framework = _detect_go_framework(project_dir)
+
         return StackDetectResult(
             port=None,
             entrypoint=entrypoint,
-            framework="go-generic",
+            framework=framework,
             version=version,
             build_system=None,
             actuator_enabled=False,
@@ -285,12 +469,21 @@ class GoStackModule:
         )
 
     def probe_plan(self, detect_result: StackDetectResult) -> ProbeConfig:
-        """Go 기본 probe — http /healthz, liveness=readiness 동일 (F-07).
+        """Go probe — framework별 헬스 경로 분기 (F-07, BL-017).
 
-        config의 stack.go.probe.path override는 ProjectAnalyzer에서 적용.
+        - gin/echo/fiber → ``/health`` (3대 HTTP 프레임워크 관용, version-agnostic)
+        - go-generic 및 기타 → ``/healthz`` (BL-001 baseline 불변, NFR-5)
+        - liveness/readiness 동일 spec
+        - ``.devflow-k8s-deploy.yml::stack.go.probe.path`` override는
+          ProjectAnalyzer가 우선 적용 (BL-001 F-19, BL-017 A-04).
         """
         port = detect_result.port or _DEFAULT_PORT
-        spec = ProbeSpec(kind="http", path="/healthz", port=port)
+        path = (
+            "/health"
+            if detect_result.framework in _HEALTH_FRAMEWORKS
+            else "/healthz"
+        )
+        spec = ProbeSpec(kind="http", path=path, port=port)
         return ProbeConfig(liveness=spec, readiness=spec)
 
     def defaults(self, resource_hint: ResourceHint) -> ResourceDefaults:

@@ -1,169 +1,102 @@
 # Workflow Plan
 
-**Timestamp**: 2026-04-24T11:30:00+09:00
-**Selected Approach**: A안 — 점진적 TDD, Strangler 패턴, 9 Phase (2026-04-24 승인)
+**Timestamp**: 2026-05-12T18:45:00+09:00
+**Ticket**: BL-017 ([#27](https://github.com/bluejayA/devflow-k8s-deploy/issues/27))
+**Complexity**: Standard
+**Selected Approach**: A안 (직접 구현) + application-design Minimal 포함 (하이브리드)
 
 ## Approaches Considered
 
-### A안 (권장) — 점진적 TDD — 불변식 우선 Strangler
-
+### A안) 직접 구현 (권장)
 - **포함 스테이지**: code-generation, build-and-test
-- **깊이**: code-generation=Standard (TDD strict), build-and-test=Standard
-- **적합**: Brownfield + 기존 패턴 재현 작업. BL-015 Protocol 재사용이라 신규 설계 도출 가치 낮음. F-33 요구사항이 구현 위치(파일 경로/라인)까지 구조화되어 application-design 단계가 중복 위험
-- **주의**: Protocol 확장(F-24) 적용 시점을 Go 구현 착수 *전*에 배치해야 기존 JVM 테스트가 한 번에 호환 레이어로 전환됨. 마이그레이션을 Go 구현과 섞으면 회귀 원인 특정 곤란
+- **스킵 스테이지**: application-design, units-generation
+- **깊이**: Standard (TDD 사이클 + Codex 외부 리뷰 게이트)
+- **적합**:
+  - 단일 모듈 내부 확장 (`scripts/stacks/go.py`). 외부 컴포넌트/Protocol 변경 없음
+  - 기존 모범 패턴(`scripts/stacks/jvm.py::_detect_framework_and_version`) 직접 미러링 가능 → 설계 발산 위험 낮음
+  - F-02 "Direct dependency wins" 알고리즘이 requirements 단계에서 이미 충분히 정교화됨 (4단계 분기 + fallback)
+  - BL-014/BL-001 선례에 따라 외부 리뷰 게이트(Codex)가 ambiguity/ReDoS/false-positive를 충분히 잡아냄
+- **주의**:
+  - go.mod `require` 블록 텍스트 파서(F-06a)가 신규 — `(...)` 블록 파싱과 라인 단위 require 두 형식 모두 커버 필수
+  - 정규식 `\b...(?:/v\d+)?\b` 경계 검증 — `github.com/gin-gonic/ginX` 같은 false-positive 회피 가드 테스트 포함
+  - JVM 골든 byte-identical (NFR-4) + Go-generic byte-identical (NFR-5) 회귀 0 보장
 
-#### 실행 순서 (9 Phase, 코드/테스트 페어링)
-
-**Phase 1 — 불변식 안전망 확보 (JVM 골든 락)**
-- NFR-04 (d-jvm) 신규: JVM `deployment.yaml` / `service.yaml` / `serviceaccount.yaml` 골든 스냅샷 테스트 작성 → 이후 refactor 안전망
-- NFR-04 (o): `StackDetectResult(...)` 기존 호출부 호환성 테스트(cmd_candidates 미지정 시 `[]` 기본값)
-- **성공 기준**: 695 + 신규 3종 골든 = 698 passing
-
-**Phase 2 — 타입/예외 확장 (영향 좁은 데이터 구조부터)**
-- F-25: `StackDetectResult.cmd_candidates` 필드 추가 (`field(default_factory=list)`)
-- F-30: `ResourceDefaults.run_as_user` 필드 추가 — JvmStackModule.defaults()에 `run_as_user=1000` 주입
-- F-20 / F-26: `GoDetectionError` + `GoBuildPlanError` 예외 클래스
-- **성공 기준**: 타입 확장 후 698 passing 유지 + 신규 예외 단위 테스트
-
-**Phase 3 — 기존 manifest 하드코딩 제거 (JVM 불변 확인)**
-- F-31: `generate_deployment()` / `generate_statefulset()` runAsUser/runAsGroup/fsGroup 동적화 (`defaults.run_as_user` 기반) — JVM 기존 1000 그대로 렌더
-- F-32: writable_paths 동적화 (JVM 2개 `/tmp`+`/var/log` 유지)
-- **성공 기준**: Phase 1의 JVM 골든 3종 byte-identical 유지 + 695 passing
-
-**Phase 4 — Protocol 확장 (F-24) + 기존 JVM 호출부 전수 마이그레이션**
-- F-24: `scripts/stacks/base.py` `StackModule.build_plan` 시그니처 변경 (`*, inputs: UserInputs`)
-- `JvmStackModule.build_plan` 구현체 시그니처 매칭 (inputs 수신, 내부 무시)
-- 호출부 전수 수정 — 체크리스트 (F-24에 명시):
-  - `scripts/project_analyzer.py` 호출 2곳
-  - `tests/stacks/test_jvm.py` 외 `build_plan(` 호출 tests (grep 전수)
-  - `tests/test_dockerfile_v0_1_1_patches.py` 포함 임시 JVM 인스턴스 호출부
-- NFR-04 (j): JVM build_plan이 inputs 키워드 받아도 기존 골든 동일
-- **성공 기준**: 698 passing + Protocol 확장 완료
-
-**Phase 5 — Analyzer/Pipeline 통합 확장 (F-27)**
-- F-27: `ProjectAnalyzer.analyze(project_dir, *, inputs: UserInputs)` 시그니처 확장
-- `_apply_stack_overrides(detect_result, stack_config)` 헬퍼 추가 (config entrypoint override 적용 지점)
-- `SkillPipeline._analyze_project_step2`에서 `analyzer.analyze(project_dir, inputs=inputs)` 호출 수정
-- probe_plan에 `stack.go.probe.path` override 적용 로직 (Analyzer가 ProbeConfig 결과의 path 치환)
-- F-33: `ConfigLoader`에 `stack.go.entrypoint` / `stack.go.probe.path` 파싱 추가
-- **성공 기준**: 698 passing + Analyzer inputs 체인 검증 테스트 (NFR-04 (k))
-
-**Phase 6 — Go 스택 신규 모듈 구현**
-- F-23: `_DEFAULT_GO_VERSION = "1.22"` 상수
-- F-01~F-10: `scripts/stacks/go.py::GoStackModule` 전체 구현 (Protocol 7 메서드 + ClassVar)
-- F-21: `_parse_go_mod` 헬퍼 (defusedxml 대신 정규식)
-- F-22: `_collect_cmd_candidates` 헬퍼 (symlink escape 방어)
-- F-28: `_build_multi_cmd_error_message` 헬퍼 (상위 10개 + 생략 요약)
-- F-29: `scripts/_shared/text_safety.py::validate_go_entrypoint` 헬퍼 (shell 주입 방어)
-- **TDD 전략**: 각 메서드마다 RED(실패 테스트) → GREEN(최소 구현) → REFACTOR. NFR-04 (a)(b)(c)(e)(f)(g)(h)(i)(n)(p)(q) 케이스 페어링
-- **성공 기준**: 698 + Go 단위 테스트 신규 (예상 15~20개)
-
-**Phase 7 — Dockerfile 템플릿 + 레지스트리 통합**
-- F-11~F-14: `templates/dockerfile/go.tmpl` 작성 (2-stage multi-stage, distroless nonroot)
-- NFR-04 (d): Go Dockerfile 골든 스냅샷
-- F-15: `PipelineDependencies.stack_registry`에 `GoStackModule()` 등록
-- F-16: `ProjectAnalyzer._detect_stack` auto-선택 순회 로직 (JVM 우선 → Go)
-- F-17: 전 스택 detect 실패 시 기존 에러 플로우
-- **성공 기준**: Go 프로젝트 fixture로 orchestrator 실행 → Dockerfile + deployment.yaml 생성 성공
-
-**Phase 8 — 통합 회귀 + 정합성 테스트**
-- NFR-04 (l) / (m): config override 경로 테스트 (entrypoint + probe.path)
-- NFR-04 (r) / (s): UID 정합성 / writable_paths 정합성 (생성된 deployment가 defaults와 일치)
-- 전체 695+신규 테스트 통과, ruff clean, mypy clean (있다면)
-- **성공 기준**: 720+ passing, NFR-EXT-01(JVM 하드코딩 0건) grep 검증
-
-**Phase 9 — 외부 리뷰 게이트**
-- `/codex:review` 또는 `/codex:adversarial-review` 실행 (CONSTRUCTION 완료 후 필수 게이트 — CLAUDE.md 규칙)
-- 리뷰 P1 이슈 반영 후 PR 생성
-
-#### 불변식 유지 전략 (NFR-02 핵심)
-
-- **Phase 1**에서 JVM 매니페스트 골든을 *먼저* 락다운 → 이후 Phase 3/4/5의 refactor가 골든 위반하면 즉시 fail
-- Phase 3/4/5는 **JVM 영향만 있는 단계** → 각 phase 완료 후 `pytest` 전체 실행으로 JVM 골든 불변 확인
-- Phase 6~7의 Go 구현은 JVM과 격리된 신규 파일 (scripts/stacks/go.py, templates/dockerfile/go.tmpl) → 교차 영향 최소
-
-#### Protocol 확장(F-24) 적용 시점
-
-- **Phase 4에 단일 PR로 원자적 적용** — Go 구현(Phase 6) 직전
-- Go 구현부터 시작하면 Protocol 확장 없이 build_plan 호출 불가 → 순서 역전 금지
-- 기존 JVM 테스트 마이그레이션도 Phase 4에 포함 → 회귀 원인 특정 용이
-
-#### 위험 요소
-
-- **R1**: Phase 4 Protocol 변경 시 `build_plan(` 호출부 누락 → mypy/런타임 에러. 완화: F-24 체크리스트 grep 전수 조사
-- **R2**: Phase 3 manifest 하드코딩 제거 시 StatefulSet(BL-003)도 동반 변경 — 골든 스냅샷 있음에도 간과 가능. 완화: generate_statefulset도 NFR-04 (r)(s)에 포함
-- **R3**: ConfigLoader stack.go 파싱이 기존 stack.forced_stack와 충돌 가능성. 완화: A-07 + F-33 명시로 네임스페이스 분리
-- **R4**: distroless:nonroot 이미지 pull 실패 (네트워크) → 통합 테스트 환경 의존. 완화: 단위 테스트는 이미지 실행 없이 Dockerfile 문자열 렌더만 검증
-
-#### PR 전략
-
-- **PR 1**: Phase 1~5 (불변식 refactor — JVM 영향만)
-- **PR 2**: Phase 6~8 (Go 스택 신규 + 통합)
-- 두 PR 분리 이유: 리뷰 단위 명확화 + 불변식 위반 원인 격리
+### B안) 안전 + 경량 설계 검증
+- **포함 스테이지**: application-design (Minimal), code-generation, build-and-test
+- **스킵 스테이지**: units-generation
+- **깊이**: Standard (application-design은 Minimal)
+- **적합**:
+  - F-02 알고리즘(direct vs sum 우선순위 + 복수 매치 fallback)을 별도 design 문서로 검토하고 싶을 때
+  - BL-006 Python 스택에서 본 패턴을 재활용할 예정이므로 설계 문서가 후속 작업의 참고 자료가 될 수 있음
+- **주의**:
+  - 설계 표면이 작아(단일 헬퍼 + 단일 메서드 분기) 별도 design 문서의 비용 대비 가치 낮음
+  - requirements.md F-02/F-06a가 이미 알고리즘 4단계까지 명세하고 있어 application-design Minimal이 중복 우려
 
 ---
 
-### B안 — 설계 우선 — application-design 포함
+## 권장: A안 (직접 구현)
 
-- **포함 스테이지**: application-design, code-generation, build-and-test
-- **깊이**: application-design=Standard, code-generation=Standard, build-and-test=Standard
-- **적합**: Protocol 확장의 파급 효과를 ADR/diagram으로 사전 문서화하고 싶을 때. Python/React 추가 스택 확장 로드맵을 이번 기회에 명시화
-- **주의**: F-33 요구사항이 이미 구현 위치(파일:라인)까지 구조화돼 application-design 산출물과 중복 가능성. 문서 작성 overhead가 실제 구현 시간을 초과할 수 있음
+**근거**:
+1. **변경 표면이 작음** — 단일 파일(`scripts/stacks/go.py`) 내부에 헬퍼 1개 + 정규식 3개 + 파서 1개 + 메서드 2개 분기 수정. 신규 외부 인터페이스 0건.
+2. **기존 모범 패턴 존재** — `scripts/stacks/jvm.py`의 `_detect_framework_and_version` + `_SPRING_BOOT_RE` 패턴을 직접 미러링. 설계 발산 위험 낮음.
+3. **Requirements가 이미 정교함** — F-02의 "Direct dependency wins" 4단계 알고리즘 + F-06a 파서 명세 + NFR-6 테스트 13건이 application-design 산출물 수준의 정밀도를 이미 보유.
+4. **외부 리뷰 게이트로 충분** — NFR-7의 Codex review 1차 + 필요 시 council 1라운드가 ambiguity/ReDoS/false-positive 검증을 담당. BL-001 Phase 9 R2 사례에서 이미 검증된 운영 방식.
 
-#### 추가 스테이지
+---
 
-- **application-design (Standard)**: `StackModule Protocol v2` 구조도 + `ProjectAnalyzer inputs 흐름 시퀀스` + Python/React 스택 확장 선언 — 산출물 `application-design.md`
-- 이후 Phase 1~9는 A안과 동일
+## Workflow Visualization (A안 + application-design Minimal 하이브리드)
 
-#### 장단점
+```
+INCEPTION
+  ✅ workspace-detection — Brownfield delta (BL-001/018/019/020/021/022 반영)
+  ✅ complexity-declaration — Standard
+  ✅ requirements-analysis — F:15, NFR:7, A:7, OQ:0
+  ⏭ pre-planning — 스킵 (Standard C: 바로 워크플로우)
+  ✅ workflow-planning — 현재 단계
+  ➡ application-design [Minimal] — 컴포넌트 LIST 수준 (단일 모듈 내부 헬퍼/메서드 책임 분리만 확인)
 
-- **장점**: Protocol 진화 방향(BL-017, 미래 Python/React) 문서화로 설계 안정성 ↑. 신규 기여자 onboarding에 도움
-- **단점**: requirements.md F-번호와 중복, ~2시간 추가 overhead, 이 규모의 단일 스택 추가엔 과함
+CONSTRUCTION
+  ⏭ units-generation — 스킵 (A안 기준, 단일 unit)
+  ➡ code-generation [Standard] — TDD 사이클, phase 분해
+  ➡ build-and-test [Standard] — 골든 회귀 + 외부 리뷰 게이트
+```
 
 ---
 
 ## Approved Stages
 
 ### PRE-PLANNING
-- user-stories: skipped — BL-001은 단일 actor(Go 배포자)로 수렴, F-번호가 기능 측면 충분 구조화
-- nfr-requirements: skipped — requirements.md 내 NFR 8개로 충분, 추가 항목 부재
+- **user-stories**: skipped — Standard C 선택 (내부 헬퍼 확장, 외부 사용자 페르소나/시나리오 추가 가치 낮음)
+- **nfr-requirements**: skipped — Standard C 선택 (requirements.md NFR-1~7이 이미 측정 가능 기준 포함)
 
 ### CONSTRUCTION
-- application-design: skipped — Brownfield + 기존 패턴 재현, 신규 설계 없음, F-33 구현 위치까지 구조화됨
-- units-generation: skipped — 단일 기능 추가(Go 스택 모듈), 유닛 분해 가치 낮음
-- code-generation: included — always
-- build-and-test: included — always
+- **application-design**: included (Minimal) — 사용자 선택. 단일 모듈 내부지만 헬퍼/파서/메서드 책임 분리를 컴포넌트 LIST 수준으로 명시. BL-006 Python 후속에 참고 자료로도 활용 가능
+- **units-generation**: skipped — 단일 unit(`scripts/stacks/go.py`)으로 충분, 작업 분해는 phase로 처리
+- **code-generation**: included — always
+- **build-and-test**: included — always
 
 ## Stage Depths
-- application-design: skipped
-- units-generation: skipped
-- code-generation: Standard (TDD protocol 적용 — _shared/tdd-protocol.md). Phase 1~9 순서대로 RED-GREEN-REFACTOR
-- build-and-test: Standard
 
-## Workflow Visualization (A안 기준)
+- **application-design**: Minimal (LIST 수준 컴포넌트 책임 분리 — DETAIL 인터페이스 명세는 requirements.md F-02/F-06a로 충분)
+- **units-generation**: skipped (n/a)
+- **code-generation**: Standard (TDD protocol 적용 — `_shared/tdd-protocol.md`)
+- **build-and-test**: Standard (JVM/Go-generic 골든 byte-identical 회귀 가드 + Codex 외부 리뷰 게이트)
 
-```
-INCEPTION
-  ✅ workspace-detection (완료)
-  ✅ requirements-analysis (완료, Codex P1+P2 반영)
-  ⏭ pre-planning (스킵 — Standard C)
-  🔵 workflow-planning (현재)
-  ⏭ application-design — 스킵 (A안 기준)
+## Phase 제안 (code-generation 내부)
 
-CONSTRUCTION
-  ⏭ units-generation — 스킵 (A안 기준)
-  ➡ code-generation [Standard, TDD strict]
-     ├─ Phase 1: JVM 골든 락 (안전망)
-     ├─ Phase 2: 타입/예외 확장
-     ├─ Phase 3: manifest 하드코딩 제거
-     ├─ Phase 4: Protocol F-24 확장 + JVM 호출부 마이그레이션
-     ├─ Phase 5: Analyzer/Pipeline 통합
-     ├─ Phase 6: GoStackModule 구현
-     ├─ Phase 7: Dockerfile 템플릿 + 레지스트리
-     └─ Phase 8: 통합 회귀
-  ➡ build-and-test [Standard]
-     └─ Phase 9: 외부 리뷰 게이트 (/codex:review)
+A안 채택 시 code-generation을 아래 phase로 분해 권장 (BL-001 사례 미러링):
 
-FINISHING
-  ➡ aidlc-finishing-a-development-branch — PR 2건 생성 (PR 1: Phase 1-5 / PR 2: Phase 6-8)
-```
+| Phase | 범위 | TDD 가드 | 산출물 |
+|-------|------|---------|--------|
+| **P1** | `_parse_go_mod_require` 파서 + 정규식 3종(`_GIN_RE`/`_ECHO_RE`/`_FIBER_RE`) | 파서 라인 형식 2종 + 정규식 매칭/비매칭 + 메이저 버전 호환 | go.py 헬퍼 추가, 단독 테스트 6건 |
+| **P2** | `_detect_go_framework` "Direct dependency wins" 4단계 알고리즘 | direct 단일/복수, sum 단일/복수, 파일 없음, symlink escape | 헬퍼 통합, 단위 테스트 6건 |
+| **P3** | `GoStackModule.detect/probe_plan` 통합 + framework별 분기 | 4 framework × probe_plan 분기 4건 + Go-generic byte-identical 회귀 | 메서드 수정 |
+| **P4** | JVM 골든 byte-identical 회귀 검증 + E2E 회귀 | 기존 골든 4종 + Go 샘플 E2E 회귀 | 검증 완료, 외부 리뷰 게이트 진입 |
+
+총 신규 테스트: 13건+ (NFR-6 충족).
+
+## Branch / Worktree
+
+- 권장 브랜치명: `feature/go-framework-probe-detection`
+- 베이스: `main` @ `bc1f9b8` (현재 HEAD, 897 tests passing)
+- 워크트리 경로: `.worktrees/feature-go-framework-probe-detection`
