@@ -10,8 +10,9 @@
 
 | 컴포넌트 | 책임 | 타입 |
 |---------|------|------|
-| `_parse_go_mod_require` | `go.mod` content를 받아 `require` 블록의 direct dependency 모듈 경로 집합을 반환. 라인 단위 텍스트 파싱(`(...)` 블록 + 단일 라인 두 형식), `//` 주석 제거, 파싱 실패 라인 skip. 검증/네트워크 호출 없음. | Util |
-| `_GIN_RE` / `_ECHO_RE` / `_FIBER_RE` | 프레임워크별 모듈 경로 정규식 단일 출처. word boundary(`\b`) + non-capturing major version(`(?:/v\d+)?`). ReDoS-free. | Util (모듈 상수) |
+| `_parse_go_mod_require` | `go.mod` content를 받아 `require` 블록의 **direct** dependency 모듈 경로 집합을 반환. 라인 단위 텍스트 파싱(`(...)` 블록 + 단일 라인 두 형식), `//` 주석 제거, **`// indirect` 마커 라인은 제외**(F-02 정합, Codex P2-1), 파싱 실패 라인 skip. 검증/네트워크 호출 없음. | Util |
+| `_GIN_RE` / `_ECHO_RE` / `_FIBER_RE` | 프레임워크별 모듈 경로 정규식 단일 출처. word boundary(`\b`) + non-capturing major version(`(?:/v\d+)?`) + 후행 `(?![\w/-])` negative lookahead로 path boundary 정밀화 (Codex P2-2: `echo-contrib`/`echo/middleware` 등 false-match 방어). ReDoS-free. | Util (모듈 상수) |
+| `_INDIRECT_MARKER_RE` / `_is_indirect_line` | Go 표준 `// indirect` 마커 식별 헬퍼. transitive 의존성을 direct 집합에서 제외하는 단일 출처. | Util |
 | `_detect_go_framework` | "Direct dependency wins" 4단계 감지 알고리즘 실행. `go.mod` direct evidence → `go.sum` 약한 evidence → 복수 매치 시 `go-generic` fallback. 파일 I/O는 hint level(에러 raise 금지). symlink escape 가드. | Util |
 | `GoStackModule.detect` (수정) | 기존 `StackDetectResult` 생성 책임 유지. `framework` 필드 결정 로직만 `_detect_go_framework` 위임으로 전환 (하드코딩 `"go-generic"` 제거). | Service (StackModule Protocol) |
 | `GoStackModule.probe_plan` (수정) | `detect_result.framework` 값으로 분기: gin/echo/fiber → `/health`, go-generic(기타) → `/healthz` (BL-001 기본값 유지). port 결정 경로 변경 없음. | Service (StackModule Protocol) |

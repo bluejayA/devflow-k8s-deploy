@@ -501,6 +501,23 @@ class TestFrameworkRegex:
         # fiber-fork 패턴
         assert _FIBER_RE.search("github.com/gofiber/fiberx v1.0.0") is None
 
+    def test_framework_regex_no_false_positive_prefix_modules(self) -> None:
+        # Codex P2-2: `echo-contrib`, `gin-extras`, `fiber-utils` 같이 hyphen으로
+        # 연결된 prefix 모듈은 framework 본체가 아니므로 매칭하면 안 됨.
+        # `\b`만으로는 `-`를 boundary로 인정하므로 negative lookahead 필요.
+        assert _ECHO_RE.search("github.com/labstack/echo-contrib v0.1.0") is None
+        assert _GIN_RE.search("github.com/gin-gonic/gin-extras v0.1.0") is None
+        assert _FIBER_RE.search("github.com/gofiber/fiber-utils v0.1.0") is None
+
+    def test_framework_regex_matches_with_path_continuation_only_for_version(
+        self,
+    ) -> None:
+        # 정상 매칭 보존: 모듈 본체 또는 `/vN` 메이저 버전 suffix만 인정.
+        assert _ECHO_RE.search("github.com/labstack/echo v3.3.10") is not None
+        assert _ECHO_RE.search("github.com/labstack/echo/v4 v4.11.4") is not None
+        # 모듈 내부 sub-path는 거부 (framework 본체가 아님)
+        assert _ECHO_RE.search("github.com/labstack/echo/middleware v0.1.0") is None
+
 
 class TestParseGoModRequire:
     """F-06a: go.mod `require` 블록 텍스트 파서.
@@ -537,18 +554,46 @@ require github.com/gofiber/fiber/v2 v2.52.0
         assert "github.com/gofiber/fiber/v2" in deps
 
     def test_parse_go_mod_strips_inline_comments(self) -> None:
+        # `//` 끝주석은 module path 매칭에 영향 없음 (단, indirect 마커는 별도 처리)
         content = """module example.com/baz
 
 go 1.22
 
 require (
-    github.com/gin-gonic/gin v1.9.1 // direct
+    github.com/gin-gonic/gin v1.9.1 // some annotation
+)
+"""
+        deps = _parse_go_mod_require(content)
+        assert "github.com/gin-gonic/gin" in deps
+
+    def test_parse_go_mod_skips_indirect_dependencies(self) -> None:
+        # F-02 "Direct dependency wins": `// indirect` 마커 라인은 transitive 의존성이라
+        # direct가 아님. Codex P2-1 회귀 가드.
+        content = """module example.com/app
+
+go 1.22
+
+require (
+    github.com/gin-gonic/gin v1.9.1
+    github.com/labstack/echo/v4 v4.11.4 // indirect
     github.com/davecgh/go-spew v1.1.1 // indirect
 )
 """
         deps = _parse_go_mod_require(content)
         assert "github.com/gin-gonic/gin" in deps
-        assert "github.com/davecgh/go-spew" in deps
+        assert "github.com/labstack/echo/v4" not in deps
+        assert "github.com/davecgh/go-spew" not in deps
+
+    def test_parse_go_mod_skips_indirect_in_single_line_form(self) -> None:
+        # 단일 라인 require도 indirect 마커 처리
+        content = """module example.com/app
+
+go 1.22
+
+require github.com/labstack/echo/v4 v4.11.4 // indirect
+"""
+        deps = _parse_go_mod_require(content)
+        assert "github.com/labstack/echo/v4" not in deps
 
     def test_parse_go_mod_skips_malformed_lines(self) -> None:
         # 잘못된 라인 (모듈 경로 누락, 빈 라인, 마구잡이 문자열)은 skip
@@ -628,6 +673,35 @@ class TestDetectFrameworkDirectSingle:
             go_sum="",
         )
         assert _detect_go_framework(tmp_path) == "fiber"
+
+    def test_detect_framework_prefix_module_only_returns_generic(
+        self, tmp_path: Path
+    ) -> None:
+        # Codex P2-2: echo-contrib만 의존 → echo framework로 잘못 분류되면 안 됨.
+        # 어떤 framework도 감지되지 않아야 하므로 go-generic 폴백.
+        go_mod = _BASE_GO_MOD.format(
+            deps="    github.com/labstack/echo-contrib v0.1.0"
+        )
+        _write_go_files(tmp_path, go_mod=go_mod, go_sum="")
+        assert _detect_go_framework(tmp_path) == "go-generic"
+
+    def test_detect_framework_direct_gin_with_indirect_echo(
+        self, tmp_path: Path
+    ) -> None:
+        # Codex P2-1: gin direct + echo indirect → direct는 gin만 → "gin" 채택.
+        # 기존 코드는 indirect까지 direct 집합에 포함하여 multiple-match → go-generic으로
+        # 오분류했다. F-02 "Direct dependency wins"의 정확한 의미 회귀 가드.
+        go_mod = """module example.com/app
+
+go 1.22
+
+require (
+    github.com/gin-gonic/gin v1.9.1
+    github.com/labstack/echo/v4 v4.11.4 // indirect
+)
+"""
+        _write_go_files(tmp_path, go_mod=go_mod, go_sum="")
+        assert _detect_go_framework(tmp_path) == "gin"
 
 
 class TestDetectFrameworkFallback:

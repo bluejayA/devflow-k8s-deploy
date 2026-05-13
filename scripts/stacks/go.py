@@ -59,14 +59,23 @@ _GO_VERSION_RE = re.compile(r"^go\s+(\d+(?:\.\d+){0,2})", re.MULTILINE)
 # BL-017 F-03: Go HTTP framework 식별 정규식. word boundary(\b) + non-capturing
 # major version suffix(?:/v\d+)?로 echo/v3·v4, fiber/v2·v3 등 모든 메이저 호환.
 # ReDoS-free: 고정 어절 매칭 + 정량 wildcard 없음.
-_GIN_RE = re.compile(r"\bgithub\.com/gin-gonic/gin(?:/v\d+)?\b")
-_ECHO_RE = re.compile(r"\bgithub\.com/labstack/echo(?:/v\d+)?\b")
-_FIBER_RE = re.compile(r"\bgithub\.com/gofiber/fiber(?:/v\d+)?\b")
+#
+# 후행 ``(?![\w/-])``는 path boundary negative lookahead — framework 본체 또는
+# ``/vN`` major version suffix 직후에 word/``/``/``-`` 어느 것도 와선 안 된다.
+# 이렇게 하면 ``echo-contrib``, ``gin-extras``(`-` 연결), ``echo/middleware``
+# (sub-path)는 매칭에서 제외되어 framework 본체만 정확히 식별.
+# (Codex P2-2 회귀 가드)
+_GIN_RE = re.compile(r"\bgithub\.com/gin-gonic/gin(?:/v\d+)?(?![\w/-])")
+_ECHO_RE = re.compile(r"\bgithub\.com/labstack/echo(?:/v\d+)?(?![\w/-])")
+_FIBER_RE = re.compile(r"\bgithub\.com/gofiber/fiber(?:/v\d+)?(?![\w/-])")
 
 # BL-017 F-06a: go.mod `require` 블록 파서 보조 정규식
 _REQUIRE_BLOCK_START_RE = re.compile(r"^\s*require\s*\(")
 _REQUIRE_BLOCK_END_RE = re.compile(r"^\s*\)")
 _REQUIRE_SINGLE_LINE_RE = re.compile(r"^\s*require\s+(\S+)\s+\S+")
+
+# Go 표준 `// indirect` 마커 감지 (transitive 의존성 식별, F-02 direct-only).
+_INDIRECT_MARKER_RE = re.compile(r"//\s*indirect\b")
 
 # DNS-1123 subset (UserInputs.app_name 재검증, F-29 (a))
 _DNS_1123_RE = re.compile(r"^[a-z0-9]([-a-z0-9]*[a-z0-9])?$")
@@ -168,15 +177,26 @@ def _looks_like_module_path(value: str) -> bool:
     return "/" in value and "." in value
 
 
+def _is_indirect_line(raw: str) -> bool:
+    """`// indirect` 마커가 있는 go.mod require 라인 식별 (F-02, BL-017).
+
+    Go 표준 출력 형식 ``<module> <version> // indirect``를 감지한다.
+    F-02 "Direct dependency wins"에 따라 indirect 라인은 direct 집합에서 제외.
+    """
+    return _INDIRECT_MARKER_RE.search(raw) is not None
+
+
 def _parse_go_mod_require(content: str) -> set[str]:
-    """go.mod `require` 블록과 단일 라인 require에서 module path 집합 추출 (F-06a).
+    """go.mod `require` 블록과 단일 라인 require에서 **direct** module path 집합 추출 (F-06a).
 
     지원 형식:
       - 블록:  ``require ( ... )`` — 괄호 내부 라인의 첫 토큰
       - 단일:  ``require <module> <version>``
 
     규칙:
-      - ``//`` 이후는 끝주석으로 제거 (예: ``// indirect``).
+      - ``//`` 이후는 끝주석으로 제거.
+      - ``// indirect`` 마커 라인은 transitive 의존성이므로 skip (F-02 "Direct
+        dependency wins"). Codex P2-1 회귀 가드.
       - module path 휴리스틱(`.` + `/` 포함) 미통과 라인은 silent skip.
       - 텍스트 파싱만 수행, 검증/네트워크 호출 없음.
 
@@ -189,6 +209,7 @@ def _parse_go_mod_require(content: str) -> set[str]:
     deps: set[str] = set()
     in_block = False
     for raw in content.splitlines():
+        indirect = _is_indirect_line(raw)
         line = raw.split("//", 1)[0]
         stripped = line.strip()
         if not stripped:
@@ -197,6 +218,8 @@ def _parse_go_mod_require(content: str) -> set[str]:
         if in_block:
             if _REQUIRE_BLOCK_END_RE.match(line):
                 in_block = False
+                continue
+            if indirect:
                 continue
             tokens = stripped.split()
             if len(tokens) >= 2 and _looks_like_module_path(tokens[0]):
@@ -209,6 +232,8 @@ def _parse_go_mod_require(content: str) -> set[str]:
 
         single = _REQUIRE_SINGLE_LINE_RE.match(line)
         if single:
+            if indirect:
+                continue
             module_path = single.group(1)
             if _looks_like_module_path(module_path):
                 deps.add(module_path)
