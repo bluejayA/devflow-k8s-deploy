@@ -15,6 +15,7 @@
 from __future__ import annotations
 
 import os
+import re
 from pathlib import Path
 
 import pytest
@@ -27,10 +28,15 @@ from scripts._shared.types import (
     UserInputs,
 )
 from scripts.stacks.go import (
+    _ECHO_RE,
+    _FIBER_RE,
+    _GIN_RE,
     GoStackModule,
     _build_multi_cmd_error_message,
     _collect_cmd_candidates,
+    _detect_go_framework,
     _parse_go_mod,
+    _parse_go_mod_require,
 )
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -451,3 +457,309 @@ class TestProtocolCompliance:
     def test_class_vars(self) -> None:
         assert GoStackModule.name == "go"
         assert GoStackModule.template_name == "go"
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# BL-017 — Go 프레임워크 probe 자동 감지 (gin/echo/fiber)
+# F-01~F-14, F-06a, NFR-1~NFR-7, A-01~A-07
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+class TestFrameworkRegex:
+    """F-03: word boundary + non-capturing major version 정규식."""
+
+    @pytest.mark.parametrize(
+        "regex,line",
+        [
+            (_GIN_RE, "github.com/gin-gonic/gin v1.9.1"),
+            (_ECHO_RE, "github.com/labstack/echo v3.3.10"),
+            (_FIBER_RE, "github.com/gofiber/fiber v1.14.6"),
+        ],
+    )
+    def test_framework_regex_matches_root_module(
+        self, regex: re.Pattern[str], line: str
+    ) -> None:
+        assert regex.search(line) is not None
+
+    @pytest.mark.parametrize(
+        "regex,line",
+        [
+            (_ECHO_RE, "github.com/labstack/echo/v4 v4.11.4"),
+            (_FIBER_RE, "github.com/gofiber/fiber/v2 v2.52.0"),
+        ],
+    )
+    def test_framework_regex_matches_major_versions(
+        self, regex: re.Pattern[str], line: str
+    ) -> None:
+        assert regex.search(line) is not None
+
+    def test_framework_regex_no_false_positive_partial_word(self) -> None:
+        # `gin-gonic/ginX` 같은 길어진 모듈명에 대해 false-positive 방어 (\b 경계)
+        assert _GIN_RE.search("github.com/gin-gonic/ginX v1.0.0") is None
+        # echo-fork 패턴
+        assert _ECHO_RE.search("github.com/labstack/echox v1.0.0") is None
+        # fiber-fork 패턴
+        assert _FIBER_RE.search("github.com/gofiber/fiberx v1.0.0") is None
+
+
+class TestParseGoModRequire:
+    """F-06a: go.mod `require` 블록 텍스트 파서.
+
+    - `require ( ... )` 블록 + 단일 라인 `require <module> <ver>` 두 형식 지원
+    - `//` 주석 제거
+    - 파싱 실패 라인은 silent skip (감지는 hint, NFR-3)
+    """
+
+    def test_parse_go_mod_block_form(self) -> None:
+        content = """module example.com/foo
+
+go 1.22
+
+require (
+    github.com/gin-gonic/gin v1.9.1
+    github.com/labstack/echo/v4 v4.11.4
+    github.com/stretchr/testify v1.8.4
+)
+"""
+        deps = _parse_go_mod_require(content)
+        assert "github.com/gin-gonic/gin" in deps
+        assert "github.com/labstack/echo/v4" in deps
+        assert "github.com/stretchr/testify" in deps
+
+    def test_parse_go_mod_single_line_form(self) -> None:
+        content = """module example.com/bar
+
+go 1.22
+
+require github.com/gofiber/fiber/v2 v2.52.0
+"""
+        deps = _parse_go_mod_require(content)
+        assert "github.com/gofiber/fiber/v2" in deps
+
+    def test_parse_go_mod_strips_inline_comments(self) -> None:
+        content = """module example.com/baz
+
+go 1.22
+
+require (
+    github.com/gin-gonic/gin v1.9.1 // direct
+    github.com/davecgh/go-spew v1.1.1 // indirect
+)
+"""
+        deps = _parse_go_mod_require(content)
+        assert "github.com/gin-gonic/gin" in deps
+        assert "github.com/davecgh/go-spew" in deps
+
+    def test_parse_go_mod_skips_malformed_lines(self) -> None:
+        # 잘못된 라인 (모듈 경로 누락, 빈 라인, 마구잡이 문자열)은 skip
+        # 정상 라인은 정상 파싱되어야 함
+        content = """module example.com/qux
+
+go 1.22
+
+require (
+    github.com/gin-gonic/gin v1.9.1
+    @@@bad-line@@@
+
+    onlymodulepath
+)
+"""
+        deps = _parse_go_mod_require(content)
+        assert "github.com/gin-gonic/gin" in deps
+        # malformed 라인은 결과에 포함되지 않음
+        assert "@@@bad-line@@@" not in deps
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# BL-017 — _detect_go_framework (F-02 "Direct dependency wins" 4단계)
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+def _write_go_files(
+    project_dir: Path,
+    *,
+    go_mod: str | None = None,
+    go_sum: str | None = None,
+) -> None:
+    """테스트 픽스처: go.mod / go.sum 텍스트를 project_dir에 작성 (A-06)."""
+    if go_mod is not None:
+        (project_dir / "go.mod").write_text(go_mod)
+    if go_sum is not None:
+        (project_dir / "go.sum").write_text(go_sum)
+
+
+_BASE_GO_MOD = """module example.com/app
+
+go 1.22
+
+require (
+{deps}
+)
+"""
+
+
+class TestDetectFrameworkDirectSingle:
+    """F-02 단계 1·2: go.mod direct 단일 매치 → 해당 framework 채택."""
+
+    def test_detect_framework_direct_gin_single(self, tmp_path: Path) -> None:
+        _write_go_files(
+            tmp_path,
+            go_mod=_BASE_GO_MOD.format(deps="    github.com/gin-gonic/gin v1.9.1"),
+            go_sum="",
+        )
+        assert _detect_go_framework(tmp_path) == "gin"
+
+    def test_detect_framework_direct_echo_single(self, tmp_path: Path) -> None:
+        _write_go_files(
+            tmp_path,
+            go_mod=_BASE_GO_MOD.format(
+                deps="    github.com/labstack/echo/v4 v4.11.4"
+            ),
+            go_sum="",
+        )
+        assert _detect_go_framework(tmp_path) == "echo"
+
+    def test_detect_framework_direct_fiber_single(self, tmp_path: Path) -> None:
+        _write_go_files(
+            tmp_path,
+            go_mod=_BASE_GO_MOD.format(
+                deps="    github.com/gofiber/fiber/v2 v2.52.0"
+            ),
+            go_sum="",
+        )
+        assert _detect_go_framework(tmp_path) == "fiber"
+
+
+class TestDetectFrameworkFallback:
+    """F-02 단계 3·4: direct 복수 또는 sum 단일/복수 폴백."""
+
+    def test_detect_framework_direct_multiple_falls_back_to_generic(
+        self, tmp_path: Path
+    ) -> None:
+        # gin + echo 동시 direct → 고정 순서 억지 선택 금지 → go-generic
+        deps = (
+            "    github.com/gin-gonic/gin v1.9.1\n"
+            "    github.com/labstack/echo/v4 v4.11.4"
+        )
+        _write_go_files(tmp_path, go_mod=_BASE_GO_MOD.format(deps=deps), go_sum="")
+        assert _detect_go_framework(tmp_path) == "go-generic"
+
+    def test_detect_framework_sum_only_single_match(self, tmp_path: Path) -> None:
+        # direct에 framework 없음 + go.sum에 gin만 transitive → 약한 evidence로 채택
+        go_mod = _BASE_GO_MOD.format(
+            deps="    github.com/stretchr/testify v1.8.4"
+        )
+        go_sum = (
+            "github.com/gin-gonic/gin v1.9.1 h1:abcdef\n"
+            "github.com/gin-gonic/gin v1.9.1/go.mod h1:fedcba\n"
+            "github.com/stretchr/testify v1.8.4 h1:xyz\n"
+        )
+        _write_go_files(tmp_path, go_mod=go_mod, go_sum=go_sum)
+        assert _detect_go_framework(tmp_path) == "gin"
+
+    def test_detect_framework_sum_multiple_falls_back_to_generic(
+        self, tmp_path: Path
+    ) -> None:
+        # direct 없음 + go.sum에 gin + echo 동시 → go-generic
+        go_mod = _BASE_GO_MOD.format(
+            deps="    github.com/stretchr/testify v1.8.4"
+        )
+        go_sum = (
+            "github.com/gin-gonic/gin v1.9.1 h1:abc\n"
+            "github.com/labstack/echo/v4 v4.11.4 h1:def\n"
+        )
+        _write_go_files(tmp_path, go_mod=go_mod, go_sum=go_sum)
+        assert _detect_go_framework(tmp_path) == "go-generic"
+
+
+class TestDetectFrameworkSafeFallback:
+    """F-04/F-06: 파일 없음, symlink escape 등 모든 실패는 안전 폴백."""
+
+    def test_detect_framework_no_go_mod_returns_generic(self, tmp_path: Path) -> None:
+        # go.mod 자체가 없어도 raise 없이 go-generic 반환 (NFR-3)
+        assert _detect_go_framework(tmp_path) == "go-generic"
+
+    def test_detect_framework_no_go_sum_uses_direct_or_generic(
+        self, tmp_path: Path
+    ) -> None:
+        # go.sum 부재 → direct만 사용. direct에 gin → "gin"
+        _write_go_files(
+            tmp_path,
+            go_mod=_BASE_GO_MOD.format(deps="    github.com/gin-gonic/gin v1.9.1"),
+            go_sum=None,  # 파일 자체 생성 안 함
+        )
+        assert _detect_go_framework(tmp_path) == "gin"
+
+    def test_detect_framework_symlink_escape_ignored(self, tmp_path: Path) -> None:
+        # tmp_path 밖의 외부 go.mod를 symlink로 가리키면 is_within 가드로 무시 → "go-generic"
+        outside = tmp_path.parent / "outside_go_mod_target.mod"
+        outside.write_text(
+            _BASE_GO_MOD.format(deps="    github.com/gin-gonic/gin v1.9.1")
+        )
+        try:
+            (tmp_path / "go.mod").symlink_to(outside)
+            assert _detect_go_framework(tmp_path) == "go-generic"
+        finally:
+            outside.unlink(missing_ok=True)
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# BL-017 — GoStackModule.detect() / probe_plan() framework 통합
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+class TestGoStackModuleDetectFramework:
+    """F-05: detect()가 _detect_go_framework 결과를 framework 필드에 반영."""
+
+    def test_detect_returns_detected_framework_gin(self, tmp_path: Path) -> None:
+        _write_go_files(
+            tmp_path,
+            go_mod=_BASE_GO_MOD.format(deps="    github.com/gin-gonic/gin v1.9.1"),
+            go_sum="",
+        )
+        # 루트 main.go도 함께 (BL-001 detect 정상 동작 위해)
+        (tmp_path / "main.go").write_text("package main\n")
+
+        result = GoStackModule().detect(tmp_path)
+        assert result is not None
+        assert result.framework == "gin"
+
+    def test_detect_returns_go_generic_when_no_framework(self, tmp_path: Path) -> None:
+        # framework 의존성 없는 일반 Go 프로젝트 — BL-001 기본 동작 byte-identical
+        _write_go_files(
+            tmp_path,
+            go_mod=_BASE_GO_MOD.format(deps="    github.com/stretchr/testify v1.8.4"),
+            go_sum="",
+        )
+        (tmp_path / "main.go").write_text("package main\n")
+
+        result = GoStackModule().detect(tmp_path)
+        assert result is not None
+        assert result.framework == "go-generic"
+
+
+class TestProbePlanFrameworkBranching:
+    """F-07: probe_plan은 framework별 헬스 경로 분기.
+
+    - gin/echo/fiber → /health (관용)
+    - go-generic / 기타 → /healthz (BL-001 baseline 불변)
+    """
+
+    @pytest.mark.parametrize("framework", ["gin", "echo", "fiber"])
+    def test_probe_plan_framework_returns_health(self, framework: str) -> None:
+        detect = StackDetectResult(
+            port=8080, entrypoint=".", framework=framework, version="1.22"
+        )
+        cfg = GoStackModule().probe_plan(detect)
+        assert cfg.liveness.path == "/health"
+        assert cfg.readiness.path == "/health"
+        assert cfg.liveness.port == 8080
+
+    def test_probe_plan_generic_returns_healthz_unchanged(self) -> None:
+        # BL-001 baseline byte-identical (NFR-5)
+        detect = StackDetectResult(
+            port=8080, entrypoint=".", framework="go-generic", version="1.22"
+        )
+        cfg = GoStackModule().probe_plan(detect)
+        assert cfg.liveness.path == "/healthz"
+        assert cfg.readiness.path == "/healthz"
