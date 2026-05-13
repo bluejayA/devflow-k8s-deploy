@@ -1,6 +1,6 @@
 {
   "name": "devflow-k8s-deploy",
-  "version": "0.2.0",
+  "version": "0.5.0",
   "description": "Kubernetes deployment preparation skill — Dockerfile + k8s manifest generation (create-only, no deploy).",
   "skills": "./skills"
 }
