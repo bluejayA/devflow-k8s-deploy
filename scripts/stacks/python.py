@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import re
 import tomllib
+from dataclasses import dataclass
 from pathlib import Path
 from typing import ClassVar
 
@@ -46,6 +47,13 @@ _APP_USER_GID = 10001
 
 # F-18: /health 경로를 채택하는 framework 집합 (version-agnostic).
 _HEALTH_FRAMEWORKS: frozenset[str] = frozenset({"django", "flask", "fastapi"})
+
+# F-20-1/F-22: framework별 추론 서버 패키지 (dependency-conservative).
+_SERVER_PKG: dict[str, str] = {
+    "django": "gunicorn",
+    "flask": "gunicorn",
+    "fastapi": "uvicorn",
+}
 
 _BUILDER_IMAGE_TEMPLATE = "ghcr.io/astral-sh/uv:python{version}-bookworm-slim"
 _RUNNER_IMAGE_TEMPLATE = "python:{version}-slim"
@@ -341,6 +349,150 @@ def _resolve_uv_sync_cmd(project_dir: Path) -> tuple[str, str]:
 
 
 # ──────────────────────────────────────────────────────────────────────────────
+# 서버 entrypoint 휴리스틱 (SD-1) + CMD 자동 생성 (F-20-1)
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+@dataclass(frozen=True)
+class ServerCmdResult:
+    """_detect_server_command 결과 (F-20).
+
+    cmd가 None이면 CMD 자동 생성 실패 — gap_reason에 사유 + 권고 액션을 담는다.
+    requires_pkg는 framework별 추론 서버 패키지(gunicorn/uvicorn) 식별자.
+    """
+
+    cmd: list[str] | None
+    requires_pkg: str | None
+    gap_reason: str | None
+
+
+def _path_within(project_dir: Path, target: Path) -> bool:
+    """target이 존재하고 project_dir 하위인지(symlink escape 방어) 확인."""
+    return target.is_file() and is_within(project_dir, target)
+
+
+def _infer_entrypoint(framework: str, project_dir: Path) -> str | None:
+    """server entrypoint ``<module>:<app>`` 휴리스틱 추론 (SD-1).
+
+    - django: ``manage.py`` 존재 + 1단계 깊이 ``<dir>/wsgi.py`` 후보.
+      0개 → None(src layout 등) / 1개 → ``<dir>.wsgi:application`` /
+      N≥2 → sorted 첫 번째 (결정성, P1-4).
+    - flask/fastapi: ``main.py`` → ``main:app`` 우선, 없으면 ``app.py`` → ``app:app``.
+    - python-generic 및 기타: None (즉시).
+
+    모든 FS 접근은 read-only stat + is_within 가드. write 없음.
+    """
+    if framework == "django":
+        if not _path_within(project_dir, project_dir / "manage.py"):
+            return None
+        candidates = sorted(
+            entry.name
+            for entry in project_dir.iterdir()
+            if entry.is_dir() and _path_within(project_dir, entry / "wsgi.py")
+        )
+        if not candidates:
+            return None
+        return f"{candidates[0]}.wsgi:application"
+
+    if framework in ("flask", "fastapi"):
+        if _path_within(project_dir, project_dir / "main.py"):
+            return "main:app"
+        if _path_within(project_dir, project_dir / "app.py"):
+            return "app:app"
+        return None
+
+    return None
+
+
+def _has_direct_package(direct_deps: frozenset[str], pkg_name: str) -> bool:
+    """direct dependency 집합에 패키지가 선언되어 있는지 (PEP 503 boundary).
+
+    framework 정규식과 동일 패턴 — extras 허용 + version operator/EOL boundary로
+    sub-package(예: ``uvicorn-worker``) false-match 차단.
+    """
+    pattern = re.compile(
+        rf"(?im)^\s*{re.escape(pkg_name)}(?:\[[^\]]+\])?\s*(?:[<>=!~]|$)"
+    )
+    return pattern.search("\n".join(sorted(direct_deps))) is not None
+
+
+def _build_default_cmd(framework: str, entrypoint: str) -> list[str]:
+    """framework별 default CMD (exec form list, F-21). 포트 8000 고정."""
+    if framework == "fastapi":
+        return ["uvicorn", entrypoint, "--host", "0.0.0.0", "--port", "8000"]
+    # django / flask → gunicorn
+    return ["gunicorn", entrypoint, "--bind", "0.0.0.0:8000"]
+
+
+def _detect_server_command(
+    framework: str, project_dir: Path, direct_deps: frozenset[str]
+) -> ServerCmdResult:
+    """F-20-1 3조건 통합 — 오직 C1만 CMD 자동 생성 (gap_reason 통일 톤).
+
+    통일 톤: ``"<situation>. Action: <X> AND/OR <Y>."``
+
+    | 케이스 | 조건 | 결과 |
+    |--------|------|------|
+    | C1 | framework 1개 + pkg ✅ + entrypoint ✅ | default CMD |
+    | C2 | framework 1개 + pkg ✅ + entrypoint ❌ | None + gap |
+    | C3 | framework 1개 + pkg ❌ + entrypoint ✅ | None + gap |
+    | C4 | framework 1개 + pkg ❌ + entrypoint ❌ | None + gap |
+    | C5 | python-generic (multi-match) | None + gap |
+    | C6 | python-generic (no match) | None + gap |
+
+    dependency-conservative (F-22-1): 추론 서버 패키지가 direct deps에 없으면
+    자동 install 금지 — cmd=None + override 안내.
+    """
+    pkg = _SERVER_PKG.get(framework)
+    if pkg is None:
+        # C5/C6: python-generic — multi vs no-match 구분 위해 direct_deps 재평가.
+        matches = _match_frameworks("\n".join(sorted(direct_deps)))
+        if len(matches) >= 2:
+            gap = (
+                f"ambiguous framework match: {sorted(matches)}. "
+                "Action: keep only one of them in direct dependencies "
+                "OR set stack.python.entrypoint."
+            )
+        else:
+            gap = (
+                "no supported framework detected (looked for django/flask/fastapi "
+                "in direct dependencies). Action: add a supported framework "
+                "OR set stack.python.entrypoint."
+            )
+        return ServerCmdResult(cmd=None, requires_pkg=None, gap_reason=gap)
+
+    has_pkg = _has_direct_package(direct_deps, pkg)
+    entrypoint = _infer_entrypoint(framework, project_dir)
+    has_entry = entrypoint is not None
+
+    if has_pkg and has_entry:
+        return ServerCmdResult(
+            cmd=_build_default_cmd(framework, entrypoint),
+            requires_pkg=pkg,
+            gap_reason=None,
+        )
+    if has_pkg and not has_entry:
+        gap = (
+            f"{framework}: entrypoint heuristic failed. "
+            "Action: set stack.python.entrypoint to <module>:<your_app_var> "
+            "(e.g. main:app, app:app)."
+        )
+    elif not has_pkg and has_entry:
+        gap = (
+            f"missing inferred server package: {pkg}. "
+            f"Action: add {pkg} to direct dependencies "
+            "AND/OR set stack.python.entrypoint."
+        )
+    else:
+        gap = (
+            f"both server package ({pkg}) and entrypoint missing. "
+            f"Action: add {pkg} to direct dependencies "
+            "AND set stack.python.entrypoint to <module>:<your_app_var>."
+        )
+    return ServerCmdResult(cmd=None, requires_pkg=pkg, gap_reason=gap)
+
+
+# ──────────────────────────────────────────────────────────────────────────────
 # PythonStackModule (StackModule Protocol 구현)
 # ──────────────────────────────────────────────────────────────────────────────
 
@@ -370,11 +522,11 @@ class PythonStackModule:
 
         framework, _direct_deps, _sources = _detect_python_framework(project_dir)
         version = _detect_python_version(project_dir)
+        entrypoint = _infer_entrypoint(framework, project_dir) or ""  # 미결정 sentinel
 
-        # entrypoint는 Phase γ에서 _infer_entrypoint로 통합 (현재 sentinel "").
         return StackDetectResult(
             port=None,  # F-22-1: port 자동화 없음
-            entrypoint="",
+            entrypoint=entrypoint,
             framework=framework,
             version=version,
             build_system=None,
@@ -464,14 +616,16 @@ class PythonStackModule:
             manifest_sources: list[str] = []
             uv_sync_cmd, lockfile_status = "uv sync --no-dev", "non-frozen-warning"
             has_pyproject = has_uvlock = has_requirements = False
+            server = ServerCmdResult(cmd=None, requires_pkg=None, gap_reason=None)
         else:
-            framework, _direct, manifest_sources = _detect_python_framework(
+            framework, direct_deps, manifest_sources = _detect_python_framework(
                 project_dir
             )
             uv_sync_cmd, lockfile_status = _resolve_uv_sync_cmd(project_dir)
             has_pyproject = (project_dir / "pyproject.toml").is_file()
             has_uvlock = (project_dir / "uv.lock").is_file()
             has_requirements = (project_dir / "requirements.txt").is_file()
+            server = _detect_server_command(framework, project_dir, direct_deps)
 
         version = detect_result.version or _DEFAULT_PYTHON_VERSION
         return {
@@ -483,8 +637,8 @@ class PythonStackModule:
             "has_pyproject": has_pyproject,
             "has_uvlock": has_uvlock,
             "has_requirements": has_requirements,
-            "entrypoint_cmd": [],  # Phase γ에서 _detect_server_command 연결
-            "entrypoint_gap": None,
+            "entrypoint_cmd": server.cmd or [],
+            "entrypoint_gap": server.gap_reason,
             "port": inputs.port,
             "app_user_uid": _APP_USER_UID,
             "app_user_gid": _APP_USER_GID,

@@ -27,8 +27,11 @@ from scripts.stacks.python import (
     _FASTAPI_RE,
     _FLASK_RE,
     PythonStackModule,
+    ServerCmdResult,
     _detect_python_framework,
     _detect_python_version,
+    _detect_server_command,
+    _infer_entrypoint,
     _match_frameworks,
     _parse_pyproject_toml,
     _parse_requirements_txt,
@@ -599,3 +602,168 @@ def test_python_tmpl_entrypoint_gap_no_cmd() -> None:
     # 실제 CMD 명령 라인은 없어야 함 (주석의 "CMD generation"은 허용)
     assert "\nCMD " not in out
     assert "entrypoint gap" in out
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Phase γ — 실행 layer (CMD 3조건 + entrypoint 휴리스틱)
+# ══════════════════════════════════════════════════════════════════════════════
+
+# ──────────────────────────────────────────────────────────────────────────────
+# _infer_entrypoint (SD-1)
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+def _make_django(tmp_path: Path, wsgi_dirs: list[str]) -> Path:
+    _write(tmp_path / "manage.py", "# manage\n")
+    for d in wsgi_dirs:
+        _write(tmp_path / d / "wsgi.py", "application = None\n")
+    return tmp_path
+
+
+def test_infer_entrypoint_django_single_wsgi(tmp_path: Path) -> None:
+    _make_django(tmp_path, ["myproj"])
+    assert _infer_entrypoint("django", tmp_path) == "myproj.wsgi:application"
+
+
+def test_infer_entrypoint_django_multi_wsgi_sorted(tmp_path: Path) -> None:
+    _make_django(tmp_path, ["zeta", "alpha"])
+    # sorted 첫 번째 (alpha) 사용 — 결정성
+    assert _infer_entrypoint("django", tmp_path) == "alpha.wsgi:application"
+
+
+def test_infer_entrypoint_django_no_manage_py(tmp_path: Path) -> None:
+    _write(tmp_path / "myproj" / "wsgi.py", "application = None\n")
+    assert _infer_entrypoint("django", tmp_path) is None
+
+
+def test_infer_entrypoint_django_src_layout_none(tmp_path: Path) -> None:
+    # src/myproj/wsgi.py (2단계) — 1단계 탐색 미감지 → None
+    _write(tmp_path / "manage.py", "# manage\n")
+    _write(tmp_path / "src" / "myproj" / "wsgi.py", "application = None\n")
+    assert _infer_entrypoint("django", tmp_path) is None
+
+
+def test_infer_entrypoint_flask_main(tmp_path: Path) -> None:
+    _write(tmp_path / "main.py", "app = object()\n")
+    assert _infer_entrypoint("flask", tmp_path) == "main:app"
+
+
+def test_infer_entrypoint_fastapi_app(tmp_path: Path) -> None:
+    _write(tmp_path / "app.py", "app = object()\n")
+    assert _infer_entrypoint("fastapi", tmp_path) == "app:app"
+
+
+def test_infer_entrypoint_flask_main_priority(tmp_path: Path) -> None:
+    # main.py 우선 (app.py보다)
+    _write(tmp_path / "main.py", "app = object()\n")
+    _write(tmp_path / "app.py", "app = object()\n")
+    assert _infer_entrypoint("flask", tmp_path) == "main:app"
+
+
+def test_infer_entrypoint_none_when_missing(tmp_path: Path) -> None:
+    assert _infer_entrypoint("fastapi", tmp_path) is None
+
+
+def test_infer_entrypoint_generic_none(tmp_path: Path) -> None:
+    _write(tmp_path / "main.py", "app = object()\n")
+    assert _infer_entrypoint("python-generic", tmp_path) is None
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# _detect_server_command (F-20-1 6 케이스 매트릭스)
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+def test_server_cmd_c1_fastapi(tmp_path: Path) -> None:
+    # C1: framework + server pkg + entrypoint 모두 충족 → uvicorn CMD
+    _write(tmp_path / "main.py", "app = object()\n")
+    result = _detect_server_command("fastapi", tmp_path, frozenset({"fastapi", "uvicorn"}))
+    assert isinstance(result, ServerCmdResult)
+    assert result.gap_reason is None
+    assert result.cmd == ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
+
+
+def test_server_cmd_c1_django(tmp_path: Path) -> None:
+    _make_django(tmp_path, ["myproj"])
+    result = _detect_server_command("django", tmp_path, frozenset({"django", "gunicorn"}))
+    assert result.cmd == ["gunicorn", "myproj.wsgi:application", "--bind", "0.0.0.0:8000"]
+
+
+def test_server_cmd_c2_pkg_ok_entry_missing(tmp_path: Path) -> None:
+    # C2: pkg 있음, entrypoint 추론 실패
+    result = _detect_server_command("fastapi", tmp_path, frozenset({"fastapi", "uvicorn"}))
+    assert result.cmd is None
+    assert "entrypoint" in result.gap_reason.lower()
+
+
+def test_server_cmd_c3_pkg_missing_entry_ok(tmp_path: Path) -> None:
+    # C3: entrypoint 있음, server pkg 부재 → 자동 install 금지
+    _write(tmp_path / "main.py", "app = object()\n")
+    result = _detect_server_command("fastapi", tmp_path, frozenset({"fastapi"}))
+    assert result.cmd is None
+    assert "uvicorn" in result.gap_reason
+
+
+def test_server_cmd_c4_both_missing(tmp_path: Path) -> None:
+    result = _detect_server_command("flask", tmp_path, frozenset({"flask"}))
+    assert result.cmd is None
+    assert "gunicorn" in result.gap_reason
+
+
+def test_server_cmd_c5_ambiguous(tmp_path: Path) -> None:
+    result = _detect_server_command(
+        "python-generic", tmp_path, frozenset({"django", "flask"})
+    )
+    assert result.cmd is None
+    assert "ambiguous" in result.gap_reason.lower()
+
+
+def test_server_cmd_c6_no_framework(tmp_path: Path) -> None:
+    result = _detect_server_command("python-generic", tmp_path, frozenset({"requests"}))
+    assert result.cmd is None
+    assert "no supported framework" in result.gap_reason.lower()
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# detect entrypoint 통합 + dockerfile_context entrypoint 연결
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+def test_detect_integrates_entrypoint(tmp_path: Path) -> None:
+    _make_pyproject(tmp_path, '[project]\nname="d"\ndependencies=["fastapi>=0.1"]\n')
+    _write(tmp_path / "main.py", "app = object()\n")
+    result = PythonStackModule().detect(tmp_path)
+    assert result.entrypoint == "main:app"
+
+
+def test_dockerfile_context_entrypoint_cmd_c1(tmp_path: Path) -> None:
+    _make_pyproject(
+        tmp_path,
+        '[project]\nname="d"\ndependencies=["fastapi>=0.1", "uvicorn>=0.20"]\n',
+    )
+    _write(tmp_path / "main.py", "app = object()\n")
+    _write(tmp_path / "uv.lock", "version = 1\n")
+    module = PythonStackModule()
+    detect = module.detect(tmp_path)
+    inputs = _make_user_inputs()
+    plan = module.build_plan(detect, inputs=inputs)
+    ctx = module.dockerfile_context(
+        build_plan=plan, detect_result=detect, inputs=inputs, project_dir=tmp_path
+    )
+    assert ctx["entrypoint_cmd"] == [
+        "uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"
+    ]
+    assert ctx["entrypoint_gap"] is None
+
+
+def test_dockerfile_context_entrypoint_gap_generic(tmp_path: Path) -> None:
+    _make_pyproject(tmp_path, '[project]\nname="d"\ndependencies=["requests"]\n')
+    module = PythonStackModule()
+    detect = module.detect(tmp_path)
+    inputs = _make_user_inputs()
+    plan = module.build_plan(detect, inputs=inputs)
+    ctx = module.dockerfile_context(
+        build_plan=plan, detect_result=detect, inputs=inputs, project_dir=tmp_path
+    )
+    assert ctx["entrypoint_cmd"] == []
+    assert ctx["entrypoint_gap"] is not None
