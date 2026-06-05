@@ -21,14 +21,57 @@ from __future__ import annotations
 import re
 import tomllib
 from pathlib import Path
+from typing import ClassVar
 
 from scripts._shared.fileio import is_within, read_text_limited
+from scripts._shared.types import (
+    BuildPlan,
+    ProbeConfig,
+    ProbeSpec,
+    ResourceDefaults,
+    StackDetectResult,
+    UserInputs,
+)
+from scripts.stacks.base import ResourceHint
 
 # ──────────────────────────────────────────────────────────────────────────────
 # 상수
 # ──────────────────────────────────────────────────────────────────────────────
 
 _DEFAULT_PYTHON_VERSION = "3.11"  # F-11/12: requires-python 부재/parse 실패 fallback
+
+_DEFAULT_PROBE_PORT = 8000  # F-18/21: probe 기본 포트 (default CMD와 단일 출처)
+_APP_USER_UID = 10001  # F-16: 비-root 보안 디폴트
+_APP_USER_GID = 10001
+
+# F-18: /health 경로를 채택하는 framework 집합 (version-agnostic).
+_HEALTH_FRAMEWORKS: frozenset[str] = frozenset({"django", "flask", "fastapi"})
+
+_BUILDER_IMAGE_TEMPLATE = "ghcr.io/astral-sh/uv:python{version}-bookworm-slim"
+_RUNNER_IMAGE_TEMPLATE = "python:{version}-slim"
+_VENV_PATH = "/app/.venv"
+
+# F-16: Python 리소스 tier (JVM/Go 패턴 일관).
+_RESOURCE_TIERS: dict[str, dict[str, str]] = {
+    "small": {
+        "cpu_request": "100m",
+        "memory_request": "128Mi",
+        "cpu_limit": "250m",
+        "memory_limit": "256Mi",
+    },
+    "medium": {
+        "cpu_request": "250m",
+        "memory_request": "256Mi",
+        "cpu_limit": "500m",
+        "memory_limit": "512Mi",
+    },
+    "large": {
+        "cpu_request": "500m",
+        "memory_request": "512Mi",
+        "cpu_limit": "1000m",
+        "memory_limit": "1024Mi",
+    },
+}
 
 # F-11/12 + P1-7: 지원 Python 버전 화이트리스트. 밖이면 default로 보정.
 # 신버전 추가는 후속 backlog.
@@ -263,3 +306,186 @@ def _detect_python_version(project_dir: Path) -> str:
     if version not in _SUPPORTED_PYTHON_VERSIONS:
         return _DEFAULT_PYTHON_VERSION
     return version
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Dockerfile uv 명령 분기 (F-14)
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+def _resolve_uv_sync_cmd(project_dir: Path) -> tuple[str, str]:
+    """builder stage의 uv 명령 + lockfile_status 결정 (F-14).
+
+    우선순위 (재현성 높은 순):
+      - ``uv.lock`` 존재 → ``uv sync --frozen --no-dev`` / ``"frozen"``
+      - ``pyproject.toml``만 (lock 부재) → ``uv sync --no-dev`` / ``"non-frozen-warning"``
+      - ``requirements.txt``만 (pyproject 부재) →
+        ``uv venv .venv && uv pip install --python /app/.venv -r requirements.txt`` /
+        ``"requirements-txt"``
+      - 아무 매니페스트도 없음 → ``("", "none")`` (detect가 None 반환하므로 정상 경로엔 미도달)
+    """
+    has_uvlock = (project_dir / "uv.lock").is_file()
+    has_pyproject = (project_dir / "pyproject.toml").is_file()
+    has_requirements = (project_dir / "requirements.txt").is_file()
+
+    if has_uvlock:
+        return "uv sync --frozen --no-dev", "frozen"
+    if has_pyproject:
+        return "uv sync --no-dev", "non-frozen-warning"
+    if has_requirements:
+        return (
+            "uv venv .venv && uv pip install --python /app/.venv -r requirements.txt",
+            "requirements-txt",
+        )
+    return "", "none"
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# PythonStackModule (StackModule Protocol 구현)
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+class PythonStackModule:
+    """Python 스택 모듈 (StackModule Protocol 구현체, BL-006)."""
+
+    name: ClassVar[str] = "python"
+    template_name: ClassVar[str] = "python"
+
+    # ── Public: StackModule Protocol ──────────────────────────────────────────
+
+    def detect(self, project_dir: Path) -> StackDetectResult | None:
+        """pyproject.toml / requirements.txt 기반 Python 프로젝트 감지 (F-09).
+
+        Returns:
+            StackDetectResult — Python 프로젝트인 경우.
+            None — 매니페스트(pyproject.toml / requirements.txt) 부재.
+
+        Raises:
+            없음 — 모든 감지 오류는 안전 폴백 (NFR-3). 매니페스트 미존재만 None.
+        """
+        has_pyproject = (project_dir / "pyproject.toml").is_file()
+        has_requirements = (project_dir / "requirements.txt").is_file()
+        if not has_pyproject and not has_requirements:
+            return None
+
+        framework, _direct_deps, _sources = _detect_python_framework(project_dir)
+        version = _detect_python_version(project_dir)
+
+        # entrypoint는 Phase γ에서 _infer_entrypoint로 통합 (현재 sentinel "").
+        return StackDetectResult(
+            port=None,  # F-22-1: port 자동화 없음
+            entrypoint="",
+            framework=framework,
+            version=version,
+            build_system=None,
+            actuator_enabled=False,
+            cmd_candidates=[],
+        )
+
+    def build_plan(
+        self,
+        detect_result: StackDetectResult,
+        *,
+        inputs: UserInputs | None = None,
+    ) -> BuildPlan:
+        """uv-based multi-stage Dockerfile 계획 — builder/runner 이미지 결정 (F-17).
+
+        build_cmd(uv_sync_cmd)는 project_dir 기반 lockfile 분기가 필요하나 Protocol
+        build_plan에는 project_dir이 없으므로, 실제 명령은 ``dockerfile_context``가
+        단일 출처로 결정한다. 여기서는 image/artifact만 확정한다.
+        """
+        version = detect_result.version or _DEFAULT_PYTHON_VERSION
+        return BuildPlan(
+            builder_image=_BUILDER_IMAGE_TEMPLATE.format(version=version),
+            runner_image=_RUNNER_IMAGE_TEMPLATE.format(version=version),
+            build_cmd="",  # dockerfile_context.uv_sync_cmd가 단일 출처 (F-14)
+            artifact_path=_VENV_PATH,
+        )
+
+    def probe_plan(self, detect_result: StackDetectResult) -> ProbeConfig:
+        """liveness / readiness ProbeConfig (F-18).
+
+        - django/flask/fastapi → ``/health`` (version-agnostic 통일)
+        - python-generic 및 기타 → ``/healthz`` (BL-001 baseline 폴백)
+        - ``.devflow-k8s-deploy.yml::stack.python.probe.path`` override는
+          ProjectAnalyzer가 우선 적용 (BL-019 위임).
+        """
+        port = detect_result.port or _DEFAULT_PROBE_PORT
+        path = (
+            "/health"
+            if detect_result.framework in _HEALTH_FRAMEWORKS
+            else "/healthz"
+        )
+        spec = ProbeSpec(kind="http", path=path, port=port)
+        return ProbeConfig(liveness=spec, readiness=spec)
+
+    def defaults(self, resource_hint: ResourceHint) -> ResourceDefaults:
+        """Python tier별 리소스 기본값 (F-16).
+
+        run_as_user=10001: 비-root 보안 디폴트.
+        writable_paths=["/tmp", "/app/.cache"]: uv/pip 캐시 + 임시.
+        """
+        tier = _RESOURCE_TIERS[resource_hint]
+        return ResourceDefaults(
+            cpu_request=tier["cpu_request"],
+            memory_request=tier["memory_request"],
+            cpu_limit=tier["cpu_limit"],
+            memory_limit=tier["memory_limit"],
+            writable_paths=["/tmp", "/app/.cache"],
+            run_as_user=_APP_USER_UID,
+        )
+
+    def artifact_locator(
+        self, detect_result: StackDetectResult, project_dir: Path
+    ) -> list[Path]:
+        """Dockerfile COPY 소스 후보 — Python은 앱 소스 전체 (COPY . . 패턴).
+
+        ``/app/.venv``는 builder stage에서 생성되므로 host 후보가 아니다.
+        """
+        return [project_dir]
+
+    def dockerfile_context(
+        self,
+        *,
+        build_plan: BuildPlan,
+        detect_result: StackDetectResult,
+        inputs: UserInputs,
+        project_dir: Path | None,
+    ) -> dict[str, object]:
+        """python.tmpl Jinja2 컨텍스트 매핑 (6절 스키마, 13 keys).
+
+        - framework / manifest_sources는 _detect_python_framework 재호출로 취득 (stateless)
+        - uv_sync_cmd / lockfile_status는 _resolve_uv_sync_cmd가 project_dir 기반 결정
+        - entrypoint_cmd / entrypoint_gap는 Phase γ에서 _detect_server_command로 연결
+          (현재 placeholder — generic 폴백)
+        """
+        if project_dir is None:
+            framework = detect_result.framework
+            manifest_sources: list[str] = []
+            uv_sync_cmd, lockfile_status = "uv sync --no-dev", "non-frozen-warning"
+            has_pyproject = has_uvlock = has_requirements = False
+        else:
+            framework, _direct, manifest_sources = _detect_python_framework(
+                project_dir
+            )
+            uv_sync_cmd, lockfile_status = _resolve_uv_sync_cmd(project_dir)
+            has_pyproject = (project_dir / "pyproject.toml").is_file()
+            has_uvlock = (project_dir / "uv.lock").is_file()
+            has_requirements = (project_dir / "requirements.txt").is_file()
+
+        version = detect_result.version or _DEFAULT_PYTHON_VERSION
+        return {
+            "python_version": version,
+            "framework": framework,
+            "manifest_sources": manifest_sources,
+            "uv_sync_cmd": uv_sync_cmd,
+            "lockfile_status": lockfile_status,
+            "has_pyproject": has_pyproject,
+            "has_uvlock": has_uvlock,
+            "has_requirements": has_requirements,
+            "entrypoint_cmd": [],  # Phase γ에서 _detect_server_command 연결
+            "entrypoint_gap": None,
+            "port": inputs.port,
+            "app_user_uid": _APP_USER_UID,
+            "app_user_gid": _APP_USER_GID,
+        }

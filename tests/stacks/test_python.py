@@ -16,17 +16,36 @@ from pathlib import Path
 
 import pytest
 
+from scripts._shared.types import (
+    BuildPlan,
+    ProbeConfig,
+    StackDetectResult,
+    UserInputs,
+)
 from scripts.stacks.python import (
     _DJANGO_RE,
     _FASTAPI_RE,
     _FLASK_RE,
+    PythonStackModule,
     _detect_python_framework,
     _detect_python_version,
     _match_frameworks,
     _parse_pyproject_toml,
     _parse_requirements_txt,
     _read_python_file_safe,
+    _resolve_uv_sync_cmd,
 )
+
+
+def _make_user_inputs(app_name: str = "myapp", port: int = 8000) -> UserInputs:
+    return UserInputs(
+        app_name=app_name,
+        port=port,
+        exposure="ClusterIP",
+        namespace="default",
+        output_dir=Path("/tmp/out"),
+        resource_hint="medium",
+    )
 
 # ──────────────────────────────────────────────────────────────────────────────
 # 헬퍼: 픽스처 생성
@@ -314,3 +333,269 @@ def test_version_poetry_python_constraint(tmp_path: Path) -> None:
         '[tool.poetry.dependencies]\npython = "^3.10"\n',
     )
     assert _detect_python_version(tmp_path) == "3.10"
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Phase β — 빌드 layer
+# ══════════════════════════════════════════════════════════════════════════════
+
+# ──────────────────────────────────────────────────────────────────────────────
+# _resolve_uv_sync_cmd (F-14) — lockfile 3분기
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+def test_uv_sync_frozen_with_lock(tmp_path: Path) -> None:
+    _write(tmp_path / "pyproject.toml", '[project]\nname="d"\ndependencies=[]\n')
+    _write(tmp_path / "uv.lock", "version = 1\n")
+    cmd, status = _resolve_uv_sync_cmd(tmp_path)
+    assert status == "frozen"
+    assert "--frozen" in cmd
+
+
+def test_uv_sync_non_frozen_pyproject_only(tmp_path: Path) -> None:
+    _write(tmp_path / "pyproject.toml", '[project]\nname="d"\ndependencies=[]\n')
+    cmd, status = _resolve_uv_sync_cmd(tmp_path)
+    assert status == "non-frozen-warning"
+    assert "uv sync" in cmd
+    assert "--frozen" not in cmd
+
+
+def test_uv_sync_requirements_only(tmp_path: Path) -> None:
+    _write(tmp_path / "requirements.txt", "fastapi>=0.100\n")
+    cmd, status = _resolve_uv_sync_cmd(tmp_path)
+    assert status == "requirements-txt"
+    assert "uv pip install" in cmd
+    assert "requirements.txt" in cmd
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# detect (F-09) — build metadata 기반
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+def test_detect_pyproject_returns_result(tmp_path: Path) -> None:
+    _make_pyproject(
+        tmp_path,
+        '[project]\nname="d"\nrequires-python=">=3.12"\ndependencies=["fastapi>=0.1"]\n',
+    )
+    result = PythonStackModule().detect(tmp_path)
+    assert result is not None
+    assert result.framework == "fastapi"
+    assert result.version == "3.12"
+    assert result.port is None  # F-22-1: port 자동화 없음
+
+
+def test_detect_requirements_only(tmp_path: Path) -> None:
+    _make_requirements(tmp_path, "django>=4.2\n")
+    result = PythonStackModule().detect(tmp_path)
+    assert result is not None
+    assert result.framework == "django"
+
+
+def test_detect_no_manifest_returns_none(tmp_path: Path) -> None:
+    assert PythonStackModule().detect(tmp_path) is None
+
+
+def test_detect_never_raises_on_garbage(tmp_path: Path) -> None:
+    # NFR-3: 깨진 pyproject도 raise 없이 python-generic 폴백
+    _write(tmp_path / "pyproject.toml", "not valid toml [[[\n")
+    result = PythonStackModule().detect(tmp_path)
+    assert result is not None
+    assert result.framework == "python-generic"
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# build_plan (F-13~17)
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+def test_build_plan_images(tmp_path: Path) -> None:
+    _make_pyproject(
+        tmp_path,
+        '[project]\nname="d"\nrequires-python=">=3.12"\ndependencies=["fastapi>=0.1"]\n',
+    )
+    _write(tmp_path / "uv.lock", "version = 1\n")
+    module = PythonStackModule()
+    detect = module.detect(tmp_path)
+    plan = module.build_plan(detect, inputs=_make_user_inputs())
+    assert isinstance(plan, BuildPlan)
+    assert plan.builder_image == "ghcr.io/astral-sh/uv:python3.12-bookworm-slim"
+    assert plan.runner_image == "python:3.12-slim"
+    # build_cmd(uv_sync_cmd)는 project_dir 기반이라 dockerfile_context가 단일 출처
+    # (Protocol build_plan에는 project_dir 부재) — 여기선 image/artifact만 검증
+    assert plan.artifact_path == "/app/.venv"
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# probe_plan (F-18) — /health 통일 vs /healthz 폴백
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+@pytest.mark.parametrize("framework", ["django", "flask", "fastapi"])
+def test_probe_plan_health_for_frameworks(framework: str) -> None:
+    detect = StackDetectResult(
+        port=None, entrypoint="", framework=framework, version="3.11"
+    )
+    config = PythonStackModule().probe_plan(detect)
+    assert isinstance(config, ProbeConfig)
+    assert config.liveness.path == "/health"
+    assert config.readiness.path == "/health"
+    assert config.liveness.port == 8000
+
+
+def test_probe_plan_healthz_for_generic() -> None:
+    detect = StackDetectResult(
+        port=None, entrypoint="", framework="python-generic", version="3.11"
+    )
+    config = PythonStackModule().probe_plan(detect)
+    assert config.liveness.path == "/healthz"
+
+
+def test_probe_plan_respects_detect_port() -> None:
+    detect = StackDetectResult(
+        port=9000, entrypoint="", framework="fastapi", version="3.11"
+    )
+    config = PythonStackModule().probe_plan(detect)
+    assert config.liveness.port == 9000
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# defaults (F-16) — UID 10001 + writable_paths
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+@pytest.mark.parametrize("tier", ["small", "medium", "large"])
+def test_defaults_tiers(tier: str) -> None:
+    defaults = PythonStackModule().defaults(tier)
+    assert defaults.run_as_user == 10001
+    assert "/tmp" in defaults.writable_paths
+    assert "/app/.cache" in defaults.writable_paths
+    assert defaults.cpu_request.endswith("m")
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# artifact_locator (F) — 앱 소스 전체
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+def test_artifact_locator_returns_project_dir(tmp_path: Path) -> None:
+    detect = StackDetectResult(
+        port=None, entrypoint="", framework="fastapi", version="3.11"
+    )
+    paths = PythonStackModule().artifact_locator(detect, tmp_path)
+    assert paths == [tmp_path]
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# dockerfile_context (F-17) — 빌드 관련 키 (entrypoint는 γ에서 보강)
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+def test_dockerfile_context_build_keys(tmp_path: Path) -> None:
+    _make_pyproject(
+        tmp_path,
+        '[project]\nname="d"\nrequires-python=">=3.11"\ndependencies=["fastapi>=0.1"]\n',
+    )
+    _write(tmp_path / "uv.lock", "version = 1\n")
+    module = PythonStackModule()
+    detect = module.detect(tmp_path)
+    inputs = _make_user_inputs(port=8000)
+    plan = module.build_plan(detect, inputs=inputs)
+    ctx = module.dockerfile_context(
+        build_plan=plan, detect_result=detect, inputs=inputs, project_dir=tmp_path
+    )
+    assert ctx["python_version"] == "3.11"
+    assert ctx["framework"] == "fastapi"
+    assert ctx["lockfile_status"] == "frozen"
+    assert ctx["has_pyproject"] is True
+    assert ctx["has_uvlock"] is True
+    assert ctx["has_requirements"] is False
+    assert ctx["port"] == 8000
+    assert ctx["app_user_uid"] == 10001
+    assert "pyproject.toml" in ctx["manifest_sources"]
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# python.tmpl 렌더 (F-13~16) — Jinja2 직접 렌더 검증
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+def _render_python_tmpl(ctx: dict) -> str:
+    from jinja2 import Environment, FileSystemLoader
+
+    templates_dir = Path(__file__).resolve().parents[2] / "templates" / "dockerfile"
+    env = Environment(
+        loader=FileSystemLoader(str(templates_dir)),
+        trim_blocks=True,
+        lstrip_blocks=True,
+    )
+    return env.get_template("python.tmpl").render(**ctx)
+
+
+def _base_ctx(**overrides: object) -> dict:
+    ctx = {
+        "python_version": "3.11",
+        "framework": "fastapi",
+        "manifest_sources": ["pyproject.toml", "uv.lock"],
+        "uv_sync_cmd": "uv sync --frozen --no-dev",
+        "lockfile_status": "frozen",
+        "has_pyproject": True,
+        "has_uvlock": True,
+        "has_requirements": False,
+        "entrypoint_cmd": ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"],
+        "entrypoint_gap": None,
+        "port": 8000,
+        "app_user_uid": 10001,
+        "app_user_gid": 10001,
+    }
+    ctx.update(overrides)
+    return ctx
+
+
+def test_python_tmpl_multistage_nonroot() -> None:
+    out = _render_python_tmpl(_base_ctx())
+    assert "AS builder" in out
+    assert "ghcr.io/astral-sh/uv:python3.11-bookworm-slim" in out
+    assert "python:3.11-slim" in out
+    assert "USER 10001:10001" in out
+    # 런타임에 uv 바이너리 미포함 (builder에서만 uv 사용)
+    assert out.index("AS builder") < out.index("python:3.11-slim")
+
+
+def test_python_tmpl_copy_branch_frozen() -> None:
+    out = _render_python_tmpl(_base_ctx())
+    assert "COPY pyproject.toml" in out
+    assert "COPY uv.lock" in out
+    assert "COPY requirements.txt" not in out
+
+
+def test_python_tmpl_requirements_branch() -> None:
+    ctx = _base_ctx(
+        has_pyproject=False,
+        has_uvlock=False,
+        has_requirements=True,
+        lockfile_status="requirements-txt",
+        uv_sync_cmd="uv venv .venv && uv pip install --python /app/.venv -r requirements.txt",
+    )
+    out = _render_python_tmpl(ctx)
+    assert "COPY requirements.txt" in out
+    assert "COPY uv.lock" not in out
+
+
+def test_python_tmpl_non_frozen_warning() -> None:
+    ctx = _base_ctx(
+        has_uvlock=False,
+        lockfile_status="non-frozen-warning",
+        uv_sync_cmd="uv sync --no-dev",
+    )
+    out = _render_python_tmpl(ctx)
+    assert "WARNING" in out
+    assert "uv.lock" in out
+
+
+def test_python_tmpl_entrypoint_gap_no_cmd() -> None:
+    ctx = _base_ctx(entrypoint_cmd=[], entrypoint_gap="generic Python — override required")
+    out = _render_python_tmpl(ctx)
+    # 실제 CMD 명령 라인은 없어야 함 (주석의 "CMD generation"은 허용)
+    assert "\nCMD " not in out
+    assert "entrypoint gap" in out
