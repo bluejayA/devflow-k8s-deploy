@@ -911,6 +911,7 @@ def _build_default_dependencies(project_dir: Path) -> PipelineDependencies:
     from scripts.project_analyzer import ProjectAnalyzer
     from scripts.stacks.go import GoStackModule
     from scripts.stacks.jvm import JvmStackModule
+    from scripts.stacks.python import PythonStackModule
     from scripts.template_renderer import TemplateRenderer
     from scripts.validate_k8s import K8sValidator
 
@@ -923,10 +924,12 @@ def _build_default_dependencies(project_dir: Path) -> PipelineDependencies:
     template_root = plugin_root / "templates"
     template_renderer = TemplateRenderer(template_root)
 
-    # StackRegistry: 자동 감지 시 등록 순서대로 시도 — JVM 우선 → Go (F-16)
+    # StackRegistry: 자동 감지 시 등록 순서대로 시도 — JVM → Go → Python (F-16, BL-006)
+    # Python detect는 pyproject/requirements 부재 시 None → JVM/Go 매니페스트와 충돌 없음.
     stack_registry: dict[str, StackModule] = {
         "jvm": JvmStackModule(),
         "go": GoStackModule(),
+        "python": PythonStackModule(),
     }
 
     # config 미리 로드하여 build engine/timeout 추출

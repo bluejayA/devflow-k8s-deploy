@@ -13,6 +13,7 @@ from scripts._shared.text_safety import (
     reject_unsafe_chars,
     validate_go_entrypoint,
     validate_probe_path,
+    validate_python_entrypoint,
 )
 
 # ---------------------------------------------------------------------------
@@ -274,3 +275,47 @@ class TestValidateProbePath:
     def test_empty_rejected(self) -> None:
         with pytest.raises(ValueError, match="probe"):
             validate_probe_path("")
+
+
+# ---------------------------------------------------------------------------
+# validate_python_entrypoint 테스트 (BL-006 P1-2 — <module>:<app> 화이트리스트)
+# ---------------------------------------------------------------------------
+
+
+class TestValidatePythonEntrypoint:
+    def test_simple_module_app(self) -> None:
+        validate_python_entrypoint("main:app")
+
+    def test_dotted_module(self) -> None:
+        validate_python_entrypoint("myproj.wsgi:application")
+
+    def test_deep_dotted(self) -> None:
+        validate_python_entrypoint("pkg.sub.module:api")
+
+    def test_rejects_missing_colon(self) -> None:
+        with pytest.raises(ValueError):
+            validate_python_entrypoint("main")
+
+    def test_rejects_space(self) -> None:
+        with pytest.raises(ValueError):
+            validate_python_entrypoint("main app:x")
+
+    def test_rejects_shell_meta(self) -> None:
+        with pytest.raises(ValueError):
+            validate_python_entrypoint("main:app;rm -rf /")
+
+    def test_rejects_command_subst(self) -> None:
+        with pytest.raises(ValueError):
+            validate_python_entrypoint("main:$(whoami)")
+
+    def test_rejects_newline(self) -> None:
+        with pytest.raises(ValueError):
+            validate_python_entrypoint("main:app\nx")
+
+    def test_rejects_empty(self) -> None:
+        with pytest.raises(ValueError):
+            validate_python_entrypoint("")
+
+    def test_rejects_too_long(self) -> None:
+        with pytest.raises(ValueError):
+            validate_python_entrypoint("m" * 300 + ":app")

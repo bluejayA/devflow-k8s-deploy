@@ -1,0 +1,61 @@
+# syntax=docker/dockerfile:1.6
+# stack: python ({{ framework }})
+# manifest sources: {{ manifest_sources | join(", ") }}
+{% if lockfile_status == "non-frozen-warning" %}
+# WARNING: no uv.lock — reproducibility weakened. Add uv.lock for reproducible builds.
+{% endif %}
+# 빌드 단계: uv toolchain (bookworm-slim 기반)
+FROM ghcr.io/astral-sh/uv:python{{ python_version }}-bookworm-slim AS builder
+
+WORKDIR /app
+
+# 의존성 매니페스트만 먼저 COPY — glob 미사용(명시 파일만)으로 의도치 않은 파일
+# (requirements.txt.bak 등) 포함 위험 차단. 레이어 캐시 적중률 향상.
+{% if has_pyproject %}
+COPY pyproject.toml ./
+{% endif %}
+{% if has_uvlock %}
+COPY uv.lock ./
+{% endif %}
+{% if has_requirements %}
+COPY requirements.txt ./
+{% endif %}
+
+# lockfile 정책에 따른 의존성 설치 (frozen / non-frozen / requirements)
+RUN {{ uv_sync_cmd }}
+
+# 앱 소스 전체 복사 — .dockerignore(k8s-output/, .git/, .env 등)로 오염 차단
+COPY . .
+
+# 런타임 단계: python slim (uv/build deps 미포함 — 이미지 크기 최소화)
+FROM python:{{ python_version }}-slim AS runner
+
+# 비-root 사용자 생성 + apt 캐시 정리 (컨테이너 탈출 시 호스트 root 권한 차단)
+RUN groupadd -g {{ app_user_gid }} appuser \
+ && useradd -u {{ app_user_uid }} -g {{ app_user_gid }} -m appuser \
+ && apt-get clean && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+# builder의 venv + 앱 소스만 복사 (COPY --chown으로 소유권 명시)
+COPY --from=builder --chown={{ app_user_uid }}:{{ app_user_gid }} /app/.venv /app/.venv
+COPY --from=builder --chown={{ app_user_uid }}:{{ app_user_gid }} /app /app
+
+# venv 우선 PATH + Python 런타임 위생 (버퍼링/바이트코드 비활성)
+# PYTHONPATH: --no-install-project로 프로젝트 미설치 → src-layout(src/<pkg>/) +
+# flat layout 모두 import 가능하도록 /app/src와 /app을 경로에 추가 (src/ 부재 시 무해)
+ENV PATH="/app/.venv/bin:$PATH" \
+    PYTHONPATH="/app/src:/app" \
+    PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1
+
+USER {{ app_user_uid }}:{{ app_user_gid }}
+
+EXPOSE {{ port }}
+
+{% if entrypoint_cmd %}
+CMD {{ entrypoint_cmd | tojson }}
+{% else %}
+# entrypoint gap: {{ entrypoint_gap }}
+# Configure .devflow-k8s-deploy.yml::stack.python.entrypoint to enable CMD generation
+{% endif %}

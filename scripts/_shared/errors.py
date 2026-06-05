@@ -50,6 +50,14 @@ class GoBuildPlanError(DevflowError):
     """
 
 
+class PythonBuildPlanError(DevflowError):
+    """Python 스택 build_plan 실패 (BL-006).
+
+    감지 자체는 성공했으나 `build_plan()`에서 uv 명령 합성 실패 등.
+    현재 시나리오 없음 — future-proof (NFR-3 안전 폴백 정책상 detect는 raise 안 함).
+    """
+
+
 class InvalidImageError(DevflowError):
     """'latest' 태그 또는 유효하지 않은 이미지 레퍼런스 감지."""
 

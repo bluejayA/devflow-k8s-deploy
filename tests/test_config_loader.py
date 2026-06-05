@@ -347,15 +347,16 @@ class TestStackDecision:
         assert result.forced_stack == "go"
         assert result.source == "project_config"
 
-    def test_stack_python_raises_unsupported_error(self, tmp_path: Path) -> None:
-        """`stack: python` → UnsupportedStackError raise."""
+    def test_stack_python_returns_forced_python(self, tmp_path: Path) -> None:
+        """`stack: python` → forced_stack='python' (BL-006 — django/flask/fastapi)."""
         proj_dir = _make_project_config(tmp_path / "proj", {"stack": "python"})
 
         loader = _loader_with_org(None)
         config = loader.load(proj_dir)
+        result = loader.stack_decision(config, proj_dir)
 
-        with pytest.raises(UnsupportedStackError):
-            loader.stack_decision(config, proj_dir)
+        assert result.forced_stack == "python"
+        assert result.source == "project_config"
 
     def test_stack_react_raises_unsupported_error(self, tmp_path: Path) -> None:
         """`stack: react` → UnsupportedStackError raise."""
