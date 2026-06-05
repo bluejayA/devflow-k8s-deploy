@@ -42,7 +42,10 @@ COPY --from=builder --chown={{ app_user_uid }}:{{ app_user_gid }} /app/.venv /ap
 COPY --from=builder --chown={{ app_user_uid }}:{{ app_user_gid }} /app /app
 
 # venv 우선 PATH + Python 런타임 위생 (버퍼링/바이트코드 비활성)
+# PYTHONPATH: --no-install-project로 프로젝트 미설치 → src-layout(src/<pkg>/) +
+# flat layout 모두 import 가능하도록 /app/src와 /app을 경로에 추가 (src/ 부재 시 무해)
 ENV PATH="/app/.venv/bin:$PATH" \
+    PYTHONPATH="/app/src:/app" \
     PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1
 

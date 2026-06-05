@@ -469,18 +469,19 @@ def _detect_server_command(
     pkg = _SERVER_PKG.get(framework)
     if pkg is None:
         # C5/C6: python-generic — multi vs no-match 구분 위해 direct_deps 재평가.
+        # P2-3: generic은 server pkg(gunicorn/uvicorn) 선택 불가 → entrypoint override로
+        # 해결되지 않으므로 안내에서 제외. framework 명시/단일화만 권고.
         matches = _match_frameworks("\n".join(sorted(direct_deps)))
         if len(matches) >= 2:
             gap = (
                 f"ambiguous framework match: {sorted(matches)}. "
-                "Action: keep only one of them in direct dependencies "
-                "OR set stack.python.entrypoint."
+                "Action: keep only one of django/flask/fastapi in direct dependencies."
             )
         else:
             gap = (
                 "no supported framework detected (looked for django/flask/fastapi "
                 "in direct dependencies). Action: add a supported framework "
-                "OR set stack.python.entrypoint."
+                "to direct dependencies."
             )
         return ServerCmdResult(cmd=None, requires_pkg=None, gap_reason=gap)
 

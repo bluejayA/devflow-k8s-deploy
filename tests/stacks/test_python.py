@@ -911,3 +911,27 @@ def test_dockerfile_context_honors_entrypoint_override(tmp_path: Path) -> None:
         "uvicorn", "custom.mod:application", "--host", "0.0.0.0", "--port", "8000"
     ]
     assert ctx["entrypoint_gap"] is None
+
+
+# ── Codex R2 수정 — P2-3(generic gap 문구) / P2-4(src-layout PYTHONPATH) ──
+
+
+def test_server_cmd_generic_gap_omits_entrypoint_advice(tmp_path: Path) -> None:
+    # P2-3: generic(C5/C6)은 entrypoint override로 해결 불가 → 안내 제거
+    r5 = _detect_server_command(
+        "python-generic", tmp_path, frozenset({"django", "flask"})
+    )
+    assert "stack.python.entrypoint" not in r5.gap_reason
+    assert "ambiguous" in r5.gap_reason.lower()
+    r6 = _detect_server_command(
+        "python-generic", tmp_path, frozenset({"requests"})
+    )
+    assert "stack.python.entrypoint" not in r6.gap_reason
+    assert "no supported framework" in r6.gap_reason.lower()
+
+
+def test_python_tmpl_pythonpath_supports_src_layout() -> None:
+    # P2-4: --no-install-project 하에서 src-layout import 가능하도록 PYTHONPATH 보강
+    out = _render_python_tmpl(_base_ctx())
+    assert "/app/src" in out
+    assert "PYTHONPATH" in out
