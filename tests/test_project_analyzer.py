@@ -1292,7 +1292,7 @@ class TestPhase5InputsChainAndOverrides:
             cmd_candidates=["api", "scheduler"],
         )
         detect_after = ProjectAnalyzer._apply_stack_overrides(
-            detect_before, {"entrypoint": "./cmd/api"}
+            detect_before, {"entrypoint": "./cmd/api"}, "go"
         )
 
         assert detect_after.entrypoint == "./cmd/api"
@@ -1305,7 +1305,7 @@ class TestPhase5InputsChainAndOverrides:
         detect_before = StackDetectResult(
             port=8080, entrypoint=".", framework="go-generic", version="1.22"
         )
-        detect_after = ProjectAnalyzer._apply_stack_overrides(detect_before, {})
+        detect_after = ProjectAnalyzer._apply_stack_overrides(detect_before, {}, "go")
 
         assert detect_after is detect_before  # 동일 인스턴스 반환
 
@@ -1364,7 +1364,7 @@ class TestPhase5SecurityGuards:
             port=None, entrypoint="", framework="go-generic", version="1.22"
         )
         with pytest.raises(ValueError, match="entrypoint"):
-            ProjectAnalyzer._apply_stack_overrides(detect, {"entrypoint": bad_entrypoint})
+            ProjectAnalyzer._apply_stack_overrides(detect, {"entrypoint": bad_entrypoint}, "go")
 
     def test_apply_stack_overrides_accepts_safe_entrypoint(self) -> None:
         """정상 entrypoint는 통과."""
@@ -1372,7 +1372,7 @@ class TestPhase5SecurityGuards:
             port=None, entrypoint="", framework="go-generic", version="1.22"
         )
         for safe in [".", "./cmd/api", "./cmd/kube-controller-manager", "./bin/x_y"]:
-            result = ProjectAnalyzer._apply_stack_overrides(detect, {"entrypoint": safe})
+            result = ProjectAnalyzer._apply_stack_overrides(detect, {"entrypoint": safe}, "go")
             assert result.entrypoint == safe
 
     @pytest.mark.parametrize(
@@ -1450,7 +1450,7 @@ class TestBL019PolicyConsistency:
             port=None, entrypoint="", framework="go-generic", version="1.22"
         )
         with pytest.raises(ValueError):
-            ProjectAnalyzer._apply_stack_overrides(detect, {"entrypoint": invalid})
+            ProjectAnalyzer._apply_stack_overrides(detect, {"entrypoint": invalid}, "go")
 
     @pytest.mark.parametrize(
         "valid",
@@ -1471,7 +1471,7 @@ class TestBL019PolicyConsistency:
         detect = StackDetectResult(
             port=None, entrypoint="", framework="go-generic", version="1.22"
         )
-        result = ProjectAnalyzer._apply_stack_overrides(detect, {"entrypoint": valid})
+        result = ProjectAnalyzer._apply_stack_overrides(detect, {"entrypoint": valid}, "go")
         assert result.entrypoint == valid
 
     @pytest.mark.parametrize(
@@ -1525,7 +1525,7 @@ class TestBL019PolicyConsistency:
             port=None, entrypoint="", framework="go-generic", version="1.22"
         )
         with pytest.raises(ValueError, match="entrypoint"):
-            ProjectAnalyzer._apply_stack_overrides(detect, {"entrypoint": "cmd/api"})
+            ProjectAnalyzer._apply_stack_overrides(detect, {"entrypoint": "cmd/api"}, "go")
 
     def test_empty_entrypoint_config_is_passthrough(self) -> None:
         """빈 문자열 entrypoint config는 'no override' 의미로 passthrough.
@@ -1537,7 +1537,7 @@ class TestBL019PolicyConsistency:
         detect = StackDetectResult(
             port=None, entrypoint="./auto", framework="go-generic", version="1.22"
         )
-        result = ProjectAnalyzer._apply_stack_overrides(detect, {"entrypoint": ""})
+        result = ProjectAnalyzer._apply_stack_overrides(detect, {"entrypoint": ""}, "go")
         assert result == detect  # passthrough, 검증 미트리거
 
     def test_empty_probe_path_config_is_passthrough(self) -> None:

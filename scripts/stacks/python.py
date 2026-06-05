@@ -163,13 +163,18 @@ def _parse_pyproject_toml(content: str) -> set[str]:
 
     project = data.get("project")
     if isinstance(project, dict):
-        for item in project.get("dependencies", []) or []:
-            if isinstance(item, str):
-                deps.add(item)
+        # P2-1: list가 아닌 schema-invalid 값(예: dependencies = 42)은 무시 — NFR-3 폴백.
+        deps_list = project.get("dependencies")
+        if isinstance(deps_list, list):
+            for item in deps_list:
+                if isinstance(item, str):
+                    deps.add(item)
         optional = project.get("optional-dependencies")
         if isinstance(optional, dict):
             for group in optional.values():
-                for item in group or []:
+                if not isinstance(group, list):
+                    continue
+                for item in group:
                     if isinstance(item, str):
                         deps.add(item)
 
@@ -325,21 +330,27 @@ def _resolve_uv_sync_cmd(project_dir: Path) -> tuple[str, str]:
     """builder stage의 uv 명령 + lockfile_status 결정 (F-14).
 
     우선순위 (재현성 높은 순):
-      - ``uv.lock`` 존재 → ``uv sync --frozen --no-dev`` / ``"frozen"``
-      - ``pyproject.toml``만 (lock 부재) → ``uv sync --no-dev`` / ``"non-frozen-warning"``
+      - ``uv.lock`` 존재 → ``uv sync --frozen --no-install-project --no-dev`` / ``"frozen"``
+      - ``pyproject.toml``만 (lock 부재) → ``uv sync --no-install-project --no-dev`` /
+        ``"non-frozen-warning"``
       - ``requirements.txt``만 (pyproject 부재) →
         ``uv venv .venv && uv pip install --python /app/.venv -r requirements.txt`` /
         ``"requirements-txt"``
       - 아무 매니페스트도 없음 → ``("", "none")`` (detect가 None 반환하므로 정상 경로엔 미도달)
+
+    P2-2: ``--no-install-project``로 builder 캐시 레이어에서 프로젝트 자체 설치를
+    회피한다. uv sync는 기본적으로 현재 프로젝트를 설치하는데, 이 RUN은 소스
+    ``COPY . .`` 이전이라 README.md/패키지 파일 미존재로 빌드가 실패할 수 있다.
+    의존성만 설치하고 앱 소스는 COPY로 /app에 배치 → WORKDIR cwd에서 import.
     """
     has_uvlock = (project_dir / "uv.lock").is_file()
     has_pyproject = (project_dir / "pyproject.toml").is_file()
     has_requirements = (project_dir / "requirements.txt").is_file()
 
     if has_uvlock:
-        return "uv sync --frozen --no-dev", "frozen"
+        return "uv sync --frozen --no-install-project --no-dev", "frozen"
     if has_pyproject:
-        return "uv sync --no-dev", "non-frozen-warning"
+        return "uv sync --no-install-project --no-dev", "non-frozen-warning"
     if has_requirements:
         return (
             "uv venv .venv && uv pip install --python /app/.venv -r requirements.txt",
@@ -416,16 +427,24 @@ def _has_direct_package(direct_deps: frozenset[str], pkg_name: str) -> bool:
     return pattern.search("\n".join(sorted(direct_deps))) is not None
 
 
-def _build_default_cmd(framework: str, entrypoint: str) -> list[str]:
-    """framework별 default CMD (exec form list, F-21). 포트 8000 고정."""
+def _build_default_cmd(framework: str, entrypoint: str, port: int = 8000) -> list[str]:
+    """framework별 default CMD (exec form list, F-21).
+
+    P1-1: 컨테이너 listen 포트를 user-selected port와 일치시킨다 (Service/probe 정합).
+    """
     if framework == "fastapi":
-        return ["uvicorn", entrypoint, "--host", "0.0.0.0", "--port", "8000"]
+        return ["uvicorn", entrypoint, "--host", "0.0.0.0", "--port", str(port)]
     # django / flask → gunicorn
-    return ["gunicorn", entrypoint, "--bind", "0.0.0.0:8000"]
+    return ["gunicorn", entrypoint, "--bind", f"0.0.0.0:{port}"]
 
 
 def _detect_server_command(
-    framework: str, project_dir: Path, direct_deps: frozenset[str]
+    framework: str,
+    project_dir: Path,
+    direct_deps: frozenset[str],
+    *,
+    port: int = 8000,
+    entrypoint_override: str | None = None,
 ) -> ServerCmdResult:
     """F-20-1 3조건 통합 — 오직 C1만 CMD 자동 생성 (gap_reason 통일 톤).
 
@@ -442,6 +461,10 @@ def _detect_server_command(
 
     dependency-conservative (F-22-1): 추론 서버 패키지가 direct deps에 없으면
     자동 install 금지 — cmd=None + override 안내.
+
+    P1-1/P1-2: ``port``는 생성 CMD의 listen 포트(user-selected). ``entrypoint_override``는
+    config ``stack.python.entrypoint`` 값(또는 detect 통합 entrypoint) — 주어지면 FS
+    휴리스틱 재추론 대신 이를 사용하여 자동 추론 실패(C2) 케이스를 보강한다.
     """
     pkg = _SERVER_PKG.get(framework)
     if pkg is None:
@@ -462,12 +485,12 @@ def _detect_server_command(
         return ServerCmdResult(cmd=None, requires_pkg=None, gap_reason=gap)
 
     has_pkg = _has_direct_package(direct_deps, pkg)
-    entrypoint = _infer_entrypoint(framework, project_dir)
+    entrypoint = entrypoint_override or _infer_entrypoint(framework, project_dir)
     has_entry = entrypoint is not None
 
     if has_pkg and has_entry:
         return ServerCmdResult(
-            cmd=_build_default_cmd(framework, entrypoint),
+            cmd=_build_default_cmd(framework, entrypoint, port),
             requires_pkg=pkg,
             gap_reason=None,
         )
@@ -625,7 +648,15 @@ class PythonStackModule:
             has_pyproject = (project_dir / "pyproject.toml").is_file()
             has_uvlock = (project_dir / "uv.lock").is_file()
             has_requirements = (project_dir / "requirements.txt").is_file()
-            server = _detect_server_command(framework, project_dir, direct_deps)
+            # P1-1: user port를 CMD에 반영. P1-2: detect_result.entrypoint(config
+            # override 또는 detect 통합 추론값)를 우선 사용 — "" sentinel이면 None 폴백.
+            server = _detect_server_command(
+                framework,
+                project_dir,
+                direct_deps,
+                port=inputs.port,
+                entrypoint_override=detect_result.entrypoint or None,
+            )
 
         version = detect_result.version or _DEFAULT_PYTHON_VERSION
         return {

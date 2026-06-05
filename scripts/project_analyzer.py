@@ -26,7 +26,11 @@ from scripts._shared.errors import (
     UnsupportedStackError,
 )
 from scripts._shared.fileio import check_yaml_refs, is_within, read_text_limited
-from scripts._shared.text_safety import validate_go_entrypoint, validate_probe_path
+from scripts._shared.text_safety import (
+    validate_go_entrypoint,
+    validate_probe_path,
+    validate_python_entrypoint,
+)
 from scripts._shared.types import (
     AnalysisResult,
     ModuleInfo,
@@ -230,20 +234,26 @@ class ProjectAnalyzer:
 
     @staticmethod
     def _apply_stack_overrides(
-        detect_result: StackDetectResult, stack_config: dict[str, Any]
+        detect_result: StackDetectResult,
+        stack_config: dict[str, Any],
+        stack_name: str,
     ) -> StackDetectResult:
         """F-27/A-08: config의 `stack.<name>.entrypoint`를 detect_result에 반영.
 
         A-08 우선순위 1단계: config entrypoint > app_name 매칭 > 단일 후보.
         config_loader.resolve_stack_config 결과(빈 dict 가능)를 받아 frozen dataclass replace.
 
-        BL-019: 검증을 `_shared.text_safety.validate_go_entrypoint`로 위임 — 단일 정책.
-        이전엔 `^[A-Za-z0-9_./-]+$` 자체 정규식이라 `cmd/api`(./ 누락)가 통과되어
-        build_plan에서 지연 실패. 일원화 후 fail-fast.
+        BL-019: 검증을 `_shared.text_safety`로 위임 — 단일 정책.
+        BL-006 (Codex P1-2): stack별 entrypoint 형식이 다르므로 검증기를 분기한다.
+          - python: ``<module>:<app>`` 형태 → validate_python_entrypoint
+          - go/jvm: ``./...`` 경로 형태 → validate_go_entrypoint
         """
         entrypoint = stack_config.get("entrypoint")
         if isinstance(entrypoint, str) and entrypoint:
-            validate_go_entrypoint(entrypoint)
+            if stack_name == "python":
+                validate_python_entrypoint(entrypoint)
+            else:
+                validate_go_entrypoint(entrypoint)
             return dataclasses.replace(detect_result, entrypoint=entrypoint)
         return detect_result
 
@@ -362,7 +372,9 @@ class ProjectAnalyzer:
 
         # 4. config override 추출 (F-33) + detect_result에 stack.<name>.entrypoint 적용 (F-27)
         stack_config = self._config_loader.resolve_stack_config(config, stack_name)
-        detect_result = self._apply_stack_overrides(detect_result, stack_config)
+        detect_result = self._apply_stack_overrides(
+            detect_result, stack_config, stack_name
+        )
 
         # Codex P1: detect_result.port가 None이면 inputs.port로 채워 plan 단계 정합성 보장.
         # Go는 detect 단계에서 port 추론 불가(소스 정적 분석 한계) — inputs가 진실의 출처.

@@ -25,6 +25,14 @@ _MAX_GO_ENTRYPOINT_LEN = 256
 # 문자셋 길이를 정규식 quantifier(0,512)에 직접 인코딩.
 _PROBE_PATH_RE = re.compile(r"^/[A-Za-z0-9._\-/?=&%]{0,512}$")
 
+# BL-006: Python server entrypoint ``<module>:<app>`` 화이트리스트.
+# module = dotted identifier (예: main, myproj.wsgi), app = identifier (예: app, application).
+# uvicorn/gunicorn args 문자열 합성 + config override 공통 게이트 — shell-meta 차단.
+_PYTHON_ENTRYPOINT_RE = re.compile(
+    r"^[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*:[A-Za-z_][A-Za-z0-9_]*$"
+)
+_MAX_PYTHON_ENTRYPOINT_LEN = 256
+
 # 민감정보 redact 패턴 목록 (kubectl stderr / kubeconfig 경로 / JWT 등)
 _REDACT_PATTERNS: list[re.Pattern[str]] = [
     # Bearer tokens (Authorization 헤더, k8s API 토큰)
@@ -98,6 +106,35 @@ def validate_go_entrypoint(value: str) -> None:
             raise ValueError(
                 f"Go entrypoint path traversal 금지: entrypoint={value!r}"
             )
+
+
+def validate_python_entrypoint(value: str) -> None:
+    """Python server entrypoint 단일 정책 (BL-006): config override + CMD 합성 공통 게이트.
+
+    허용:
+      - ``<module>:<app>`` 형태 — module은 dotted identifier, app은 identifier.
+        예: ``main:app``, ``app:app``, ``myproj.wsgi:application``, ``pkg.sub:api``.
+
+    거부:
+      - 길이 > 256 (DoS / ReDoS 방어)
+      - 정규식 불일치 — 콜론 누락, 공백/세미콜론/$/백틱/따옴표/개행 등 shell 메타문자
+
+    ``["uvicorn", entrypoint, ...]`` / ``["gunicorn", entrypoint, ...]`` exec form은
+    shell을 경유하지 않으나, config override 값이 신뢰 경계를 넘으므로 화이트리스트로 차단.
+
+    Raises:
+        ValueError: 길이 초과 또는 정규식 불일치.
+    """
+    if len(value) > _MAX_PYTHON_ENTRYPOINT_LEN:
+        raise ValueError(
+            f"Python entrypoint 길이 초과 (>{_MAX_PYTHON_ENTRYPOINT_LEN}): "
+            f"entrypoint={value!r}"
+        )
+    if not _PYTHON_ENTRYPOINT_RE.fullmatch(value):
+        raise ValueError(
+            f"Python entrypoint 형식 오류: entrypoint={value!r}. "
+            "허용: <module>:<app> (예: main:app, myproj.wsgi:application)"
+        )
 
 
 def validate_probe_path(value: str) -> None:

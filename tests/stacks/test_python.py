@@ -802,3 +802,112 @@ def test_probe_path_still_rejects_shell_meta() -> None:
 
     with pytest.raises(ValueError):
         validate_probe_path("/health\nmalicious")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Codex R1 수정 — P1-1(port) / P1-2(entrypoint override) / P2-1(TypeError) / P2-2(uv sync)
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+def test_build_default_cmd_uses_port() -> None:
+    # P1-1: 하드코딩 8000 제거 — port 주입
+    assert _build_default_cmd("fastapi", "main:app", 9000) == [
+        "uvicorn", "main:app", "--host", "0.0.0.0", "--port", "9000"
+    ]
+    assert _build_default_cmd("django", "x.wsgi:application", 9000) == [
+        "gunicorn", "x.wsgi:application", "--bind", "0.0.0.0:9000"
+    ]
+
+
+def test_server_cmd_respects_port(tmp_path: Path) -> None:
+    _write(tmp_path / "main.py", "app = object()\n")
+    result = _detect_server_command(
+        "fastapi", tmp_path, frozenset({"fastapi", "uvicorn"}), port=9000
+    )
+    assert result.cmd == ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "9000"]
+
+
+def test_server_cmd_entrypoint_override(tmp_path: Path) -> None:
+    # P1-2: 자동 추론 실패(main.py/app.py 없음)해도 override로 C1 달성
+    result = _detect_server_command(
+        "fastapi",
+        tmp_path,
+        frozenset({"fastapi", "uvicorn"}),
+        entrypoint_override="custom.mod:application",
+    )
+    assert result.cmd == [
+        "uvicorn", "custom.mod:application", "--host", "0.0.0.0", "--port", "8000"
+    ]
+    assert result.gap_reason is None
+
+
+def test_parse_pyproject_non_list_optional_group() -> None:
+    # P2-1: optional group이 list 아닐 때(schema-invalid) crash 없이 폴백
+    body = (
+        '[project]\nname="d"\ndependencies=["fastapi>=0.1"]\n'
+        "[project.optional-dependencies]\nweb = 123\n"
+    )
+    deps = _parse_pyproject_toml(body)  # no raise (NFR-3)
+    assert any("fastapi" in d for d in deps)
+
+
+def test_parse_pyproject_non_list_dependencies() -> None:
+    # P2-1: dependencies가 list 아닐 때도 crash 없음
+    assert _parse_pyproject_toml('[project]\nname="d"\ndependencies = 42\n') == set()
+
+
+def test_uv_sync_frozen_uses_no_install_project(tmp_path: Path) -> None:
+    # P2-2: uv sync가 source COPY 전 실행 → 프로젝트 자체 설치 회피
+    _write(tmp_path / "pyproject.toml", '[project]\nname="d"\ndependencies=[]\n')
+    _write(tmp_path / "uv.lock", "version = 1\n")
+    cmd, status = _resolve_uv_sync_cmd(tmp_path)
+    assert "--no-install-project" in cmd
+    assert "--frozen" in cmd
+
+
+def test_uv_sync_non_frozen_uses_no_install_project(tmp_path: Path) -> None:
+    _write(tmp_path / "pyproject.toml", '[project]\nname="d"\ndependencies=[]\n')
+    cmd, status = _resolve_uv_sync_cmd(tmp_path)
+    assert "--no-install-project" in cmd
+
+
+def test_dockerfile_context_uses_inputs_port(tmp_path: Path) -> None:
+    # P1-1: dockerfile_context CMD가 inputs.port 반영
+    _make_pyproject(
+        tmp_path,
+        '[project]\nname="d"\ndependencies=["fastapi>=0.1", "uvicorn>=0.20"]\n',
+    )
+    _write(tmp_path / "main.py", "app = object()\n")
+    _write(tmp_path / "uv.lock", "version = 1\n")
+    module = PythonStackModule()
+    detect = module.detect(tmp_path)
+    inputs = _make_user_inputs(port=9000)
+    plan = module.build_plan(detect, inputs=inputs)
+    ctx = module.dockerfile_context(
+        build_plan=plan, detect_result=detect, inputs=inputs, project_dir=tmp_path
+    )
+    assert "9000" in ctx["entrypoint_cmd"]
+
+
+def test_dockerfile_context_honors_entrypoint_override(tmp_path: Path) -> None:
+    # P1-2: detect_result.entrypoint(override 반영)가 CMD 생성에 우선 사용됨
+    import dataclasses
+
+    _make_pyproject(
+        tmp_path,
+        '[project]\nname="d"\ndependencies=["fastapi>=0.1", "uvicorn>=0.20"]\n',
+    )
+    # main.py/app.py 없음 → 자동 추론 실패. override로 보강.
+    _write(tmp_path / "uv.lock", "version = 1\n")
+    module = PythonStackModule()
+    detect = module.detect(tmp_path)
+    detect = dataclasses.replace(detect, entrypoint="custom.mod:application")
+    inputs = _make_user_inputs()
+    plan = module.build_plan(detect, inputs=inputs)
+    ctx = module.dockerfile_context(
+        build_plan=plan, detect_result=detect, inputs=inputs, project_dir=tmp_path
+    )
+    assert ctx["entrypoint_cmd"] == [
+        "uvicorn", "custom.mod:application", "--host", "0.0.0.0", "--port", "8000"
+    ]
+    assert ctx["entrypoint_gap"] is None

@@ -59,7 +59,7 @@ def test_python_project_e2e_generates_dockerfile_and_manifests(tmp_path: Path) -
     assert "ghcr.io/astral-sh/uv:python3.12-bookworm-slim" in dockerfile
     assert "python:3.12-slim" in dockerfile
     assert "USER 10001:10001" in dockerfile
-    assert "uv sync --frozen --no-dev" in dockerfile
+    assert "uv sync --frozen --no-install-project --no-dev" in dockerfile  # P2-2
     assert "uvicorn" in dockerfile  # C1: framework + uvicorn + main:app → CMD
 
     deployment = next(p for p in all_files if p.name == "deployment.yaml").read_text()
@@ -90,3 +90,34 @@ def test_python_generic_e2e_no_cmd_gap_comment(tmp_path: Path) -> None:
     dockerfile = next(p for p in all_files if p.name == "Dockerfile").read_text()
     assert "entrypoint gap" in dockerfile
     assert "\nCMD " not in dockerfile
+
+
+def test_python_entrypoint_override_e2e(tmp_path: Path) -> None:
+    # P1-2: 자동 추론 실패(main.py/app.py 없음) + config entrypoint override → CMD 생성
+    project_dir = tmp_path / "project"
+    output_dir = tmp_path / "k8s-output"
+    _write(
+        project_dir / "pyproject.toml",
+        '[project]\nname="d"\nrequires-python=">=3.11"\n'
+        'dependencies=["fastapi>=0.100", "uvicorn>=0.20"]\n',
+    )
+    _write(project_dir / "uv.lock", "version = 1\n")
+    _write(
+        project_dir / ".devflow-k8s-deploy.yml",
+        "app:\n  name: d\n  port: 9000\n  exposure: ClusterIP\n"
+        "  resource_hint: small\n"
+        "stack:\n  python:\n    entrypoint: custom.mod:application\n"
+        "build:\n  engine: skip\n",
+    )
+
+    exit_code = main(
+        ["--project-dir", str(project_dir), "--output-dir", str(output_dir)]
+    )
+    assert exit_code in (0, 2)
+
+    all_files = [p for p in output_dir.rglob("*") if p.is_file()]
+    dockerfile = next(p for p in all_files if p.name == "Dockerfile").read_text()
+    # override entrypoint + user port 9000이 CMD에 반영
+    assert "custom.mod:application" in dockerfile
+    assert "9000" in dockerfile
+    assert "--no-install-project" in dockerfile  # P2-2
