@@ -93,3 +93,6 @@
 [2026-04-28T00:30:00Z] Phase 9 R2 — agent-council(codex 단독 deep timeout 600s): P1 Strangler 폴백 위반(_detect_stack try/except 누락) + P2 entrypoint 검증 이원화. P1 반영 commit ffa5c0c, 810 → 811 passing(+1). P2 → BL-019(#31) 분리. 원문 보존: ~/projects/docs/reviews/2026-04-28-bl001-go-phase9-final-round2-feat-go-stack-support-codex.md
 [2026-04-28T00:35:00Z] CONSTRUCTION 완료 — PR 분할 머지 stacked: PR #29(Phase 1-5 refactor) + PR #30(Phase 6-9 R2 feat). devflow-state: complete + Finishing Choice B(PR pending)
 [2026-04-28T14:11:33Z] PR #29 + #30 둘 다 MERGED on origin (main: 208d774 → e1e4c60). devflow finishing 진행
+[2026-06-05T04:07:12Z] Session resumed at inception-complete-checkpoint — commit: 45b0a72
+[2026-06-05T04:07:12Z] Phase transition: INCEPTION → CONSTRUCTION — commit: 45b0a72
+[2026-06-05T06:20:10Z] Flow finished — BL-006 PR #40 merged. state/session-summary archived.

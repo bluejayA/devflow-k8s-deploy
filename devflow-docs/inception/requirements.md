@@ -1,108 +1,173 @@
 # Requirements Analysis
 
 **Depth**: Standard
-**Timestamp**: 2026-05-12T18:00:00+09:00
-**Ticket**: BL-017 ([#27](https://github.com/bluejayA/devflow-k8s-deploy/issues/27))
-**Predecessor**: BL-001 (#8 — Go 스택 최소 스코프, 머지 완료)
+**Timestamp**: 2026-05-13T23:30:00Z
+**Ticket**: BL-006 ([#9](https://github.com/bluejayA/devflow-k8s-deploy/issues/9))
+**Predecessor Patterns**: BL-001 (Go 스택 최소 스코프, #29/#30) + BL-017 (Go gin/echo/fiber framework 자동 감지, #39)
 **Sibling Pattern**: BL-014 (#7 — JVM Ktor/Micronaut probe 자동 감지, 동일 카테고리)
 
 ## User Intent
 
-BL-001(Go 스택 지원)은 최소 스코프로 `net/http` 표준 패턴 + 사용자 override만 지원했다. **gin/echo/fiber 3대 Go HTTP 프레임워크의 의존성을 build metadata로 자동 감지**하여, framework별 관용 헬스 경로(`/health`)를 `GoStackModule.probe_plan()` 기본값으로 반환하도록 확장한다. 감지 실패 시 BL-001의 기본값(`net/http` + `/healthz`)으로 안전 폴백한다. 이 작업은 BL-014(JVM Ktor/Micronaut probe)와 동일한 "framework 감지 헬퍼 → probe_plan 분기" 패턴을 Go 쪽에 미러링하는 것이며, BL-006(Python 스택) 시 동일 패턴 재활용 목적도 겸한다.
+devflow-k8s-deploy는 v0.5.0 시점에 **JVM + Go 듀얼 스택**을 지원한다. BL-006은 **Python 스택을 3번째 1급 스택으로 추가**하여 django/flask/fastapi 3대 Python 웹 프레임워크를 build metadata로 자동 감지하고, framework별 production-grade Dockerfile + 매니페스트를 zero-config로 생성한다. BL-001(Go 최소 스코프) + BL-017(Go 프레임워크 감지)에서 확립된 **StackModule Protocol + "Direct dependency wins" + version-agnostic + 단일 probe path** 패턴을 Python 생태계에 미러링한다.
 
-**스코프 제한 (사용자 확정):**
-- **감지 소스는 build metadata 한정** — `go.mod`의 `require` 블록(direct dependency)을 1순위 evidence로 사용. direct에서 미발견 시 `go.sum`을 약한 evidence로 폴백. **`*.go` 소스 import 라인 스캔은 하지 않음** (비용/symlink 보안/감지는 deployment hint에 불과).
-- **"Direct dependency wins" 정책** (OQ-1 확정) — direct 단일 매치 → 해당 framework 채택 / direct 복수 매치 → 고정 순서 억지 선택 금지, `go-generic` 폴백 + rationale 기록 / direct 없음 + sum 단일 매치 → 약한 evidence로 해당 framework 채택 / direct 없음 + sum 복수 매치 → `go-generic` 폴백. **설명 가능성**(developer가 명시 선언한 의존성 우선) 핵심 가치.
-- **3개 프레임워크 모두 `/health` 통일 (version-agnostic)** — gin/echo/fiber 일관성. echo/v2~v4, fiber/v1~v3 모두 동일 정책. 메이저 버전 분기는 BL-017 범위 밖 (OQ-2 확정). `/livez` `/readyz` 등 k8s 관용 경로는 기존 `.devflow-k8s-deploy.yml::stack.go.probe.path` override(BL-001 F-19)로 처리.
-- **포트 자동화 없음** — framework별 기본 포트(gin=8080, echo=1323, fiber=3000) 자동 설정은 BL-017 범위 밖. 기존 port 결정 경로(detect_result.port → inputs.port) 그대로 유지.
+### 스코프 제한 (사용자 확정 — Q1/Q2 응답 + OQ default 안 승인)
+
+- **감지 소스는 build metadata 한정** — `pyproject.toml`의 `[project.dependencies]`(PEP 621) + `[tool.poetry.dependencies]`(Poetry) + `requirements.txt` 모두 **direct evidence**로 간주. `*.py` 소스 import 라인 스캔은 하지 않음 (BL-017 정책 일관).
+- **"Direct dependency wins" 정책** (BL-017 미러링) — direct 단일 매치 → 해당 framework 채택 / direct 복수 매치 → `python-generic` 폴백 + rationale 기록 / direct 없음 → `python-generic` 폴백.
+- **3개 프레임워크 모두 `/health` 통일 (version-agnostic)** — django/flask/fastapi 일관성. probe path override는 `.devflow-k8s-deploy.yml::stack.python.probe.path`(BL-001 패턴).
+- **Dockerfile은 multi-stage uv 단일 정책** — uv 의존을 명시적 정책으로 수용. builder=`uv sync`(lockfile 분기), runner=`/app/.venv` + 앱 소스만 복사. pip 기반 conservative 모드는 backlog.
+- **서버 CMD는 framework별 분기 + dependency-conservative** — 추론 서버 패키지(gunicorn/uvicorn)가 매니페스트에 **없으면 자동 install 금지** (gap 기록 + entrypoint override 안내). 컨테이너 내 multi-worker는 채택하지 않고 k8s replica로 수평 확장.
+- **포트 자동화 없음** — framework별 기본 포트 임의 설정 안 함. 기존 port 결정 경로(`StackDetectResult.port` → `inputs.port`) 그대로 유지. CMD 내 포트는 `${PORT:-8000}` env-var 패턴.
 
 ## Functional Requirements
 
-### Framework 감지 (build metadata 기반)
+### Stack 등록 (StackModule Protocol 확장)
 
 | ID | 요구사항 |
 |----|---------|
-| F-01 | `scripts/stacks/go.py`에 `_detect_go_framework(project_dir: Path) -> str` 모듈 레벨 헬퍼 추가 — 반환값: `"gin"`, `"echo"`, `"fiber"`, `"go-generic"` 중 하나 (literal string) |
-| F-02 | **"Direct dependency wins"** 감지 알고리즘:<br>1. `go.mod`의 `require` 블록을 파싱하여 direct dependency 집합 구성. `require ( ... )` 블록 또는 단일 라인 `require <module> <ver>` 형식 모두 지원. **`// indirect` 마커가 있는 라인은 transitive 의존성이므로 direct 집합에서 제외** (Codex P2-1 회귀 가드).<br>2. direct 집합에 gin/echo/fiber 정규식이 매칭되는 framework가 **정확히 1개** → 해당 framework 채택<br>3. direct 집합에 매칭이 **2개 이상** → `"go-generic"` + rationale `"ambiguous: gin+echo direct deps"` 기록 (manifest 주석/로그 활용, 본 작업은 string 반환만)<br>4. direct 집합에 매칭이 **0개** → `go.sum` 라인 정규식 매칭으로 폴백. sum에서도 정확히 1개 매칭 → 해당 framework 채택 (약한 evidence). 2개 이상 또는 0개 → `"go-generic"`<br>5. **`*.go` import 라인 스캔 안 함** |
-| F-03 | 정규식 (`re.compile` 모듈 상수, non-capturing version suffix + path boundary negative lookahead):<br>• `_GIN_RE = re.compile(r"\bgithub\.com/gin-gonic/gin(?:/v\d+)?(?![\w/-])")`<br>• `_ECHO_RE = re.compile(r"\bgithub\.com/labstack/echo(?:/v\d+)?(?![\w/-])")` (v3/v4 등 모든 메이저)<br>• `_FIBER_RE = re.compile(r"\bgithub\.com/gofiber/fiber(?:/v\d+)?(?![\w/-])")` (v2/v3 등 모든 메이저)<br>경계(`\b`) + non-capturing group + 후행 `(?![\w/-])` negative lookahead로 framework 본체만 정확히 식별. 후행 lookahead가 없으면 `echo-contrib`/`gin-extras`(hyphen 연결), `echo/middleware`(sub-path) 등이 false-match (Codex P2-2 회귀 가드). 메이저 버전 capture 안 함 — OQ-2 결정에 따라 |
-| F-04 | 파일 I/O: `go.mod` 또는 `go.sum` 읽기 실패(없음/권한 오류/UnicodeDecodeError) 시 **에러 raise 금지** — 해당 소스를 빈 문자열로 간주하고 다음 우선순위로 진행. 감지는 hint(NFR-3) |
-| F-05 | `GoStackModule.detect(project_dir)` 내부에서 `_detect_go_framework` 호출 후 `StackDetectResult.framework` 필드에 결과 기록 — 기존 `framework="go-generic"` 하드코딩 제거 |
-| F-06 | symlink escape 방어: `_detect_go_framework`가 `go.mod`/`go.sum` 경로를 읽기 전에 BL-001에서 사용한 `is_within(project_dir, target)` 가드 적용. 가드 실패 시 해당 파일은 미존재로 간주 |
-| F-06a | `go.mod` `require` 블록 파서: 단순 텍스트 파싱(라인 단위), `//` 주석 제거, `(...)` 블록 안의 라인을 module path로 추출. `// indirect` 마커가 있는 라인은 direct 집합에서 제외(F-02 정합). **go 컴파일러 호출 안 함** (NFR-1, NFR-6 A-06 일관). 파싱 실패 라인은 skip (에러 raise 금지) |
+| F-01 | `scripts/stacks/python.py` 신규 모듈 추가. `PythonStackModule` 클래스가 `scripts/stacks/base.py::StackModule` Protocol을 구현 (`detect`, `build_plan`, `probe_plan`, `dockerfile_template_path`, `dockerfile_build_context` 메서드 — BL-015 + BL-001 패턴) |
+| F-02 | `scripts/config_loader.py`의 `_SUPPORTED_STACKS = frozenset({"auto", "jvm", "go"})`에 `"python"` 추가. stack_decision 로직 분기 확장 |
+| F-03 | `scripts/pipeline/orchestrator.py`의 `stack_registry` DI에 `"python": PythonStackModule()` 등록 |
+| F-04 | `scripts/project_analyzer.py`의 auto-detect 분기에 Python 매니페스트(`pyproject.toml` / `requirements.txt`) 발견 시 `python` 스택 결정 추가. JVM(`build.gradle*` `pom.xml`)/Go(`go.mod`)와의 우선순위는 **명시 stack 지정 > 매니페스트 발견 순서 > 폴백 generic** 기존 정책 그대로 |
 
-### probe_plan() framework별 분기
+### Framework 감지 (build metadata 기반 — BL-017 미러링)
 
 | ID | 요구사항 |
 |----|---------|
-| F-07 | `GoStackModule.probe_plan(detect_result)` 확장 — `detect_result.framework`로 분기: <br>• `"gin"`/`"echo"`/`"fiber"` → `ProbeSpec(kind="http", path="/health", port=port)` <br>• `"go-generic"`(또는 기타) → `ProbeSpec(kind="http", path="/healthz", port=port)` (BL-001 기본값 유지) |
-| F-08 | port 결정 경로 변경 없음: `detect_result.port or inputs.port` 그대로. framework별 기본 포트 자동화는 본 작업 범위 밖 |
-| F-09 | 사용자 override(`stack.go.probe.path`) 우선순위 변경 없음: ConfigLoader 파싱 → Analyzer `_apply_probe_overrides`로 ProbeConfig.path 치환 → probe_plan 반환값보다 우선 (BL-001 F-19 정책 유지) |
+| F-05 | `scripts/stacks/python.py`에 `_detect_python_framework(project_dir: Path) -> str` 모듈 레벨 헬퍼 추가. 반환값: `"django"`, `"flask"`, `"fastapi"`, `"python-generic"` 중 하나 (literal string) |
+| F-06 | **"Direct dependency wins"** 4단계 감지 알고리즘:<br>1. `pyproject.toml`을 파싱 — `[project.dependencies]`(PEP 621 list) + `[project.optional-dependencies.*]` + `[tool.poetry.dependencies]`(Poetry table) 모두 direct로 union<br>2. **root `requirements.txt`만** 추가 union (라인 단위 `package[extras]==ver`/`package>=ver` 형태). **F-06-1 스코프 제한 적용**<br>3. **1**, **2**에서 모은 direct 집합에 framework 정규식이 정확히 1개 매칭 → 해당 framework 채택<br>4. 2개 이상 매칭 → `"python-generic"` + rationale `"ambiguous: django+flask direct deps"` 기록 (manifest 주석/로그). 0개 매칭 → `"python-generic"`<br>5. **`*.py` import 라인 스캔 안 함** |
+| **F-06-1** | **requirements 파일 스코프 제한** (사용자 보정 2026-05-13 — guardrail #1):<br>인식 대상은 다음으로 한정:<br>• `pyproject.toml::[project.dependencies]` (PEP 621)<br>• `pyproject.toml::[project.optional-dependencies.*]`<br>• `pyproject.toml::[tool.poetry.dependencies]` (Poetry)<br>• **root `requirements.txt`만**<br>**범위 밖** (본 작업에서 스캔 금지 — 추후 명시 config 옵션 도입은 후속 backlog):<br>• `requirements-dev.txt`, `requirements-prod.txt`, `requirements-test.txt` 등 suffix 변형<br>• `requirements/base.txt`, `requirements/*.txt` 디렉토리 구조<br>• `constraints.txt` (constraint file)<br>• `requirements.txt` 내부 `-r other.txt` / `-c constraints.txt` 참조 (1-depth 포함 X — 모두 무시)<br>• `Pipfile`, `setup.py` install_requires, Hatch metadata, PDM 등 (A-3 명시)<br>이 정책은 매니페스트 fan-out으로 인한 정책 번짐(`requirements-dev.txt`까지 따라가야 하나? `requirements/*.txt` 어디까지?)을 차단하기 위함. 누락된 framework가 dev/prod 변형 파일에만 있는 경우 → `python-generic` 폴백 + 사용자 override 안내 (NFR-6 rationale 주석에 명시) |
+| F-07 | 정규식 (`re.compile` 모듈 상수, **BL-017 패턴 적용** — 패키지명 boundary + extras 허용):<br>• `_DJANGO_RE = re.compile(r"(?im)^\s*[Dd]jango(?:\[[^\]]+\])?(?:\s*[<>=!~]|$)")`<br>• `_FLASK_RE = re.compile(r"(?im)^\s*[Ff]lask(?:\[[^\]]+\])?(?:\s*[<>=!~]|$)")`<br>• `_FASTAPI_RE = re.compile(r"(?im)^\s*[Ff]astapi(?:\[[^\]]+\])?(?:\s*[<>=!~]|$)")`<br>패키지명 case-insensitive(PEP 503 normalize) + extras(`[standard]` 등) 허용 + version constraint 또는 라인 끝 검증. **하이픈/언더스코어 변형은 PEP 503 normalize 적용**(`flask-restful` 등 sub-package false-match 차단). 메이저 버전 capture 안 함 (version-agnostic) |
+| F-08 | 파일 I/O: `pyproject.toml`/`requirements.txt` 읽기 실패(없음/권한 오류/UnicodeDecodeError/TOML 파싱 오류) 시 **에러 raise 금지** — 해당 소스를 빈 매핑으로 간주하고 다음 우선순위로 진행. 감지는 hint (NFR-3) |
+| F-09 | `PythonStackModule.detect(project_dir)` 내부에서 `_detect_python_framework` 호출 후 `StackDetectResult.framework` 필드에 결과 기록 |
+| F-10 | symlink escape 방어: `_detect_python_framework`가 매니페스트 경로를 읽기 전에 BL-001/017 `is_within(project_dir, target)` 가드 적용. 가드 실패 시 해당 파일은 미존재로 간주 |
 
-### 기존 시스템과의 통합 (변경 최소화)
-
-| ID | 요구사항 |
-|----|---------|
-| F-10 | `StackModule` Protocol(`scripts/stacks/base.py`) 변경 없음 — `probe_plan` 시그니처 유지 |
-| F-11 | `StackDetectResult.framework` 필드 변경 없음 — 기존 string 타입에 새 enum 값(`"gin"`, `"echo"`, `"fiber"`) 추가만. dataclass 확장 불필요 |
-| F-12 | `ProjectAnalyzer` 변경 없음 — framework 결정은 StackModule 내부 책임 |
-| F-13 | `text_safety` 위임(BL-019) 일관성 유지 — `probe.path` config override 검증 경로 그대로. 본 작업은 검증 로직 추가/변경 없음 |
-
-### 관찰성 / 디버깅
+### Python 버전 결정
 
 | ID | 요구사항 |
 |----|---------|
-| F-14 | `AnalysisResult` 로깅(또는 rationale 주석) 시 `framework` 값이 노출되도록 기존 경로 그대로 사용. BL-021(manifest rationale stack-aware)이 framework까지 자연스럽게 표시할지 별도 검증은 본 작업 회귀 테스트 1건으로 확인 (변경 없으면 통과) |
+| F-11 | `pyproject.toml::requires-python` 값(예: `">=3.11,<4"`) 파싱 → SemVer-like 하한(major.minor) 추출. 부재 시 `3.11` default. 결과는 `StackDetectResult.runtime_version`(또는 동등 필드)에 기록되어 Dockerfile 템플릿 `python:{version}-slim` 베이스 이미지 태그로 전달 |
+| F-12 | `requires-python` 파싱 실패(빈 문자열/형식 오류) 시 default `3.11` + rationale 경고 기록. 메이저 버전이 `2`로 추론되면 `python-generic` + 에러 (Python 2는 지원 안 함 — explicit guard) |
+
+### Dockerfile 생성 (multi-stage uv)
+
+| ID | 요구사항 |
+|----|---------|
+| F-13 | `templates/dockerfile/python.tmpl` 신규 추가. Jinja2 템플릿, multi-stage 구조:<br>• **stage 1 (builder)**: `ghcr.io/astral-sh/uv:python{{ python_version }}-bookworm-slim` 또는 동등 base. `uv sync` 실행 (아래 F-14 분기). 작업 디렉토리 `/app`<br>• **stage 2 (runner)**: `python:{{ python_version }}-slim` base. 비-root user(`appuser` uid=10001 — BL-001 패턴), `/app/.venv` + 앱 소스 `COPY --chown` 복사. `ENV PATH="/app/.venv/bin:$PATH"`. `EXPOSE {{ port }}`. `CMD {{ entrypoint_cmd }}` |
+| F-14 | builder의 `uv sync` 명령 분기 (입력에 따라 템플릿 변수 `uv_sync_cmd` 또는 조건부 블록):<br>• `uv.lock` 존재 → `uv sync --frozen --no-dev`<br>• `pyproject.toml` 존재 + `uv.lock` 부재 → `uv sync --no-dev` (non-frozen) + Dockerfile rationale 주석에 `# WARNING: no uv.lock — reproducibility weakened` 삽입<br>• `requirements.txt` only (pyproject 부재) → `uv venv .venv && uv pip install --python /app/.venv -r requirements.txt` |
+| F-15 | runner stage의 최종 이미지에 **uv/build deps 포함 금지**. `/app/.venv` + 앱 소스 + `python:slim` runtime만. 이미지 크기 검증은 NFR-4 위임 |
+| F-16 | 보안 디폴트 (BL-001/017 + 기존 K8s 검증과 일치):<br>• `USER 10001:10001` 비-root<br>• `apt-get clean && rm -rf /var/lib/apt/lists/*` (apt 사용 시)<br>• `PYTHONUNBUFFERED=1`, `PYTHONDONTWRITEBYTECODE=1` env-var 명시<br>• `ENTRYPOINT` 사용 시 exec form(`["...", "..."]`) — shell form 금지 |
+| F-17 | `PythonStackModule.dockerfile_template_path()` → `"templates/dockerfile/python.tmpl"` 반환. `dockerfile_build_context()` → `{python_version, uv_sync_cmd, lockfile_status, entrypoint_cmd, port, ...}` Jinja2 컨텍스트 매핑 |
+
+### Probe path 정책 (BL-017 미러링)
+
+| ID | 요구사항 |
+|----|---------|
+| F-18 | `_HEALTH_FRAMEWORKS = frozenset({"django", "flask", "fastapi"})` 모듈 상수. `PythonStackModule.probe_plan(stack_detect_result)` 내부에서 `framework in _HEALTH_FRAMEWORKS` → probe path `/health` 반환 / 외 → BL-001 generic 폴백 (`/healthz`) |
+| F-19 | `.devflow-k8s-deploy.yml::stack.python.probe.path` override 지원. 기존 `text_safety::validate_probe_path` 정책 그대로 위임 (BL-019) |
+
+### 서버 entrypoint 자동 생성 (framework별 분기 + dependency-conservative)
+
+| ID | 요구사항 |
+|----|---------|
+| F-20 | `_detect_server_command(framework, project_dir, direct_deps) -> ServerCmdResult` 헬퍼. `ServerCmdResult`는 `(cmd: list[str] \| None, requires_pkg: str \| None, gap_reason: str \| None)` 형태 dataclass |
+| **F-20-1** | **CMD 생성 3조건 정책** (사용자 보정 2026-05-13 — guardrail #2). `_detect_server_command`는 다음 **3조건이 모두 충족될 때에만** framework별 default CMD를 반환한다:<br>1. **정확히 1개의 supported framework가 감지되었음** (F-06 결과가 `django`/`flask`/`fastapi` 중 하나, `python-generic` 아님)<br>2. **추론 서버 패키지가 direct dependencies(F-06 union 집합)에 존재** (django→`gunicorn` / flask→`gunicorn` / fastapi→`uvicorn`)<br>3. **app entrypoint(`<module>:<app_var>`)가 휴리스틱으로 추론됨** (F-23 알고리즘 — application-design에서 정밀화)<br>한 조건이라도 실패 → 다음 모두 적용:<br>• `cmd=None` 반환 (`python-generic` 동등 거동으로 폴백)<br>• `gap_reason`에 실패 조건과 권고 액션 기록 (예: `"missing inferred server package: gunicorn. Add to dependencies or set stack.python.entrypoint."`)<br>• 매니페스트 rationale 주석에 gap 명시 (NFR-6 일관)<br>• `.devflow-k8s-deploy.yml::stack.python.entrypoint` override 가이드 안내<br>이 정책은 복수 프레임워크 감지·서버 패키지 누락·entrypoint 추론 실패를 **단일 원칙**으로 통합한다 (이전 F-22 + F-23 + F-24를 본 항목으로 흡수). |
+| F-21 | framework별 default CMD (3조건 모두 통과 시. exec form list):<br>• **django** → `["gunicorn", "<project>.wsgi:application", "--bind", "0.0.0.0:8000"]`<br>• **flask** → `["gunicorn", "<module>:app", "--bind", "0.0.0.0:8000"]`<br>• **fastapi** → `["uvicorn", "<module>:app", "--host", "0.0.0.0", "--port", "8000"]`<br>• **python-generic** → `cmd=None`, `gap_reason="generic Python stack — entrypoint override required"` |
+| F-22 | **dependency-conservative 정책** (사용자 codex 권장 직접 인용):<br>• 추론 서버 패키지(django→gunicorn / flask→gunicorn / fastapi→uvicorn)가 매니페스트(F-06 union 집합)에 있으면 → F-20-1 조건 2 통과<br>• 없으면 → 조건 2 실패 → cmd=None (자동 install **금지** — F-22-1) |
+| F-22-1 | 자동 install 금지 정책 (default). 미래 `auto_install_server=true` opt-in 옵션은 backlog (Sub-OQ SD-2 → 별도 BL) |
+| F-23 | entrypoint module/app 추론 = F-20-1 조건 3 (best-effort heuristic, application-design 단계에서 알고리즘 확정 — SD-1):<br>• django: `manage.py` 인접 폴더 중 `wsgi.py`를 포함한 첫 폴더명 → `<folder>.wsgi:application`<br>• flask/fastapi: `main.py` → `main:app` / `app.py` → `app:app` 우선순위 휴리스틱<br>• 감지 실패 → 조건 3 실패 → cmd=None |
+| F-24 | F-20-1 모든 폴백 분기에서 `text_safety::validate_entrypoint`(BL-019) 정책 그대로 위임. shell-meta 차단 일관 |
+
+### Config / 매니페스트 통합
+
+| ID | 요구사항 |
+|----|---------|
+| F-25 | `.devflow-k8s-deploy.yml` 스키마 확장: `stack.python.{probe.path, entrypoint, python_version}` override 키. JSON Schema 갱신 (있을 경우) |
+| F-26 | 매니페스트 5종(deployment/service/serviceaccount/statefulset/networkpolicy) 모두 BL-018 Jinja2 단일 렌더 경로 + BL-021 stack-aware rationale 주석 적용. python stack 시 주석에 `# stack: python ({framework})` 추가 |
+| F-27 | `skills/devflow-k8s-deploy/SKILL.md` description 업데이트 — "JVM + Go" → "**JVM + Go + Python**" (BL-020 패턴 미러링) |
+
+### Validation 통합 (BL-019 위임)
+
+| ID | 요구사항 |
+|----|---------|
+| F-28 | `text_safety::validate_entrypoint`가 python 스택 CMD(uvicorn/gunicorn args 포함)를 통과시키는지 회귀 가드. shell-meta(`;`, `&`, `\``, `$()`, `|`)는 기존대로 거부 |
+| F-29 | `text_safety::validate_probe_path`는 stack에 무관하게 동작 — 변경 불필요. 신규 테스트만 추가 |
 
 ## Non-Functional Requirements
 
-| ID | 요구사항 | 측정 가능 기준 |
-|----|---------|---------------|
-| NFR-1 | **성능** — 감지 추가 비용 미미 | `_detect_go_framework` 단일 호출 ≤ 5ms (1000줄 미만 go.sum 기준). 측정 강제 안 함 |
-| NFR-2 | **ReDoS 방어** | 모든 정규식은 catastrophic backtracking 패턴 회피 (`\b...\b` 고정 어절 매칭, 임의 wildcards 금지) |
-| NFR-3 | **신뢰성 — 감지는 deployment hint** | 감지 실패(파일 없음/파싱 오류)가 빌드 파이프라인 실패를 유발하지 않음. 항상 안전한 fallback (`"go-generic"` + `/healthz`)으로 작동 |
-| NFR-4 | **JVM 회귀 0** | BL-001 Phase 1의 JVM manifest 4종 골든 스냅샷 byte-identical 유지 (Go 변경이 JVM 출력에 영향 없음을 보장) |
-| NFR-5 | **Go-generic 회귀 0** | BL-001 net/http 케이스(go.sum 없거나 framework 미감지) 동작 byte-identical 유지 — 기존 E2E 통과 |
-| NFR-6 | **테스트 가드** | 신규 단위 테스트 ≥ 13건 (실측 31건):<br>• `_detect_go_framework` direct 단일 매치: gin/echo/fiber 각 1건 (3건)<br>• direct 복수 매치 → `go-generic` 폴백 1건<br>• direct 없음 + sum 단일 매치 → 약한 evidence 채택 1건<br>• direct 없음 + sum 복수 매치 → `go-generic` 폴백 1건<br>• 파일 없음 (go.mod/go.sum 모두) → `go-generic` 1건<br>• symlink escape 가드 1건<br>• 메이저 버전 호환: `echo/v4`, `fiber/v2` 매칭 확인 2건<br>• `probe_plan` 분기 4건 (gin/echo/fiber/generic)<br>• **indirect 마커 처리**: 블록/단일 라인에서 indirect skip + gin direct + echo indirect 회귀 가드 3건 (Codex P2-1)<br>• **prefix 모듈 false-positive 방어**: `echo-contrib`/`gin-extras`/`fiber-utils` regex 비매칭 + sub-path `echo/middleware` 비매칭 + detect-level 회귀 가드 3건 (Codex P2-2) |
-| NFR-7 | **외부 리뷰 게이트** | CONSTRUCTION 완료 후 `/codex:review` 1차 + (필요 시) agent-council 단독 deep. BL-001 선례에 따라. low-priority 작업이므로 council 1라운드면 충분 |
+| ID | 요구사항 |
+|----|---------|
+| NFR-1 | **테스트 커버리지**: BL-017 비례 — 신규 단위 테스트 ≥ 30건 (framework regex, 매니페스트 파서, _detect_python_framework 4단계, requires-python 파싱, server_command 감지, Dockerfile 템플릿 렌더 분기, probe_plan 분기, PythonStackModule.detect 통합) |
+| NFR-2 | **회귀 가드**: 기존 928 tests 그대로 통과. 신규 31+건 추가 → 약 960+ tests 목표 |
+| NFR-3 | **감지 실패 안전 폴백**: 파일 I/O 오류·TOML 파싱 오류·symlink escape·MemoryError(흡수 금지) 모두 `python-generic`으로 안전 폴백, exception leak 없음 |
+| NFR-4 | **이미지 크기 검증**: runner 최종 이미지에 uv 바이너리 / build deps / `~/.cache/uv` 부재 검증 (통합 테스트 또는 manual smoke test) |
+| NFR-5 | **이식성**: `_detect_python_framework`는 `os.path` 아닌 `pathlib.Path` 사용 (BL-017 정책 일관) |
+| NFR-6 | **명시 가능성**: framework 감지 결과·gap·warning을 매니페스트/Dockerfile rationale 주석에 모두 기록 (BL-021 stack-aware 일관) |
+| NFR-7 | **TDD**: RED → GREEN → REFACTOR 사이클 강제 (CLAUDE.md TDD Iron Law) |
 
 ## Technology Stack
 
+(devflow-k8s-deploy 자체 스택 — workspace.md `## Pre-specified Tech Stack`에서 확정, 변경 없음. 본 표는 BL-006으로 *지원 대상*에 추가되는 Python 스택을 별도 명시.)
+
 | 계층 | 선택 | 소스 | 비고 |
 |------|------|------|------|
-| Language | Python 3.11+ | Pre-specified Tech Stack (CLAUDE.md) + Brownfield 감지 | 변경 없음 |
-| Package Manager | uv | CLAUDE.md | 변경 없음 |
-| Test Framework | pytest | Brownfield 감지 | 변경 없음 |
-| Linter | ruff | CLAUDE.md | 변경 없음 |
-| Build Targets | go.sum / go.mod 텍스트 파싱 | F-02 (감지 정책) | 신규 (Python 측에서 텍스트 정규식만, Go 컴파일 의존성 없음) |
-
-→ **사전 지정 (질문 스킵)**.
+| (devflow-k8s-deploy 자체) Language | Python 3.11+ | CLAUDE.md | 변경 없음 |
+| (devflow-k8s-deploy 자체) Package Manager | uv | CLAUDE.md | 변경 없음 |
+| (지원 대상 추가) Python framework 감지 | django / flask / fastapi | BL-006 신규 | 정규식 + Direct dependency wins |
+| (지원 대상 추가) Python 빌드 도구 | uv (multi-stage Dockerfile) | Q1 응답 (사용자 확정) | 명시적 정책. pip 모드는 backlog |
+| (지원 대상 추가) WSGI 서버 | gunicorn (django/flask) | Q2 응답 (codex 권장) | dependency-conservative — 매니페스트에 있을 때만 자동 CMD |
+| (지원 대상 추가) ASGI 서버 | uvicorn (fastapi) | Q2 응답 (codex 권장) | 컨테이너 내 multi-worker 없음, k8s replica로 수평 확장 |
 
 ## Assumptions
 
-- **A-01 (Direct dependency wins)** — 한 프로젝트가 gin/echo/fiber 중 하나를 **명시적 direct dependency**로 사용한다고 가정. 복수 의존성 동시 존재 시: **go.mod direct 단일 매치 → 채택 / direct 복수 또는 sum 복수 → `"go-generic"` 폴백** (F-02 알고리즘). 설명 가능성(developer 명시 선언 우선) 핵심 가치 (OQ-1 확정).
-- **A-02 (Detection is hint, not gate)** — framework 미감지가 빌드 실패를 유발하지 않음. 항상 `"go-generic"` + `/healthz` 안전 폴백.
-- **A-03 (Net/http baseline 불변)** — BL-001의 `/healthz` 기본값은 BL-017에서 변경하지 않음. framework 감지 성공 시에만 `/health`로 전환.
-- **A-04 (Config override 최우선)** — `.devflow-k8s-deploy.yml::stack.go.probe.path`는 framework 감지보다 우선. 기존 ConfigLoader → Analyzer `_apply_probe_overrides` 경로(BL-001 F-19) 그대로.
-- **A-05 (Port 자동화 없음)** — framework별 기본 포트(gin=8080, echo=1323, fiber=3000) 자동 설정은 본 작업 범위 밖. 기존 port 결정 경로 유지.
-- **A-06 (Test stub 우선)** — 테스트는 임시 디렉토리에 go.sum/go.mod 텍스트 파일을 생성하는 fixture로 작성 (real `go` 바이너리 의존성 없음).
-- **A-07 (Version-agnostic policy)** — echo/fiber 모든 지원 메이저 버전(echo/v2~v4, fiber/v1~v3)에 동일한 기본 probe path 적용. 메이저 버전별 분기는 BL-017 범위 밖, 필요해질 때 별도 backlog 신설 (OQ-2 확정).
+- A-1: `uv` 바이너리는 빌드 환경(builder stage)에서 항상 사용 가능 (공식 `ghcr.io/astral-sh/uv` 이미지 또는 동등 base).
+- A-2: Python 3.11이 default 버전 — devflow-k8s-deploy 자체 최소 버전과 일치, 보안 패치 LTS 범위.
+- A-3: `pyproject.toml` 외 매니페스트 (Pipfile, setup.py, Hatch metadata-version, PDM PEP 582) 는 **본 작업 범위 밖**. 사용자가 명시 지원 요청 시 별도 backlog로 분리.
+- A-4: Python 2.x 명시 지원 안 함 — F-12 explicit guard.
+- A-5: WSGI/ASGI 외 서버 (예: hypercorn, daphne) 자동 선택 안 함. fastapi=uvicorn 단일 정책. 사용자 요청 시 entrypoint override로 처리.
+- A-6: pip-tools (`requirements.in` → `requirements.txt` 컴파일) 워크플로우는 결과물(`requirements.txt`) 기준으로만 인식.
 
 ## Open Questions
 
-_(없음 — 모든 미해결 항목이 사용자 결정으로 해소됨)_
+(없음 — Q1/Q2 사용자 응답 + OQ #1/#2/#4 default 안 승인으로 모두 확정)
 
-### Resolved Questions (이력)
+## Sub-OQ (Detail Design로 이관)
 
-- **OQ-1 (복수 프레임워크 동시 감지 시 동작) — RESOLVED 2026-05-12**
-  - 결정: **"Direct dependency wins"** — go.mod `require` 블록을 1순위 evidence, go.sum을 약한 evidence 폴백. direct 또는 sum 복수 매치 시 `"go-generic"` 폴백 (고정 순서 억지 선택 금지). 설명 가능성(developer 명시 선언 우선) 핵심 가치.
-  - 반영 위치: F-02 알고리즘 + A-01 가정 + NFR-6 테스트 가드 (복수 매치 fallback 2건 추가).
+| ID | 항목 | 처리 단계 |
+|----|------|----------|
+| SD-1 | 서버 entrypoint module/app name 추론 알고리즘 정밀화 (django wsgi 폴더 식별, flask/fastapi main vs app 우선순위, 휴리스틱 실패 시 generic 폴백 조건) | application-design |
+| SD-2 | `auto_install_server=true` opt-in 옵션 도입 여부 | 후속 backlog (BL-006 머지 후 별도 ticket) |
 
-- **OQ-2 (Echo/Fiber 메이저 버전 분리) — RESOLVED 2026-05-12**
-  - 결정: **버전 무관 단일 정책 (version-agnostic)** — echo/v2~v4, fiber/v1~v3 모두 `/health`. 메이저 버전 분기는 BL-017 범위 밖, 실제 필요 발생 시 별도 backlog 신설.
-  - 반영 위치: F-03 정규식(`(?:/v\d+)?` non-capturing) + A-07 가정 + NFR-6 테스트 가드 (메이저 버전 호환 매칭 2건).
+## Final Policy Summary
+
+(사용자 최종 요약 — 본 작업의 정책 1-pager. 구현 시 docstring/README/skill description 카피용)
+
+```text
+Python deployment support follows build-metadata-only detection.
+
+Framework detection:
+- Union direct dependencies from PEP 621, Poetry, and root requirements.txt.
+- No source import scanning.
+- Additional requirements files (requirements-dev.txt, requirements/*.txt,
+  constraints.txt, -r/-c references) are out of scope.
+
+Build:
+- Multi-stage uv Dockerfile.
+- Use frozen sync only when lockfile exists; non-frozen with warning otherwise.
+- Copy /app/.venv into the runtime image; no uv or build deps in runtime.
+
+Runtime:
+- Default probe path is /health for django, flask, and fastapi.
+- CMD is generated only when framework, server dependency, and entrypoint
+  are all clear (single framework detected + server pkg in direct deps +
+  entrypoint inferable).
+- Generic Python requires stack.python.entrypoint override.
+- Server dependency is never auto-installed (default; opt-in flag is backlog).
+```
+
+이 요약은 책임 분리를 명시: **감지(direct metadata) → 설치(lockfile 정책) → 실행(dependency-conservative)** 3-layer.
 
 ## Change Log
 
-- 2026-05-12T18:00:00+09:00 INITIAL: BL-017 첫 분석. Standard depth. 핵심 질문 2개(감지 소스 정책 / fiber probe path) 사용자 답변 반영.
-- 2026-05-12T18:30:00+09:00 UPDATE (QUESTIONS): OQ-1 "Direct dependency wins" 정책 확정 → F-02 알고리즘 재정의 + A-01 갱신 + F-06a `go.mod require` 파서 신규 + NFR-6 테스트 13건으로 확장. OQ-2 version-agnostic 단일 정책 확정 → F-03 정규식 non-capturing + A-07 신규.
-- 2026-05-13T20:30:00+09:00 UPDATE (Codex P2 회귀 fix): Codex review에서 두 가지 functional regression 발견 → 명세 정밀화. (1) F-02 step 1 + F-06a: `// indirect` 마커 라인은 direct 집합에서 제외 (transitive는 direct가 아님). 미반영 시 gin direct + echo indirect 일반 구성이 오분류. (2) F-03 정규식: 후행 `(?![\w/-])` negative lookahead 추가. 미반영 시 `echo-contrib`/`gin-extras`/`echo/middleware` 등이 framework로 false-match. NFR-6 테스트 가드 13 → 31건으로 확장.
+- `2026-05-13T23:30:00Z` — INITIAL: Standard depth, Q1(Dockerfile=uv multi-stage)/Q2(서버=framework별 분기 + uvicorn) 사용자 확정, OQ #1/#2/#4 default 안 승인. BL-017 패턴 미러링 명시.
+- `2026-05-13T23:45:00Z` — UPDATE: 사용자 보정 2개 반영. (1) **F-06-1 신규** — requirements 파일 스코프를 root `requirements.txt`로 한정, suffix/디렉토리/constraints/`-r`·`-c` 참조 모두 범위 밖 명시. (2) **F-20-1 신규** — CMD 생성 3조건(framework 1개 + server pkg in direct + entrypoint 추론) 통합 정책 도입, 기존 F-22/F-23/F-24를 본 항목으로 흡수. **Final Policy Summary 섹션 신규** 추가.
