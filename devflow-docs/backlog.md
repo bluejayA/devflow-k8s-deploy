@@ -31,14 +31,14 @@ BL-006 (Python 스택 지원) 완료 — JVM + Go + Python **3-stack** 전환. d
 
 | ID | 제목 | 이슈 | 목표 버전 |
 |----|------|------|---------|
-| **BL-008** | Helm chart 생성 지원 | [#15](https://github.com/bluejayA/devflow-k8s-deploy/issues/15) | v0.4 |
-| **BL-009** | 프리셋/프로파일 (웹 API / 내부 서비스 / 데모) | [#16](https://github.com/bluejayA/devflow-k8s-deploy/issues/16) | v0.4 |
+| **BL-008** | Helm chart 생성 지원 | [#15](https://github.com/bluejayA/devflow-k8s-deploy/issues/15) | v0.6 |
+| **BL-009** | 프리셋/프로파일 (웹 API / 내부 서비스 / 데모) | [#16](https://github.com/bluejayA/devflow-k8s-deploy/issues/16) | v0.6 |
 
 ### 검증 강화
 
 | ID | 제목 | 이슈 | 목표 버전 |
 |----|------|------|---------|
-| **BL-010** | CIS Kubernetes Benchmark 매핑 | [#19](https://github.com/bluejayA/devflow-k8s-deploy/issues/19) | v0.4 |
+| **BL-010** | CIS Kubernetes Benchmark 매핑 | [#19](https://github.com/bluejayA/devflow-k8s-deploy/issues/19) | v0.6 |
 
 ### 문서 / 일관성
 
