@@ -28,6 +28,7 @@ from scripts.stacks.python import (
     _FLASK_RE,
     PythonStackModule,
     ServerCmdResult,
+    _build_default_cmd,
     _detect_python_framework,
     _detect_python_version,
     _detect_server_command,
@@ -767,3 +768,37 @@ def test_dockerfile_context_entrypoint_gap_generic(tmp_path: Path) -> None:
     )
     assert ctx["entrypoint_cmd"] == []
     assert ctx["entrypoint_gap"] is not None
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Phase δ — text_safety 회귀 가드 (F-28/29, BL-019 위임 — text_safety 변경 0)
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+def test_python_probe_path_passes_validation() -> None:
+    from scripts._shared.text_safety import validate_probe_path
+
+    # django/flask/fastapi probe path가 기존 정책 통과
+    validate_probe_path("/health")
+    validate_probe_path("/healthz")
+
+
+def test_python_cmd_args_are_shell_meta_free() -> None:
+    from scripts._shared.text_safety import reject_unsafe_chars
+
+    # C1 생성 CMD args(exec form)에 개행/제어문자 없음 — shell 미경유 + 위생 확인
+    detect = StackDetectResult(
+        port=None, entrypoint="main:app", framework="fastapi", version="3.11"
+    )
+    cmd = _build_default_cmd("fastapi", "main:app")
+    for arg in cmd:
+        reject_unsafe_chars(arg, "python.cmd")
+    assert detect.framework == "fastapi"
+
+
+def test_probe_path_still_rejects_shell_meta() -> None:
+    # 회귀: 기존 shell-meta 차단 정책 유지 (stack 무관)
+    from scripts._shared.text_safety import validate_probe_path
+
+    with pytest.raises(ValueError):
+        validate_probe_path("/health\nmalicious")

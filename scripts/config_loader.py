@@ -25,9 +25,10 @@ BUILTIN_CLUSTER_PRESETS: dict[str, dict[str, object]] = {
 }
 
 # BL-001 Phase 9 (Codex P1): 'go' 추가. mixed repo에서 stack.forced_stack=go 선택 가능.
-_SUPPORTED_STACKS: frozenset[str] = frozenset({"auto", "jvm", "go"})
-# v0.1.0에서 명시하면 UnsupportedStackError를 발생시킬 stack
-_KNOWN_UNSUPPORTED_STACKS: frozenset[str] = frozenset({"python", "react"})
+# BL-006: 'python' 추가 (django/flask/fastapi 자동 감지).
+_SUPPORTED_STACKS: frozenset[str] = frozenset({"auto", "jvm", "go", "python"})
+# 명시하면 UnsupportedStackError를 발생시킬 stack
+_KNOWN_UNSUPPORTED_STACKS: frozenset[str] = frozenset({"react"})
 
 # 조직 설정 기본 경로
 _DEFAULT_ORG_CONFIG_PATH = Path.home() / ".claude" / "devflow-k8s-deploy.yml"

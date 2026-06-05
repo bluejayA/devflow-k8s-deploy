@@ -1,26 +1,26 @@
 ---
 name: devflow-k8s-deploy
 description: |
-  Use when a user requests Dockerfile or Kubernetes manifest generation for a JVM(Kotlin/Java Spring) or Go project.
-  JVM(Kotlin + Java Spring) / Go 백엔드 프로젝트를 분석하여 Dockerfile + k8s manifest를 자동 생성합니다.
+  Use when a user requests Dockerfile or Kubernetes manifest generation for a JVM(Kotlin/Java Spring), Go, or Python project.
+  JVM(Kotlin + Java Spring) / Go / Python(django·flask·fastapi) 백엔드 프로젝트를 분석하여 Dockerfile + k8s manifest를 자동 생성합니다.
   5-STEP 파이프라인: 입력 수집 → 프로젝트 분석 → 파일 생성 → 검증 → 패키징.
   보안 기본값 자동 적용, 한국어 UX, generate-only (cluster 직접 변경 없음).
 
   트리거 예시:
   - "Dockerfile 만들어줘" / "k8s manifest 만들어줘" / "컨테이너화해줘"
-  - "배포 준비해줘" / "k8s에 올려줘" / "JVM 배포 설정해줘" / "Go 배포해줘"
+  - "배포 준비해줘" / "k8s에 올려줘" / "JVM 배포 설정해줘" / "Go 배포해줘" / "Python 배포해줘"
   - "deploy this to cluster" / "k8s manifest" / "containerize this"
 
 metadata:
   version: 0.5.0
   author: Jay
   category: infrastructure
-  stacks: [jvm, go]
+  stacks: [jvm, go, python]
 ---
 
 # devflow-k8s-deploy
 
-JVM(Kotlin + Java Spring) 또는 Go 프로젝트를 Kubernetes 배포용 Dockerfile + manifest로 자동 변환합니다. 시니어 엔지니어 수준의 보안 기본값과 한국어 도움말을 제공합니다.
+JVM(Kotlin + Java Spring), Go, 또는 Python(django·flask·fastapi) 프로젝트를 Kubernetes 배포용 Dockerfile + manifest로 자동 변환합니다. 시니어 엔지니어 수준의 보안 기본값과 한국어 도움말을 제공합니다.
 
 ## 언제 사용하나요? (F-07/F-08 자연어 트리거)
 
@@ -29,10 +29,10 @@ JVM(Kotlin + Java Spring) 또는 Go 프로젝트를 Kubernetes 배포용 Dockerf
 - "Dockerfile 만들어줘", "도커파일 만들어줘"
 - "k8s manifest 만들어줘", "k8s 배포 파일 생성", "manifest 만들어줘"
 - "컨테이너화해줘", "Kubernetes 설정해줘"
-- "배포 준비해줘", "k8s에 올려줘", "JVM 배포 설정해줘", "Go 배포해줘"
+- "배포 준비해줘", "k8s에 올려줘", "JVM 배포 설정해줘", "Go 배포해줘", "Python 배포해줘"
 - "deploy this to cluster", "k8s manifest", "containerize this"
 
-> 현재 JVM(Kotlin + Java Spring Boot)과 Go 스택을 지원합니다. Python / React는 후속 백로그(BL-006, BL-007).
+> 현재 JVM(Kotlin + Java Spring Boot), Go, Python(django·flask·fastapi) 스택을 지원합니다. React는 후속 백로그(BL-007).
 
 ---
 
